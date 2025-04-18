@@ -104,12 +104,11 @@ async def on_ready():
 
 # --- Channel Routing ---
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
-        channel_id = get_channel(guild_id, platform)
-        return bot.get_channel(int(channel_id)) if channel_id else None
-
-@release_check_loop.before_loop
-async def before_release_check():
-    await bot.wait_until_ready()
+    channel_id = get_channel(guild_id, platform)
+    if channel_id:
+        return bot.get_channel(int(channel_id))
+    # Fallback: None (will log a warning in the checker)
+    return None
     
     # Calculate initial delay for xx:xx:01 timing
     now = datetime.datetime.now()
@@ -147,6 +146,7 @@ async def check_for_new_releases():
                     artist['owner_id'],
                     current_date
                 )
+                # Use owner_id as fallback if no guild_id
                 channel = await get_release_channel(
                     guild_id=getattr(artist, 'guild_id', '') or artist['owner_id'],
                     platform=artist['platform']
