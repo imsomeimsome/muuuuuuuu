@@ -211,3 +211,12 @@ def get_soundcloud_release_info(url):
     except Exception as e:
         print(f"SoundCloud Error: {str(e)}")
         return None
+
+def get_artist_name_by_url(url):
+    """Get artist name from any SoundCloud URL (wrapper for compatibility)."""
+    try:
+        artist_id = extract_soundcloud_id(url)
+        return get_artist_info(artist_id)['name']
+    except Exception as e:
+        print(f"Error getting artist name: {str(e)}")
+        return "Unknown Artist"
