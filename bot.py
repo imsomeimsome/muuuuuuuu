@@ -76,16 +76,31 @@ def require_registration(func):
 
 # --- Release Checker Task ---
 
+@tasks.loop(seconds=300)
+async def release_check_loop():
+    logging.info("🔍 Starting release check...")
+    await check_for_new_releases()
+
 @release_check_loop.before_loop
-async def before_release_check_loop():
-    logging.info("Waiting for bot to be ready before starting release check loop...")
+async def before_release_check():
+    logging.info("⏳ Initializing release checker...")
     await bot.wait_until_ready()
+    now = datetime.datetime.now()
+    next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
+        minutes=5 - (now.minute % 5)
+    )
+    delay = (next_run - now).total_seconds()
+    if delay < 0:
+        delay += 300  # Add 5 minutes if negative
+    logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} (in {delay:.1f}s)")
+    await asyncio.sleep(delay)
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
         release_check_loop.start()
+        logging.info("🚀 Started release checker")
 
 # --- Channel Routing ---
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
@@ -111,55 +126,46 @@ async def before_release_check():
     await asyncio.sleep(delay)
 
 async def check_for_new_releases():
-    logging.info("🔍 Starting release check...")
     artists = get_all_artists()
-    
+    if not artists:
+        logging.info("No artists to check.")
+        return
     for artist in artists:
         try:
-            # Spotify Release Check
+            # Spotify
             if artist['platform'] == 'spotify':
-                latest_album_id = get_latest_album_id(artist['artist_id'])
-                if not latest_album_id:
-                    continue
-                
+                latest_album_id = extract_spotify_id(artist['artist_url'])
                 release_info = get_spotify_release_info(latest_album_id)
-                current_release_date = release_info['release_date']
-
-            # SoundCloud Release Check    
+                current_date = release_info['release_date']
+            # SoundCloud
             elif artist['platform'] == 'soundcloud':
                 release_info = get_soundcloud_release_info(artist['artist_url'])
                 if not release_info:
                     continue
-                
-                current_release_date = release_info['release_date']
-
+                current_date = release_info['release_date']
             else:
-                continue  # Skip unknown platforms
+                continue
 
-            # Check for new release
-            if current_release_date != artist['last_release_date']:
-                # Update database first
+            # Only post if new
+            if current_date != artist['last_release_date']:
                 update_last_release_date(
                     artist['artist_id'],
                     artist['owner_id'],
-                    current_release_date
+                    current_date
                 )
-
-                # Get notification channel
+                # Find channel
                 channel = await get_release_channel(
-                    guild_id=artist.get('guild_id', ''),
+                    guild_id=getattr(artist, 'guild_id', '') or artist['owner_id'],
                     platform=artist['platform']
                 )
                 if not channel:
                     continue
-
-                # Build embed with fallbacks
                 embed = create_music_embed(
                     platform=artist['platform'],
                     artist_name=release_info.get('artist_name', artist['artist_name']),
                     title=release_info.get('title', 'New Release'),
                     url=release_info.get('url', artist['artist_url']),
-                    release_date=current_release_date,
+                    release_date=current_date,
                     cover_url=release_info.get('cover_url', 'https://i.imgur.com/default.jpg'),
                     features=release_info.get('features', 'None'),
                     track_count=release_info.get('track_count', 1),
@@ -167,20 +173,15 @@ async def check_for_new_releases():
                     repost=release_info.get('repost', False),
                     genres=release_info.get('genres', [])
                 )
-
-                # Send to channel with proper formatting
                 if channel.type == discord.ChannelType.news:
                     message = await channel.send(embed=embed)
                     await message.publish()
                 else:
                     await channel.send(embed=embed)
-                
-                # Log success
                 await bot.log_event(
                     f"✅ New {artist['platform'].title()} release detected: "
                     f"{artist['artist_name']} - {release_info.get('title', '')}"
                 )
-
         except Exception as e:
             error_msg = (
                 f"❌ Failed to check {artist['platform']} artist "
@@ -188,8 +189,8 @@ async def check_for_new_releases():
             )
             logging.error(error_msg)
             await bot.log_event(error_msg)
-
     logging.info("✅ Completed release check cycle")
+
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
@@ -329,25 +330,7 @@ async def track_command(interaction: discord.Interaction, link: str):
             if artist_exists(artist_id, user_id):
                 await interaction.response.send_message(f"❌ Already tracking **{artist_name}**.")
                 return
-
-            # Add artist with tracking info
-            conn = get_connection()
-            c = conn.cursor()
-            c.execute('''
-                INSERT OR REPLACE INTO artists 
-                (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                "spotify", 
-                artist_id, 
-                artist_name, 
-                link, 
-                None, 
-                user_id,
-                f"{user_id},"  # Initial tracked users list
-            ))
-            conn.commit()
-            conn.close()
+            add_artist("spotify", artist_id, artist_name, link, user_id)
 
         elif "soundcloud.com" in link:
             artist_id = extract_soundcloud_id(link)
@@ -355,25 +338,7 @@ async def track_command(interaction: discord.Interaction, link: str):
             if artist_exists(artist_id, user_id):
                 await interaction.response.send_message(f"❌ Already tracking **{artist_name}**.")
                 return
-
-            # Add artist with tracking info
-            conn = get_connection()
-            c = conn.cursor()
-            c.execute('''
-                INSERT OR REPLACE INTO artists 
-                (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                "soundcloud", 
-                artist_id, 
-                artist_name, 
-                link, 
-                None, 
-                user_id,
-                f"{user_id},"  # Initial tracked users list
-            ))
-            conn.commit()
-            conn.close()
+            add_artist("soundcloud", artist_id, artist_name, link, user_id)
 
         else:
             await interaction.response.send_message("❌ Invalid link.")
