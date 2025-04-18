@@ -3,7 +3,7 @@ from datetime import datetime
 
 # --- Connection Helper ---
 def get_connection():
-    return sqlite3.connect("artists.db")
+    return sqlite3.connect("/data/artists.db")
 
 # --- Table Initialization ---
 def initialize_database():
