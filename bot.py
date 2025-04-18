@@ -60,6 +60,32 @@ class MusicBot(commands.Bot):
     async def log_event(self, content: str):
         if self.log_channel:
             await self.log_channel.send(f"`[{datetime.utcnow()}]` {content}")
+            
+    async def robust_wait_until_ready():
+    """Wait for bot to be fully ready, even after reconnects."""
+    while True:
+        if bot.is_ready():
+            logging.info("✅ Bot is already ready")
+            break
+        try:
+            # Wait for either "ready" or "resumed" event with timeout
+            ready_task = bot.wait_for("ready", timeout=300)
+            resumed_task = bot.wait_for("resumed", timeout=300)
+            done, pending = await asyncio.wait(
+                [ready_task, resumed_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+            logging.info("✅ Received ready/resumed event")
+            break
+        except asyncio.TimeoutError:
+            logging.warning("⌛ Timeout waiting for ready/resumed")
+            break
+        except Exception as e:
+            logging.error(f"❌ Error in ready check: {str(e)}")
+            raise
 
 bot = MusicBot()
 
@@ -84,7 +110,8 @@ async def release_check_loop():
 @release_check_loop.before_loop
 async def before_release_check():
     logging.info("⏳ Initializing release checker...")
-    await bot.wait_until_ready()
+    await robust_wait_until_ready()
+    
     now = datetime.datetime.now()
     next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
         minutes=5 - (now.minute % 5)
@@ -92,6 +119,7 @@ async def before_release_check():
     delay = (next_run - now).total_seconds()
     if delay < 0:
         delay += 300  # Add 5 minutes if negative
+    
     logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} (in {delay:.1f}s)")
     await asyncio.sleep(delay)
 
