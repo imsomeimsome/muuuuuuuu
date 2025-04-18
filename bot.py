@@ -61,14 +61,14 @@ class MusicBot(commands.Bot):
         if self.log_channel:
             await self.log_channel.send(f"`[{datetime.utcnow()}]` {content}")
             
-    async def robust_wait_until_ready():
-        """Wait for bot to be fully ready, even after reconnects."""
+def robust_wait_until_ready():
+    """Wait for bot to be fully ready, even after reconnects."""
     while True:
         if bot.is_ready():
             logging.info("✅ Bot is already ready")
             break
         try:
-            # Wait for either "ready" or "resumed" event with timeout
+            # Wait for "ready" or "resumed" events
             ready_task = bot.wait_for("ready", timeout=300)
             resumed_task = bot.wait_for("resumed", timeout=300)
             done, pending = await asyncio.wait(
