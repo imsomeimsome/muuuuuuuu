@@ -3,6 +3,7 @@ import typing
 from typing import Optional, Literal
 import discord
 import functools
+import logging
 from discord.ext import tasks
 import asyncio
 from datetime import datetime
@@ -27,6 +28,12 @@ from soundcloud_utils import (
     extract_soundcloud_id, get_artist_name_by_url as get_soundcloud_artist_name,
     get_release_info as get_soundcloud_release_info
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -70,20 +77,19 @@ def require_registration(func):
 
 @tasks.loop(minutes=5)
 async def release_check_loop():
-    print(f"[{datetime.now()}] Checking for new releases...")
+    logging.info("Checking for new releases...")
     await check_for_new_releases()
 
 @release_check_loop.before_loop
 async def before_release_check_loop():
-    print("Waiting for bot to be ready before starting release check loop...")
+    logging.info("Waiting for bot to be ready before starting release check loop...")
     await bot.wait_until_ready()
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
         release_check_loop.start()
-
 
 # --- Channel Routing ---
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
