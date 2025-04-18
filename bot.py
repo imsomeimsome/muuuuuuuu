@@ -62,7 +62,7 @@ class MusicBot(commands.Bot):
             await self.log_channel.send(f"`[{datetime.utcnow()}]` {content}")
             
     async def robust_wait_until_ready():
-    """Wait for bot to be fully ready, even after reconnects."""
+        """Wait for bot to be fully ready, even after reconnects."""
     while True:
         if bot.is_ready():
             logging.info("✅ Bot is already ready")
