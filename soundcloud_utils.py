@@ -1,158 +1,213 @@
 import os
 import requests
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse
 from dotenv import load_dotenv
+from datetime import datetime
 
 load_dotenv()
-
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 
+# --- Core URL Handling ---
 def clean_soundcloud_url(url):
-    """Expands shortlinks and resolves the canonical URL."""
-    # Follow shortened on.soundcloud.com links
-    if 'on.soundcloud.com' in url:
-        res = requests.get(url, allow_redirects=True)
-        url = res.url
+    """Normalize and verify SoundCloud URLs with error handling."""
+    try:
+        # Follow redirects for shortened URLs
+        if 'on.soundcloud.com' in url:
+            response = requests.head(url, allow_redirects=True, timeout=10)
+            url = response.url
 
-    # Fetch the page HTML and extract the canonical URL
-    res = requests.get(url)
-    if res.status_code != 200:
-        raise ValueError(f"Failed to fetch URL page: {res.status_code}")
+        parsed = urlparse(url)
+        if 'soundcloud.com' not in parsed.netloc:
+            raise ValueError("Invalid SoundCloud domain")
 
-    match = re.search(r'<link rel="canonical" href="([^"]+)"', res.text)
-    if match:
-        return match.group(1)
-    else:
-        raise ValueError("Could not determine canonical SoundCloud URL.")
+        # Extract canonical URL from page metadata
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            raise ValueError(f"Failed to fetch URL (HTTP {response.status_code})")
 
+        match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
+        if match:
+            return match.group(1)
+        
+        return url
+    except Exception as e:
+        raise ValueError(f"URL validation failed: {str(e)}")
 
 def extract_soundcloud_id(url):
-    """We use the clean URL as ID."""
-    return clean_soundcloud_url(url)
+    """Get consistent artist/track identifier from any SoundCloud URL."""
+    try:
+        clean_url = clean_soundcloud_url(url)
+        parsed = urlparse(clean_url)
+        path_segments = [p for p in parsed.path.strip('/').split('/') if p]
+        
+        if len(path_segments) < 1:
+            raise ValueError("No path segments in URL")
+            
+        # Handle different URL types
+        if 'sets' in path_segments:  # Playlist
+            return f"playlist_{path_segments[-1]}"
+        elif 'tracks' in path_segments:  # Single track
+            return f"track_{path_segments[-1]}"
+        else:  # Assume artist profile
+            return f"artist_{path_segments[0]}"
+    except Exception as e:
+        raise ValueError(f"ID extraction failed: {str(e)}")
 
-def get_artist_name_by_url(url):
-    clean_url = clean_soundcloud_url(url)
-    resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-    response = requests.get(resolve_url)
-    if response.status_code == 403:
-        raise ValueError("Access to this artist profile is forbidden — it may be private or restricted.")
-    if response.status_code != 200:
-        raise ValueError(f"Failed to resolve artist: {response.status_code}")
-    data = response.json()
-    if 'username' not in data:
-        raise ValueError("Could not resolve artist name from URL.")
-    return data['username']
+# --- Artist Data Fetching ---
+def get_artist_info(artist_id):
+    """Get complete artist metadata with error handling."""
+    try:
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{artist_id}&client_id={CLIENT_ID}"
+        response = requests.get(resolve_url, timeout=10)
+        
+        if response.status_code != 200:
+            raise ValueError(f"API error: {response.status_code}")
+            
+        data = response.json()
+        if data.get('kind') != 'user':
+            raise ValueError("Not an artist profile")
+            
+        return {
+            'id': data['id'],
+            'name': data['username'],
+            'url': data['permalink_url'],
+            'track_count': data['track_count'],
+            'avatar_url': data.get('avatar_url', ''),
+            'followers': data.get('followers_count', 0)
+        }
+    except Exception as e:
+        raise ValueError(f"Artist info fetch failed: {str(e)}")
 
-def get_last_release_date(url):
-    clean_url = clean_soundcloud_url(url)
-    resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-    response = requests.get(resolve_url)
-    if response.status_code == 403:
-        raise ValueError("Access to this artist profile is forbidden — it may be private or restricted.")
-    if response.status_code != 200:
-        raise ValueError(f"Failed to resolve user: {response.status_code}")
-    user_id = response.json().get("id")
-    if not user_id:
-        raise ValueError("User ID could not be resolved.")
-
-    tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1&order=created_at"
-    tracks_response = requests.get(tracks_url)
-    if tracks_response.status_code == 403:
-        raise ValueError("Access to this user's tracks is forbidden — it may be private or restricted.")
-    if tracks_response.status_code != 200:
-        raise ValueError(f"Failed to fetch tracks: {tracks_response.status_code}")
-
-    collection = tracks_response.json().get("collection")
-    if not collection:
-        return "Unknown"
-    return collection[0].get("created_at", "Unknown")
+# --- Release Data Fetching ---
+def get_last_release_date(artist_url):
+    """Get most recent release date with full error handling."""
+    try:
+        artist_id = extract_soundcloud_id(artist_url)
+        tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=1&order=created_at"
+        response = requests.get(tracks_url, timeout=10)
+        
+        if response.status_code != 200:
+            raise ValueError(f"API error: {response.status_code}")
+            
+        tracks = response.json()
+        if not tracks:
+            return None
+            
+        return tracks[0].get('created_at', '')[:10]  # YYYY-MM-DD format
+    except Exception as e:
+        print(f"Error getting last release: {str(e)}")
+        return None
 
 def get_release_info(url):
-    clean_url = clean_soundcloud_url(url)
-    resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-    response = requests.get(resolve_url)
-    if response.status_code == 404:
-        raise ValueError("Track or playlist not found — it may be private, invalid, or deleted.")
-    if response.status_code == 403:
-        raise ValueError("Access to this track or playlist is forbidden — it may be private or restricted.")
-    if response.status_code != 200:
-        raise ValueError(f"Failed to resolve track: {response.status_code}")
+    """Universal release info fetcher for tracks/playlists/artists."""
+    try:
+        clean_url = clean_soundcloud_url(url)
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
+        response = requests.get(resolve_url, timeout=10)
+        
+        if response.status_code != 200:
+            raise ValueError(f"API error: {response.status_code}")
+            
+        data = response.json()
+        
+        if data['kind'] == 'track':
+            return process_track(data)
+        elif data['kind'] == 'playlist':
+            return process_playlist(data)
+        elif data['kind'] == 'user':
+            return get_artist_release(data)
+        else:
+            raise ValueError("Unsupported content type")
+    except Exception as e:
+        raise ValueError(f"Release info fetch failed: {str(e)}")
 
-    data = response.json()
-    kind = data.get('kind')
-    if kind == 'track':
-        return process_track(data)
-    elif kind == 'playlist':
-        return process_playlist(data)
-    else:
-        raise ValueError(f"Provided URL is not a track or playlist (got kind: '{kind}').")
-
-def process_track(data):
-    artist_name = data['user']['username']
-    title = data['title']
-    release_date = data.get('created_at', 'Unknown')
-    cover_url = data.get('artwork_url') or data['user'].get('avatar_url') or ""
-    duration_ms = data.get('duration', 0)
-    duration_min = round(duration_ms / 60000, 1)
-    repost = data.get('repost', False)
-    features = extract_features_from_title(title)
+# --- Data Processing ---
+def process_track(track_data):
+    """Convert raw track data to standardized format."""
     return {
-        "artist_name": artist_name,
-        "title": title,
-        "url": data['permalink_url'],
-        "release_date": release_date.split('T')[0] if release_date != 'Unknown' else "Unknown",
-        "cover_url": cover_url,
-        "track_count": 1,
-        "duration": f"{duration_min} min",
-        "features": features,
-        "repost": repost
+        'type': 'track',
+        'artist_name': track_data['user']['username'],
+        'title': track_data['title'],
+        'url': track_data['permalink_url'],
+        'release_date': track_data.get('created_at', '')[:10],
+        'cover_url': track_data.get('artwork_url', track_data['user'].get('avatar_url', '')),
+        'duration': format_duration(track_data.get('duration', 0)),
+        'features': extract_features(track_data['title']),
+        'genres': [track_data.get('genre', '')],
+        'repost': track_data.get('repost', False),
+        'track_count': 1
     }
 
-def process_playlist(data):
-    artist_name = data['user']['username']
-    title = data['title']
-    cover_url = data.get('artwork_url') or data['user'].get('avatar_url') or ""
-    tracks = data.get('tracks', [])
-    track_count = len(tracks)
-    total_duration_ms = 0
-    features_set = set()
-    earliest_date = None
-    for track in tracks:
-        duration_ms = track.get('duration', 0)
-        total_duration_ms += duration_ms
-        track_title = track.get('title', '')
-        track_features = extract_features_from_title(track_title)
-        if track_features != "None":
-            features_set.update([name.strip() for name in track_features.split(", ")])
-        track_date = track.get('created_at')
-        if track_date:
-            if earliest_date is None or track_date < earliest_date:
-                earliest_date = track_date
-
-    duration_min = round(total_duration_ms / 60000, 1)
-    features = ", ".join(sorted(features_set)) if features_set else "None"
-    release_date = earliest_date.split('T')[0] if earliest_date else "Unknown"
-    repost = False
+def process_playlist(playlist_data):
+    """Convert playlist data to standardized format."""
     return {
-        "artist_name": artist_name,
-        "title": title,
-        "url": data['permalink_url'],
-        "release_date": release_date,
-        "cover_url": cover_url,
-        "track_count": track_count,
-        "duration": f"{duration_min} min",
-        "features": features,
-        "repost": repost
+        'type': 'playlist',
+        'artist_name': playlist_data['user']['username'],
+        'title': playlist_data['title'],
+        'url': playlist_data['permalink_url'],
+        'release_date': playlist_data.get('created_at', '')[:10],
+        'cover_url': playlist_data.get('artwork_url', playlist_data['user'].get('avatar_url', '')),
+        'duration': sum(t.get('duration', 0) for t in playlist_data['tracks']) // 1000,
+        'features': ', '.join(set(
+            feat for t in playlist_data['tracks'] 
+            for feat in extract_features(t['title']).split(', ') 
+            if feat != 'None'
+        )),
+        'genres': list(set(t.get('genre', '') for t in playlist_data['tracks'])),
+        'repost': False,
+        'track_count': len(playlist_data['tracks'])
     }
 
-def extract_features_from_title(title):
-    pattern = r"(?:feat\.|ft\.)\s*([^\(\)\[\]\-–;]+)"
-    matches = re.findall(pattern, title, re.IGNORECASE)
-    features_set = set()
-    for match in matches:
-        for sep in ['/', '&', ',', ' and ']:
-            match = match.replace(sep, ',')
-        features = [name.strip() for name in match.split(",") if name.strip()]
-        features_set.update(features)
-    return ", ".join(features_set) if features_set else "None"
+def get_artist_release(artist_data):
+    """Get latest release from artist profile."""
+    tracks_url = f"https://api-v2.soundcloud.com/users/{artist_data['id']}/tracks?client_id={CLIENT_ID}&limit=1"
+    response = requests.get(tracks_url, timeout=10)
+    
+    if response.status_code != 200 or not response.json():
+        raise ValueError("No tracks found for artist")
+        
+    return process_track(response.json()[0])
+
+def format_duration(milliseconds):
+    """Convert ms to mm:ss format."""
+    seconds = int(milliseconds / 1000)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+def extract_features(title):
+    """Advanced feature extraction from track titles."""
+    patterns = [
+        r"\((feat\.? [^)]+)\)",
+        r"\[feat\.? [^\]]+\]",
+        r"ft\.? [^\-–]+",
+        r"w/ ?(.+?)(?:\)|$)"
+    ]
+    
+    features = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, title, re.IGNORECASE)
+        for match in matches:
+            # Clean and split features
+            cleaned = re.sub(r"[\(\)\[\]feat\.?|ft\.?|w/]", '', match)
+            for sep in ['/', '&', ',', ' and ']:
+                cleaned = cleaned.replace(sep, ',')
+            features.update([name.strip() for name in cleaned.split(',') if name.strip()])
+    
+    return ", ".join(sorted(features)) if features else "None"
+
+# --- Bot Integration Helpers ---
+def get_soundcloud_artist_name(url):
+    """Get display name for database storage."""
+    try:
+        artist_id = extract_soundcloud_id(url)
+        return get_artist_info(artist_id)['name']
+    except:
+        return "Unknown Artist"
+
+def get_soundcloud_release_info(url):
+    """Main function for release checking."""
+    try:
+        return get_release_info(url)
+    except Exception as e:
+        print(f"SoundCloud Error: {str(e)}")
+        return None
