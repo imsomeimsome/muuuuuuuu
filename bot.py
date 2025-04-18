@@ -107,10 +107,6 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
         channel_id = get_channel(guild_id, platform)
         return bot.get_channel(int(channel_id)) if channel_id else None
 
-@tasks.loop(seconds=300)  # 5 minutes
-async def release_check_loop():
-    await check_for_new_releases()
-
 @release_check_loop.before_loop
 async def before_release_check():
     await bot.wait_until_ready()
@@ -126,18 +122,17 @@ async def before_release_check():
     await asyncio.sleep(delay)
 
 async def check_for_new_releases():
+    logging.info("🔍 Checking for new releases...")
     artists = get_all_artists()
     if not artists:
         logging.info("No artists to check.")
         return
     for artist in artists:
         try:
-            # Spotify
             if artist['platform'] == 'spotify':
                 latest_album_id = extract_spotify_id(artist['artist_url'])
                 release_info = get_spotify_release_info(latest_album_id)
                 current_date = release_info['release_date']
-            # SoundCloud
             elif artist['platform'] == 'soundcloud':
                 release_info = get_soundcloud_release_info(artist['artist_url'])
                 if not release_info:
@@ -146,19 +141,18 @@ async def check_for_new_releases():
             else:
                 continue
 
-            # Only post if new
             if current_date != artist['last_release_date']:
                 update_last_release_date(
                     artist['artist_id'],
                     artist['owner_id'],
                     current_date
                 )
-                # Find channel
                 channel = await get_release_channel(
                     guild_id=getattr(artist, 'guild_id', '') or artist['owner_id'],
                     platform=artist['platform']
                 )
                 if not channel:
+                    logging.warning(f"No channel for {artist['artist_name']}")
                     continue
                 embed = create_music_embed(
                     platform=artist['platform'],
@@ -182,6 +176,7 @@ async def check_for_new_releases():
                     f"✅ New {artist['platform'].title()} release detected: "
                     f"{artist['artist_name']} - {release_info.get('title', '')}"
                 )
+                logging.info(f"✅ Posted new release for {artist['artist_name']}")
         except Exception as e:
             error_msg = (
                 f"❌ Failed to check {artist['platform']} artist "
@@ -190,7 +185,6 @@ async def check_for_new_releases():
             logging.error(error_msg)
             await bot.log_event(error_msg)
     logging.info("✅ Completed release check cycle")
-
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
