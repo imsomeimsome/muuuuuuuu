@@ -60,8 +60,23 @@ class MusicBot(commands.Bot):
     async def log_event(self, content: str):
         if self.log_channel:
             await self.log_channel.send(f"`[{datetime.utcnow()}]` {content}")
-            
-def robust_wait_until_ready():
+
+bot = MusicBot()
+
+# --- Decorators ---
+def require_registration(func):
+    @functools.wraps(func)
+    async def wrapper(interaction: discord.Interaction, *args, **kwargs):
+        if not is_user_registered(interaction.user.id):
+            await interaction.response.send_message(
+                "🚫 Register first with `/register`", ephemeral=True)
+            return
+        return await func(interaction, *args, **kwargs)
+    return wrapper
+
+# --- Release Checker Task ---
+
+async def robust_wait_until_ready():
     """Wait for bot to be fully ready, even after reconnects."""
     while True:
         if bot.is_ready():
@@ -86,21 +101,6 @@ def robust_wait_until_ready():
         except Exception as e:
             logging.error(f"❌ Error in ready check: {str(e)}")
             raise
-
-bot = MusicBot()
-
-# --- Decorators ---
-def require_registration(func):
-    @functools.wraps(func)
-    async def wrapper(interaction: discord.Interaction, *args, **kwargs):
-        if not is_user_registered(interaction.user.id):
-            await interaction.response.send_message(
-                "🚫 Register first with `/register`", ephemeral=True)
-            return
-        return await func(interaction, *args, **kwargs)
-    return wrapper
-
-# --- Release Checker Task ---
 
 @tasks.loop(seconds=300)
 async def release_check_loop():
