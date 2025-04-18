@@ -101,42 +101,62 @@ async def check_for_new_releases():
     artists = get_all_artists()
     for artist in artists:
         try:
-            # Get latest album ID for this artist
-            latest_album_id = get_latest_album_id(artist['artist_id'])
-            if not latest_album_id:
-                continue
+            if artist['platform'] == 'spotify':
+                # Spotify handling
+                latest_album_id = get_latest_album_id(artist['artist_id'])
+                if not latest_album_id:
+                    continue
+                
+                release_info = get_spotify_release_info(latest_album_id)
+                current_release_date = release_info['release_date']
 
-            # Check if this is a new release
-            release_info = get_spotify_release_info(latest_album_id)
-            current_release_date = release_info['release_date']
+            elif artist['platform'] == 'soundcloud':
+                # SoundCloud handling
+                release_info = get_soundcloud_release_info(artist['artist_url'])
+                if not release_info:
+                    continue
+                
+                current_release_date = release_info['release_date']
 
+            else:
+                continue  # Skip unknown platforms
+
+            # Check if release is new
             if current_release_date != artist['last_release_date']:
-                # Update database with new release date
+                # Update database
                 update_last_release_date(
                     artist['artist_id'],
                     artist['owner_id'],
                     current_release_date
                 )
 
-                # Post to Discord
-                channel = await get_release_channel(artist['guild_id'], artist['platform'])
+                # Get channel and post embed
+                channel = await get_release_channel(artist.get('guild_id', ''), artist['platform'])
+                if not channel:
+                    continue
+
                 embed = create_music_embed(
                     platform=artist['platform'],
                     artist_name=artist['artist_name'],
                     title=release_info['title'],
                     url=release_info['url'],
                     release_date=current_release_date,
-                    cover_url=release_info['cover_url'],
-                    features=release_info['features'],
-                    track_count=release_info['track_count'],
-                    duration=release_info['duration'],
-                    repost=False,
+                    cover_url=release_info.get('cover_url', 'https://i.imgur.com/default_cover.jpg'),
+                    features=release_info.get('features', 'None'),
+                    track_count=release_info.get('track_count', 1),
+                    duration=release_info.get('duration', 'N/A'),
+                    repost=release_info.get('repost', False),
                     genres=release_info.get('genres', [])
                 )
-                await channel.send(embed=embed)
+
+                if channel.type == discord.ChannelType.news:
+                    message = await channel.send(embed=embed)
+                    await message.publish()
+                else:
+                    await channel.send(embed=embed)
 
         except Exception as e:
-            await bot.log_event(f"❌ Release check failed for {artist['artist_name']}: {str(e)}")
+            await bot.log_event(f"❌ Release check failed for {artist['artist_name']} ({artist['platform']}): {str(e)}")
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
