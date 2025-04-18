@@ -88,7 +88,7 @@ async def before_release_check_loop():
 
 @bot.event
 async def on_ready():
-    logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
         release_check_loop.start()
 
