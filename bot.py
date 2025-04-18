@@ -97,12 +97,32 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
         channel_id = get_channel(guild_id, platform)
         return bot.get_channel(int(channel_id)) if channel_id else None
 
+@tasks.loop(seconds=300)  # 5 minutes
+async def release_check_loop():
+    await check_for_new_releases()
+
+@release_check_loop.before_loop
+async def before_release_check():
+    await bot.wait_until_ready()
+    
+    # Calculate initial delay for xx:xx:01 timing
+    now = datetime.datetime.now()
+    next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
+        minutes=5 - (now.minute % 5)
+    )
+    delay = (next_run - now).total_seconds()
+    
+    print(f"⏳ Next release check at {next_run.strftime('%H:%M:%S')} (in {delay:.1f}s)")
+    await asyncio.sleep(delay)
+
 async def check_for_new_releases():
+    logging.info("🔍 Starting release check...")
     artists = get_all_artists()
+    
     for artist in artists:
         try:
+            # Spotify Release Check
             if artist['platform'] == 'spotify':
-                # Spotify handling
                 latest_album_id = get_latest_album_id(artist['artist_id'])
                 if not latest_album_id:
                     continue
@@ -110,8 +130,8 @@ async def check_for_new_releases():
                 release_info = get_spotify_release_info(latest_album_id)
                 current_release_date = release_info['release_date']
 
+            # SoundCloud Release Check    
             elif artist['platform'] == 'soundcloud':
-                # SoundCloud handling
                 release_info = get_soundcloud_release_info(artist['artist_url'])
                 if not release_info:
                     continue
@@ -121,42 +141,60 @@ async def check_for_new_releases():
             else:
                 continue  # Skip unknown platforms
 
-            # Check if release is new
+            # Check for new release
             if current_release_date != artist['last_release_date']:
-                # Update database
+                # Update database first
                 update_last_release_date(
                     artist['artist_id'],
                     artist['owner_id'],
                     current_release_date
                 )
 
-                # Get channel and post embed
-                channel = await get_release_channel(artist.get('guild_id', ''), artist['platform'])
+                # Get notification channel
+                channel = await get_release_channel(
+                    guild_id=artist.get('guild_id', ''),
+                    platform=artist['platform']
+                )
                 if not channel:
                     continue
 
+                # Build embed with fallbacks
                 embed = create_music_embed(
                     platform=artist['platform'],
-                    artist_name=artist['artist_name'],
-                    title=release_info['title'],
-                    url=release_info['url'],
+                    artist_name=release_info.get('artist_name', artist['artist_name']),
+                    title=release_info.get('title', 'New Release'),
+                    url=release_info.get('url', artist['artist_url']),
                     release_date=current_release_date,
-                    cover_url=release_info.get('cover_url', 'https://i.imgur.com/default_cover.jpg'),
+                    cover_url=release_info.get('cover_url', 'https://i.imgur.com/default.jpg'),
                     features=release_info.get('features', 'None'),
                     track_count=release_info.get('track_count', 1),
-                    duration=release_info.get('duration', 'N/A'),
+                    duration=release_info.get('duration', '0:00'),
                     repost=release_info.get('repost', False),
                     genres=release_info.get('genres', [])
                 )
 
+                # Send to channel with proper formatting
                 if channel.type == discord.ChannelType.news:
                     message = await channel.send(embed=embed)
                     await message.publish()
                 else:
                     await channel.send(embed=embed)
+                
+                # Log success
+                await bot.log_event(
+                    f"✅ New {artist['platform'].title()} release detected: "
+                    f"{artist['artist_name']} - {release_info.get('title', '')}"
+                )
 
         except Exception as e:
-            await bot.log_event(f"❌ Release check failed for {artist['artist_name']} ({artist['platform']}): {str(e)}")
+            error_msg = (
+                f"❌ Failed to check {artist['platform']} artist "
+                f"{artist['artist_name']}: {str(e)}"
+            )
+            logging.error(error_msg)
+            await bot.log_event(error_msg)
+
+    logging.info("✅ Completed release check cycle")
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
