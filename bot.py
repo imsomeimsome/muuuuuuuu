@@ -76,11 +76,6 @@ def require_registration(func):
 
 # --- Release Checker Task ---
 
-@tasks.loop(minutes=5)
-async def release_check_loop():
-    logging.info("Checking for new releases...")
-    await check_for_new_releases()
-
 @release_check_loop.before_loop
 async def before_release_check_loop():
     logging.info("Waiting for bot to be ready before starting release check loop...")
