@@ -81,7 +81,7 @@ async def robust_wait_until_ready():
     while True:
         if bot.is_ready():
             logging.info("✅ Bot is already ready")
-            break
+            return
         try:
             # Wait for "ready" or "resumed" events
             ready_task = bot.wait_for("ready", timeout=300)
@@ -94,10 +94,10 @@ async def robust_wait_until_ready():
             for task in pending:
                 task.cancel()
             logging.info("✅ Received ready/resumed event")
-            break
+            return
         except asyncio.TimeoutError:
             logging.warning("⌛ Timeout waiting for ready/resumed")
-            break
+            return
         except Exception as e:
             logging.error(f"❌ Error in ready check: {str(e)}")
             raise
@@ -110,16 +110,15 @@ async def release_check_loop():
 @release_check_loop.before_loop
 async def before_release_check():
     logging.info("⏳ Initializing release checker...")
-    await robust_wait_until_ready()
-    
-    # Use UTC time for Railway compatibility
+    await robust_wait_until_ready()  # Wait until ready, then continue
+
     now = datetime.datetime.now(datetime.timezone.utc)
     next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
         minutes=5 - (now.minute % 5)
     )
     delay = (next_run - now).total_seconds()
     delay = max(delay, 0)  # Prevent negative delays
-    
+
     logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
     await asyncio.sleep(delay)
 
