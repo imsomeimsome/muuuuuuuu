@@ -76,32 +76,6 @@ def require_registration(func):
 
 # --- Release Checker Task ---
 
-async def robust_wait_until_ready():
-    """Wait for bot to be fully ready, even after reconnects."""
-    while True:
-        if bot.is_ready():
-            logging.info("✅ Bot is already ready")
-            break
-        try:
-            # Wait for "ready" or "resumed" events
-            ready_task = bot.wait_for("ready", timeout=300)
-            resumed_task = bot.wait_for("resumed", timeout=300)
-            done, pending = await asyncio.wait(
-                [ready_task, resumed_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            # Cancel pending tasks
-            for task in pending:
-                task.cancel()
-            logging.info("✅ Received ready/resumed event")
-            break
-        except asyncio.TimeoutError:
-            logging.warning("⌛ Timeout waiting for ready/resumed")
-            break
-        except Exception as e:
-            logging.error(f"❌ Error in ready check: {str(e)}")
-            raise
-
 @tasks.loop(seconds=300)
 async def release_check_loop():
     logging.info("🔍 Starting release check...")
@@ -112,15 +86,14 @@ async def before_release_check():
     logging.info("⏳ Initializing release checker...")
     await robust_wait_until_ready()
     
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)  # Use UTC time!
     next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
         minutes=5 - (now.minute % 5)
     )
     delay = (next_run - now).total_seconds()
-    if delay < 0:
-        delay += 300  # Add 5 minutes if negative
+    delay = max(delay, 0)  # Prevent negative delays
     
-    logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} (in {delay:.1f}s)")
+    logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
     await asyncio.sleep(delay)
 
 @bot.event
@@ -213,6 +186,33 @@ async def check_for_new_releases():
             logging.error(error_msg)
             await bot.log_event(error_msg)
     logging.info("✅ Completed release check cycle")
+
+
+async def robust_wait_until_ready():
+    """Wait for bot to be fully ready, even after reconnects."""
+    while True:
+        if bot.is_ready():
+            logging.info("✅ Bot is already ready")
+            break
+        try:
+            # Wait for "ready" or "resumed" events
+            ready_task = bot.wait_for("ready", timeout=300)
+            resumed_task = bot.wait_for("resumed", timeout=300)
+            done, pending = await asyncio.wait(
+                [ready_task, resumed_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+            logging.info("✅ Received ready/resumed event")
+            break
+        except asyncio.TimeoutError:
+            logging.warning("⌛ Timeout waiting for ready/resumed")
+            break
+        except Exception as e:
+            logging.error(f"❌ Error in ready check: {str(e)}")
+            raise
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
