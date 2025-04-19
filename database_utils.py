@@ -1,5 +1,7 @@
 import sqlite3
 from datetime import datetime
+from spotify_utils import extract_spotify_id
+from soundcloud_utils import extract_soundcloud_id
 
 # --- Connection Helper ---
 def get_connection():
@@ -359,6 +361,18 @@ def set_release_prefs(user_id, artist_id, release_type, state):
     )
     conn.commit()
     conn.close()
+def get_artist_by_identifier(identifier: str, owner_id: str):
+    """Get artist by URL or ID, handling both Spotify and SoundCloud."""
+    # Try to extract ID from URL
+    if "spotify.com" in identifier:
+        artist_id = extract_spotify_id(identifier)
+    elif "soundcloud.com" in identifier:
+        artist_id = extract_soundcloud_id(identifier)
+    else:
+        # Assume it's already an ID
+        artist_id = identifier
+    
+    return get_artist_by_id(artist_id, owner_id)
 
 def get_release_prefs(user_id, artist_id):
     conn = get_connection()
@@ -373,6 +387,9 @@ def get_release_prefs(user_id, artist_id):
         'eps': bool(row[4]),
         'reposts': bool(row[5])
     } if row else None
+
+
+
 
 # --- Initialize DB on module import ---
 initialize_database()

@@ -17,7 +17,7 @@ from database_utils import (
     update_last_release_date, add_release, get_release_stats, get_all_artists,
     get_artists_by_owner, add_user, is_user_registered, get_username,
     get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
-    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection
+    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier
 )
 from embed_utils import create_music_embed
 from spotify_utils import (
@@ -112,7 +112,8 @@ async def before_release_check():
     logging.info("⏳ Initializing release checker...")
     await robust_wait_until_ready()
     
-    now = datetime.datetime.now(datetime.timezone.utc)  # Use UTC time!
+    # Use UTC time for Railway compatibility
+    now = datetime.datetime.now(datetime.timezone.utc)
     next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
         minutes=5 - (now.minute % 5)
     )
@@ -136,16 +137,6 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
         return bot.get_channel(int(channel_id))
     # Fallback: None (will log a warning in the checker)
     return None
-    
-    # Calculate initial delay for xx:xx:01 timing
-    now = datetime.datetime.now()
-    next_run = now.replace(second=1, microsecond=0) + datetime.timedelta(
-        minutes=5 - (now.minute % 5)
-    )
-    delay = (next_run - now).total_seconds()
-    
-    print(f"⏳ Next release check at {next_run.strftime('%H:%M:%S')} (in {delay:.1f}s)")
-    await asyncio.sleep(delay)
 
 async def check_for_new_releases():
     logging.info("🔍 Checking for new releases...")
