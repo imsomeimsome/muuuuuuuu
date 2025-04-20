@@ -159,25 +159,31 @@ async def check_for_new_releases():
 
     logging.info("✅ Completed release check cycle")
 
-@tasks.loop(minutes=5)
+@tasks.loop(seconds=300)
 async def release_check_loop():
-    now = datetime.datetime.utcnow().strftime('%H:%M:%S')
-    logging.info(f"🔍 Starting release check at {now} UTC...")
+    now = datetime.datetime.utcnow().replace(second=1, microsecond=0)
+    logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
     await check_for_new_releases()
+
+    next_run = now + datetime.timedelta(minutes=5)
+    logging.info(f"✅ Completed release check cycle")
+    logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} UTC (in 300.0s)")
 
 @release_check_loop.before_loop
 async def before_release_check():
-    await bot.wait_until_ready()
     logging.info("⏳ Release checker initializing...")
-
+    await bot.wait_until_ready()
     now = datetime.datetime.utcnow()
-    # Compute next interval starting at xx:00:01, xx:05:01 etc.
-    next_run = now.replace(second=1, microsecond=0)
-    minutes_to_add = 5 - (now.minute % 5)
-    next_run += datetime.timedelta(minutes=minutes_to_add)
+
+    # Align to next 5-minute mark (with second=1)
+    next_run_minute = (now.minute // 5 + 1) * 5
+    if next_run_minute >= 60:
+        next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
+    else:
+        next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
 
     delay = (next_run - now).total_seconds()
-    logging.info(f"⏰ Next release check scheduled for {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+    logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
 
     await asyncio.sleep(delay)
 
@@ -186,7 +192,6 @@ async def before_release_check():
 @bot.event
 async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-
     if not release_check_loop.is_running():
         release_check_loop.start()
         logging.info("🚀 Release checker started")
