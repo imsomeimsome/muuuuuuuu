@@ -177,6 +177,7 @@ async def release_check_loop():
 async def before_release_check():
     logging.info("⏳ Release checker initializing...")
     await bot.wait_until_ready()
+    logging.info("✅ Bot is ready — no delay, starting check loop immediately")
     now = datetime.datetime.utcnow()
 
     next_run_minute = (now.minute // 5 + 1) * 5
@@ -202,7 +203,10 @@ async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
         release_check_loop.start()
-        logging.info("🚀 Release checker started")# --- Commands --- 
+        logging.info("🚀 Release checker started")
+        
+
+# --- Commands --- 
 @bot.tree.command(name="setchannel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setchannel_command(interaction: discord.Interaction, 
