@@ -6,12 +6,11 @@ import functools
 import logging
 from discord.ext import tasks
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from keep_alive import keep_alive
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-from datetime import datetime
 from database_utils import (
     add_artist, remove_artist, artist_exists, get_artist_by_id, get_artist_url,
     update_last_release_date, add_release, get_release_stats, get_all_artists,
@@ -165,9 +164,9 @@ async def release_check_scheduler():
     logging.info("⏳ Release checker initializing...")
 
     while not bot.is_closed():
-        now = datetime.datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
-        # Calculate the next time aligned to 5 minute marks
+        # Calculate the next aligned time: 5-minute marks
         next_run_minute = (now.minute // 5 + 1) * 5
         if next_run_minute >= 60:
             next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
@@ -178,11 +177,10 @@ async def release_check_scheduler():
         delay = max(delay, 0)
 
         logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-
         await asyncio.sleep(delay)
 
         try:
-            check_time = datetime.datetime.utcnow().strftime('%H:%M:%S')
+            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
             await check_for_new_releases()
             logging.info("✅ Completed release check cycle")
@@ -190,7 +188,8 @@ async def release_check_scheduler():
             logging.error(f"❌ Error during release check: {e}")
 
         # Next run is exactly 5 minutes from this check time
-        logging.info(f"⏰ Next check scheduled at {(datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
+        next_scheduled_time = (datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')
+        logging.info(f"⏰ Next check scheduled at {next_scheduled_time} UTC (in 300.0s)")
 
 @bot.event
 async def on_ready():
@@ -199,8 +198,7 @@ async def on_ready():
     if not hasattr(bot, 'release_checker_started'):
         bot.release_checker_started = True
         asyncio.create_task(release_check_scheduler())
-
-        
+        logging.info("🚀 Release checker task created")
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
