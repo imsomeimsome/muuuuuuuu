@@ -188,7 +188,7 @@ async def before_release_check():
         next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
 
     delay = (next_run - now).total_seconds()
-    delay = max(delay, 0)  # Ensure no negative delays
+    delay = max(delay, 0)
     logging.info(f"🕰️ First check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
 
     try:
@@ -204,7 +204,6 @@ async def on_ready():
     if not release_check_loop.is_running():
         logging.info("🚀 Release checker started")
         release_check_loop.start()
-        
         
 
 # --- Commands --- 
