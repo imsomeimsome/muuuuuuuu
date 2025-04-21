@@ -165,7 +165,7 @@ async def release_check_loop():
     logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
 
     try:
-        await check_for_new_releases()
+        await check_for_new_releases()  # <-- your actual release checking function
         logging.info("✅ Completed release check cycle")
     except Exception as e:
         logging.error(f"❌ Error during release check: {e}")
@@ -201,8 +201,9 @@ async def before_release_check():
 async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
-        logging.info("🚀 Release checker started")
         release_check_loop.start()
+        logging.info("🚀 Release checker started")
+
         
 
 # --- Commands --- 
