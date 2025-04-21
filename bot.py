@@ -159,49 +159,47 @@ async def check_for_new_releases():
 
     logging.info("✅ Completed release check cycle")
 
-@tasks.loop(seconds=300)
-async def release_check_loop():
-    now = datetime.datetime.utcnow().replace(second=1, microsecond=0)
-    logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
-
-    try:
-        await check_for_new_releases()  # your actual release checking function
-        logging.info("✅ Completed release check cycle")
-    except Exception as e:
-        logging.error(f"❌ Error during release check: {e}")
-
-    next_run = now + datetime.timedelta(minutes=5)
-    logging.info(f"⏰ Next check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in 300.0s)")
-
-@release_check_loop.before_loop
-async def before_release_check():
-    logging.info("⏳ Release checker initializing...")
+async def release_check_scheduler():
     await bot.wait_until_ready()
-    logging.info("✅ Bot is ready — determining first check time")
+    logging.info("🚀 Release checker started")
+    logging.info("⏳ Release checker initializing...")
 
-    now = datetime.datetime.utcnow()
-    next_run_minute = (now.minute // 5 + 1) * 5
-    if next_run_minute >= 60:
-        next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
-    else:
-        next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
+    while not bot.is_closed():
+        now = datetime.datetime.utcnow()
 
-    delay = (next_run - now).total_seconds()
-    delay = max(delay, 0)
+        # Calculate the next time aligned to 5 minute marks
+        next_run_minute = (now.minute // 5 + 1) * 5
+        if next_run_minute >= 60:
+            next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
+        else:
+            next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
 
-    logging.info(f"🕰️ First check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+        delay = (next_run - now).total_seconds()
+        delay = max(delay, 0)
 
-    # Don't sleep here — we'll delay the loop's first run
-    release_check_loop.change_interval(seconds=300, time=datetime.time(next_run.hour, next_run.minute, next_run.second))
-    logging.info("✅ Scheduled release checker loop with corrected alignment")
+        logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+
+        await asyncio.sleep(delay)
+
+        try:
+            check_time = datetime.datetime.utcnow().strftime('%H:%M:%S')
+            logging.info(f"🔍 Starting release check at {check_time} UTC...")
+            await check_for_new_releases()
+            logging.info("✅ Completed release check cycle")
+        except Exception as e:
+            logging.error(f"❌ Error during release check: {e}")
+
+        # Next run is exactly 5 minutes from this check time
+        logging.info(f"⏰ Next check scheduled at {(datetime.datetime.utcnow() + datetime.timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
 
 @bot.event
 async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
 
-    if not release_check_loop.is_running():
-        release_check_loop.start()
-        logging.info("🚀 Release checker started")
+    if not hasattr(bot, 'release_checker_started'):
+        bot.release_checker_started = True
+        asyncio.create_task(release_check_scheduler())
+
         
 
 # --- Commands --- 
