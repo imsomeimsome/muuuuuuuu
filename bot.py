@@ -160,26 +160,27 @@ async def check_for_new_releases():
     logging.info("✅ Completed release check cycle")
 
 @tasks.loop(seconds=300)
+@tasks.loop(seconds=300)
 async def release_check_loop():
     now = datetime.datetime.utcnow().replace(second=1, microsecond=0)
     logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
-    
+
     try:
         await check_for_new_releases()
+        logging.info("✅ Completed release check cycle")
     except Exception as e:
         logging.error(f"❌ Error during release check: {e}")
 
     next_run = now + datetime.timedelta(minutes=5)
-    logging.info(f"✅ Completed release check cycle")
-    logging.info(f"⏰ Next check at {next_run.strftime('%H:%M:%S')} UTC (in 300.0s)")
+    logging.info(f"⏰ Next check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in 300.0s)")
 
 @release_check_loop.before_loop
 async def before_release_check():
     logging.info("⏳ Release checker initializing...")
     await bot.wait_until_ready()
-    logging.info("✅ Bot is ready — no delay, starting check loop immediately")
-    now = datetime.datetime.utcnow()
+    logging.info("✅ Bot is ready — determining first check time")
 
+    now = datetime.datetime.utcnow()
     next_run_minute = (now.minute // 5 + 1) * 5
     if next_run_minute >= 60:
         next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
@@ -187,9 +188,8 @@ async def before_release_check():
         next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
 
     delay = (next_run - now).total_seconds()
-    delay = max(delay, 0)  # Safeguard: no negative delays
-
-    logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+    delay = max(delay, 0)  # Ensure no negative delays
+    logging.info(f"🕰️ First check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
 
     try:
         logging.info("⌛ Sleeping until first check...")
@@ -202,8 +202,9 @@ async def before_release_check():
 async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     if not release_check_loop.is_running():
-        release_check_loop.start()
         logging.info("🚀 Release checker started")
+        release_check_loop.start()
+        
         
 
 # --- Commands --- 
