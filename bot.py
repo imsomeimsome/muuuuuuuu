@@ -160,7 +160,6 @@ async def check_for_new_releases():
     logging.info("✅ Completed release check cycle")
 
 @tasks.loop(seconds=300)
-@tasks.loop(seconds=300)
 async def release_check_loop():
     now = datetime.datetime.utcnow().replace(second=1, microsecond=0)
     logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
