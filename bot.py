@@ -165,7 +165,7 @@ async def release_check_loop():
     logging.info(f"🔍 Starting release check at {now.strftime('%H:%M:%S')} UTC...")
 
     try:
-        await check_for_new_releases()  # <-- your actual release checking function
+        await check_for_new_releases()  # your actual release checking function
         logging.info("✅ Completed release check cycle")
     except Exception as e:
         logging.error(f"❌ Error during release check: {e}")
@@ -188,22 +188,20 @@ async def before_release_check():
 
     delay = (next_run - now).total_seconds()
     delay = max(delay, 0)
+
     logging.info(f"🕰️ First check scheduled at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
 
-    try:
-        logging.info("⌛ Sleeping until first check...")
-        await asyncio.sleep(delay)
-        logging.info("⏰ Woke up for first release check.")
-    except Exception as e:
-        logging.error(f"❌ Error during wait before first check: {e}")
+    # Don't sleep here — we'll delay the loop's first run
+    release_check_loop.change_interval(seconds=300, time=datetime.time(next_run.hour, next_run.minute, next_run.second))
+    logging.info("✅ Scheduled release checker loop with corrected alignment")
 
 @bot.event
 async def on_ready():
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+
     if not release_check_loop.is_running():
         release_check_loop.start()
         logging.info("🚀 Release checker started")
-
         
 
 # --- Commands --- 
