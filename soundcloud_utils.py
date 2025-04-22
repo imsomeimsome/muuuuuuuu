@@ -203,20 +203,22 @@ def extract_features(title):
 # --- Bot Integration Helpers ---
 
 def get_soundcloud_artist_name(url):
-    """Get display name for storage."""
+    """Get display name for database storage."""
     try:
-        artist_id = extract_soundcloud_id(url).replace('artist_', '')
-        return get_artist_info(artist_id)['name']
-    except Exception:
+        clean_url = clean_soundcloud_url(url)
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
+        response = requests.get(resolve_url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        if data.get('kind') == 'user':
+            return data['username']  # this is "BLADEE" for Bladee1000
+        else:
+            return "Unknown Artist"
+    except Exception as e:
+        print(f"Error getting artist name: {e}")
         return "Unknown Artist"
 
-def get_soundcloud_release_info(url):
-    """Fetch release details."""
-    try:
-        return get_release_info(url)
-    except Exception as e:
-        print(f"SoundCloud Error: {e}")
-        return None
 
 def get_artist_name_by_url(url):
     """Get artist name from any URL."""
@@ -226,3 +228,20 @@ def get_artist_name_by_url(url):
     except Exception as e:
         print(f"Error getting artist name: {e}")
         return "Unknown Artist"
+
+def get_soundcloud_artist_id(url):
+    """Resolve SoundCloud artist URL to numeric artist ID."""
+    try:
+        clean_url = clean_soundcloud_url(url)
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
+        response = requests.get(resolve_url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+        if data.get('kind') == 'user':
+            return data['id']  # this is 1649194610
+        else:
+            return None
+    except Exception as e:
+        print(f"Error getting artist id: {e}")
+        return None
