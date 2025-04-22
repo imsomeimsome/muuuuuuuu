@@ -82,7 +82,7 @@ async def get_release_channel(guild_id: str, platform: str):
         return bot.get_channel(int(channel_id))
     return None  # Fallback: no channel set
 
-async def check_for_new_releases():
+async def check_for_new_releases(bot):
     logging.info("🔍 Checking for new releases...")
     artists = get_all_artists()
 
