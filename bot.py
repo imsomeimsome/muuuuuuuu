@@ -33,7 +33,8 @@ from soundcloud_utils import (
     get_artist_name_by_url as get_soundcloud_artist_name,
     get_last_release_date as get_soundcloud_last_release_date,
     get_soundcloud_release_info,
-    get_soundcloud_artist_id
+    get_soundcloud_artist_id,
+    extract_soundcloud_username as extract_soundcloud_id
 )
 
 
