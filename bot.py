@@ -172,7 +172,7 @@ async def check_for_new_releases(bot):
     logging.info(f"✅ Checked {checked_count} artists")
     logging.info("✅ Completed release check cycle")
 
-async def release_check_scheduler():
+async def release_check_scheduler(bot):
     await bot.wait_until_ready()
     logging.info("🚀 Release checker started")
     logging.info("⏳ Release checker initializing...")
