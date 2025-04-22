@@ -172,15 +172,14 @@ async def check_for_new_releases(bot):
     logging.info(f"✅ Checked {checked_count} artists")
     logging.info("✅ Completed release check cycle")
 
-async def release_check_scheduler(bot):
+async def release_check_scheduler():
     await bot.wait_until_ready()
     logging.info("🚀 Release checker started")
     logging.info("⏳ Release checker initializing...")
 
     while not bot.is_closed():
-        now = datetime.now(datetime.timezone.utc)
+        now = datetime.now(timezone.utc)
 
-        # Calculate the next time aligned to 5 minute marks
         next_run_minute = (now.minute // 5 + 1) * 5
         if next_run_minute >= 60:
             next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
@@ -195,14 +194,14 @@ async def release_check_scheduler(bot):
         await asyncio.sleep(delay)
 
         try:
-            check_time = datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')
+            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
-            await check_for_new_releases(bot)  # ✅ Pass the bot here
+            await check_for_new_releases()
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
 
-        logging.info(f"⏰ Next check scheduled at {(datetime.now(datetime.timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
+        logging.info(f"⏰ Next check scheduled at {(datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
 
 
 @bot.event
