@@ -111,7 +111,7 @@ def get_latest_album_id(artist_id):
         print(f"Error getting latest album for {artist_id}: {e}")
         return None
 
-def get_spotify_release_info(release_id):
+def get_release_info(release_id):
     """Fetch detailed release info for a Spotify album or single."""
     try:
         album = spotify.album(release_id)

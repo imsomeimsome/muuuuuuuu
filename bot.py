@@ -25,7 +25,7 @@ from spotify_utils import (
     get_artist_info as get_spotify_artist_info,
     get_last_release_date as get_spotify_last_release_date,
     get_release_info as get_spotify_release_info,
-    get_latest_album_id
+    get_latest_album_id as get_spotify_latest_album_id
 )
 
 from soundcloud_utils import (
@@ -105,7 +105,7 @@ async def check_for_new_releases(bot):
             release_info = None
 
             if artist['platform'] == 'spotify':
-                latest_album_id = get_latest_album_id(artist['artist_id'])
+                latest_album_id = get_spotify_latest_album_id(artist['artist_id'])
                 if not latest_album_id:
                     logging.warning(f"No recent Spotify releases for {artist['artist_name']}")
                     continue
