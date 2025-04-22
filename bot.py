@@ -212,8 +212,8 @@ async def on_ready():
 
     if not hasattr(bot, 'release_checker_started'):
         bot.release_checker_started = True
-        asyncio.create_task(release_check_scheduler(bot))  # <-- pass bot here
-
+        asyncio.create_task(release_check_scheduler(bot))  # ✅ pass bot here properly
+        logging.info("🚀 Started release checker")
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
