@@ -111,12 +111,13 @@ def get_latest_album_id(artist_id):
         print(f"Error getting latest album for {artist_id}: {e}")
         return None
 
-def get_release_info(release_id):
+def get_spotify_release_info(release_id):
     """Fetch detailed release info for a Spotify album or single."""
     try:
         album = spotify.album(release_id)
+        if not album:
+            return None
 
-        # Main artists
         main_artists = [artist['name'] for artist in album['artists']]
         main_artist_ids = [artist['id'] for artist in album['artists']]
         artist_name = ', '.join(main_artists)
@@ -126,12 +127,10 @@ def get_release_info(release_id):
         cover_url = album['images'][0]['url'] if album.get('images') else None
         track_count = album.get('total_tracks', 0)
 
-        # Total duration (in mm:ss)
         total_ms = sum(track['duration_ms'] for track in album['tracks']['items'])
         minutes, seconds = divmod(total_ms // 1000, 60)
         duration_min = f"{minutes}:{seconds:02d}"
 
-        # Featured artists (across tracks)
         features = set()
         for track in album['tracks']['items']:
             for artist in track['artists']:
@@ -139,7 +138,6 @@ def get_release_info(release_id):
                     features.add(artist['name'])
         features_str = ", ".join(sorted(features)) if features else "None"
 
-        # Merge album genres + main artist genres
         genres = album.get('genres', [])
         for artist_id in main_artist_ids:
             try:
@@ -147,7 +145,7 @@ def get_release_info(release_id):
                 genres.extend(artist_genres)
             except Exception:
                 continue
-        genres = sorted(set(genres))
+        genres = list(sorted(set(genres)))
 
         return {
             "artist_name": artist_name,
@@ -159,8 +157,8 @@ def get_release_info(release_id):
             "duration": duration_min,
             "features": features_str,
             "genres": genres,
-            "repost": False  # Spotify has no repost concept
+            "repost": False
         }
     except Exception as e:
-        print(f"Error fetching release info for {release_id}: {e}")
+        print(f"Error fetching release info for {release_id}: {str(e)}")
         return None

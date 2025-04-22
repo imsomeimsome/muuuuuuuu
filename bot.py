@@ -25,7 +25,8 @@ from spotify_utils import (
     get_artist_info as get_spotify_artist_info,
     get_last_release_date as get_spotify_last_release_date,
     get_release_info as get_spotify_release_info,
-    get_latest_album_id as get_spotify_latest_album_id
+    get_latest_album_id as get_spotify_latest_album_id,
+    get_latest_album_id
 )
 
 from soundcloud_utils import (
@@ -94,30 +95,39 @@ async def get_release_channel(guild_id: str, platform: str):
 async def check_for_new_releases(bot):
     logging.info("🔍 Checking for new releases...")
     artists = get_all_artists()
-
     if not artists:
         logging.info("No artists to check.")
         return
 
+    checked_count = 0
+
     for artist in artists:
         try:
-            platform = artist['platform']
-            artist_url = artist['artist_url']
-            current_date = None
-            release_info = {}
+            release_info = None
 
-            if platform == 'spotify':
-                latest_album_id = extract_spotify_id(artist_url)
+            if artist['platform'] == 'spotify':
+                latest_album_id = get_latest_album_id(artist['artist_id'])
+                if not latest_album_id:
+                    logging.warning(f"No recent Spotify releases for {artist['artist_name']}")
+                    continue
+
                 release_info = get_spotify_release_info(latest_album_id)
+                if not release_info:
+                    logging.error(f"❌ Failed to fetch release info for {artist['artist_name']}. Skipping.")
+                    continue
+
                 current_date = release_info['release_date']
 
-            elif platform == 'soundcloud':
-                release_info = get_soundcloud_release_info(artist_url)
+            elif artist['platform'] == 'soundcloud':
+                release_info = get_soundcloud_release_info(artist['artist_url'])
                 if not release_info:
+                    logging.error(f"❌ Failed to check SoundCloud artist {artist['artist_name']}. Skipping.")
                     continue
+
                 current_date = release_info['release_date']
 
             else:
+                logging.warning(f"Unknown platform for {artist['artist_name']}. Skipping.")
                 continue
 
             if current_date != artist['last_release_date']:
@@ -125,18 +135,17 @@ async def check_for_new_releases(bot):
 
                 channel = await get_release_channel(
                     guild_id=getattr(artist, 'guild_id', '') or artist['owner_id'],
-                    platform=platform
+                    platform=artist['platform']
                 )
-
                 if not channel:
-                    logging.warning(f"No release channel set for {artist['artist_name']} ({platform})")
+                    logging.warning(f"No channel found for {artist['artist_name']}")
                     continue
 
                 embed = create_music_embed(
-                    platform=platform,
+                    platform=artist['platform'],
                     artist_name=release_info.get('artist_name', artist['artist_name']),
                     title=release_info.get('title', 'New Release'),
-                    url=release_info.get('url', artist_url),
+                    url=release_info.get('url', artist['artist_url']),
                     release_date=current_date,
                     cover_url=release_info.get('cover_url', 'https://i.imgur.com/default.jpg'),
                     features=release_info.get('features', 'None'),
@@ -152,21 +161,17 @@ async def check_for_new_releases(bot):
                 else:
                     await channel.send(embed=embed)
 
-                await bot.log_event(
-                    f"✅ New {platform.title()} release detected: "
-                    f"{artist['artist_name']} - {release_info.get('title', '')}"
-                )
-
+                await bot.log_event(f"✅ New {artist['platform']} release detected: {artist['artist_name']} - {release_info.get('title', '')}")
                 logging.info(f"✅ Posted new release for {artist['artist_name']}")
+
+            checked_count += 1
 
         except Exception as e:
             logging.error(f"❌ Failed to check {artist['platform']} artist {artist['artist_name']}: {e}")
-            await bot.log_event(
-                f"❌ Failed to check {artist['platform']} artist {artist['artist_name']}: {e}"
-            )
+            await bot.log_event(f"❌ Error checking {artist['platform']} artist {artist['artist_name']}: {e}")
 
+    logging.info(f"✅ Checked {checked_count} artists")
     logging.info("✅ Completed release check cycle")
-    return len(artists)
 
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()
@@ -174,8 +179,9 @@ async def release_check_scheduler(bot):
     logging.info("⏳ Release checker initializing...")
 
     while not bot.is_closed():
-        now = datetime.now(timezone.utc)
+        now = datetime.now(datetime.timezone.utc)
 
+        # Calculate the next time aligned to 5 minute marks
         next_run_minute = (now.minute // 5 + 1) * 5
         if next_run_minute >= 60:
             next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
@@ -185,19 +191,20 @@ async def release_check_scheduler(bot):
         delay = (next_run - now).total_seconds()
         delay = max(delay, 0)
 
-        logging.info(f"🕰️ Next check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+        logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
 
         await asyncio.sleep(delay)
 
         try:
-            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
+            check_time = datetime.now(datetime.timezone.utc).strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
-            await check_for_new_releases(bot)   # must match the function signature
+            await check_for_new_releases(bot)  # ✅ Pass the bot here
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
 
-        logging.info(f"⏰ Next check scheduled at {(datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
+        logging.info(f"⏰ Next check scheduled at {(datetime.now(datetime.timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
+
 
 @bot.event
 async def on_ready():

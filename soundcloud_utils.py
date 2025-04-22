@@ -228,7 +228,29 @@ def get_soundcloud_artist_id(url):
     except Exception as e:
         print(f"Error getting artist ID: {e}")
         return None
-
+    
 def get_soundcloud_release_info(url):
-    """Alias for get_release_info for bot-side clarity."""
-    return get_release_info(url)
+    """Main function for release checking."""
+    try:
+        clean_url = clean_soundcloud_url(url)
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
+        response = requests.get(resolve_url, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+
+        if data['kind'] == 'track':
+            return process_track(data)
+        elif data['kind'] == 'playlist':
+            return process_playlist(data)
+        elif data['kind'] == 'user':
+            return get_artist_release(data)
+        else:
+            raise ValueError("Unsupported content type")
+
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP Error: {e}")
+        return None
+    except Exception as e:
+        print(f"SoundCloud release info fetch failed: {e}")
+        return None
