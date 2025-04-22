@@ -20,13 +20,22 @@ from database_utils import (
 )
 from embed_utils import create_music_embed
 from spotify_utils import (
-    extract_spotify_id, get_artist_name as get_spotify_artist_name,
-    get_release_info as get_spotify_release_info
+    extract_spotify_id,
+    get_artist_name as get_spotify_artist_name,
+    get_artist_info as get_spotify_artist_info,
+    get_last_release_date as get_spotify_last_release_date,
+    get_release_info as get_spotify_release_info,
+    get_latest_album_id as get_spotify_latest_album_id
 )
+
 from soundcloud_utils import (
-    extract_soundcloud_id, get_artist_name_by_url as get_soundcloud_artist_name,
-    get_release_info as get_soundcloud_release_info
+    extract_soundcloud_id,
+    get_artist_name_by_url as get_soundcloud_artist_name,
+    get_last_release_date as get_soundcloud_last_release_date,
+    get_soundcloud_release_info,
+    get_soundcloud_artist_id
 )
+
 
 # Configure logging
 logging.basicConfig(
