@@ -228,3 +228,7 @@ def get_soundcloud_artist_id(url):
     except Exception as e:
         print(f"Error getting artist ID: {e}")
         return None
+
+def get_soundcloud_release_info(url):
+    """Alias for get_release_info for bot-side clarity."""
+    return get_release_info(url)
