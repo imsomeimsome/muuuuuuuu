@@ -25,7 +25,6 @@ from spotify_utils import (
     get_artist_info as get_spotify_artist_info,
     get_last_release_date as get_spotify_last_release_date,
     get_release_info as get_spotify_release_info,
-    get_latest_album_id as get_spotify_latest_album_id,
     get_latest_album_id
 )
 
