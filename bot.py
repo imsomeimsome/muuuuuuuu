@@ -85,11 +85,12 @@ def require_registration(func):
 
 # --- Release Checker ---
 
-async def get_release_channel(guild_id: str, platform: str):
+async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
+    logging.info(f"🔎 Looking for release channel: Guild ID = {guild_id}, Platform = {platform}")
     channel_id = get_channel(guild_id, platform)
     if channel_id:
         return bot.get_channel(int(channel_id))
-    return None  # Fallback: no channel set
+    return None
 
 async def check_for_new_releases(bot):
     logging.info("🔍 Checking for new releases...")
@@ -102,17 +103,13 @@ async def check_for_new_releases(bot):
 
     for artist in artists:
         try:
-            release_info = None
-
             if artist['platform'] == 'spotify':
                 latest_album_id = get_spotify_latest_album_id(artist['artist_id'])
                 if not latest_album_id:
-                    logging.warning(f"No recent Spotify releases for {artist['artist_name']}")
                     continue
 
                 release_info = get_spotify_release_info(latest_album_id)
                 if not release_info:
-                    logging.error(f"❌ Failed to fetch release info for {artist['artist_name']}. Skipping.")
                     continue
 
                 current_date = release_info['release_date']
@@ -120,20 +117,22 @@ async def check_for_new_releases(bot):
             elif artist['platform'] == 'soundcloud':
                 release_info = get_soundcloud_release_info(artist['artist_url'])
                 if not release_info:
-                    logging.error(f"❌ Failed to check SoundCloud artist {artist['artist_name']}. Skipping.")
                     continue
 
                 current_date = release_info['release_date']
 
             else:
-                logging.warning(f"Unknown platform for {artist['artist_name']}. Skipping.")
                 continue
 
             if current_date != artist['last_release_date']:
-                update_last_release_date(artist['artist_id'], artist['owner_id'], current_date)
+                update_last_release_date(
+                    artist['artist_id'],
+                    artist['owner_id'],
+                    current_date
+                )
 
                 channel = await get_release_channel(
-                    guild_id=getattr(artist, 'guild_id', '') or artist['owner_id'],
+                    guild_id=artist.get('guild_id') or artist['owner_id'],
                     platform=artist['platform']
                 )
                 if not channel:
@@ -146,31 +145,25 @@ async def check_for_new_releases(bot):
                     title=release_info.get('title', 'New Release'),
                     url=release_info.get('url', artist['artist_url']),
                     release_date=current_date,
-                    cover_url=release_info.get('cover_url', 'https://i.imgur.com/default.jpg'),
-                    features=release_info.get('features', 'None'),
-                    track_count=release_info.get('track_count', 1),
-                    duration=release_info.get('duration', '0:00'),
+                    cover_url=release_info.get('cover_url'),
+                    features=release_info.get('features'),
+                    track_count=release_info.get('track_count'),
+                    duration=release_info.get('duration'),
                     repost=release_info.get('repost', False),
-                    genres=release_info.get('genres', [])
+                    genres=release_info.get('genres')
                 )
 
-                if channel.type == discord.ChannelType.news:
-                    message = await channel.send(embed=embed)
-                    await message.publish()
-                else:
-                    await channel.send(embed=embed)
-
-                await bot.log_event(f"✅ New {artist['platform']} release detected: {artist['artist_name']} - {release_info.get('title', '')}")
+                await channel.send(embed=embed)
                 logging.info(f"✅ Posted new release for {artist['artist_name']}")
 
             checked_count += 1
 
         except Exception as e:
-            logging.error(f"❌ Failed to check {artist['platform']} artist {artist['artist_name']}: {e}")
-            await bot.log_event(f"❌ Error checking {artist['platform']} artist {artist['artist_name']}: {e}")
+            logging.error(f"❌ Failed to check {artist['platform']} artist {artist['artist_name']}. Skipping.")
+            logging.error(str(e))
 
     logging.info(f"✅ Checked {checked_count} artists")
-    logging.info("✅ Completed release check cycle")
+
 
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()
@@ -178,7 +171,7 @@ async def release_check_scheduler(bot):
     logging.info("⏳ Release checker initializing...")
 
     while not bot.is_closed():
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
 
         next_run_minute = (now.minute // 5 + 1) * 5
         if next_run_minute >= 60:
@@ -190,18 +183,17 @@ async def release_check_scheduler(bot):
         delay = max(delay, 0)
 
         logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-
         await asyncio.sleep(delay)
 
         try:
-            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
+            check_time = datetime.utcnow().strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
             await check_for_new_releases(bot)
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
 
-        logging.info(f"⏰ Next check scheduled at {(datetime.now(timezone.utc) + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
+        logging.info(f"⏰ Next check scheduled at {(datetime.utcnow() + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
 
 
 @bot.event
@@ -343,37 +335,48 @@ async def ping_command(interaction: discord.Interaction):
 
 @bot.tree.command(name="track", description="Start tracking an artist.")
 @app_commands.describe(link="Spotify or SoundCloud artist link")
-@require_registration
 async def track_command(interaction: discord.Interaction, link: str):
-    user_id = str(interaction.user.id)
+    await interaction.response.defer()
+
+    platform = None
+    artist_name = None
+    artist_id = None
+
     try:
-        if "spotify.com/artist" in link:
+        if "spotify.com" in link:
+            platform = "spotify"
             artist_id = extract_spotify_id(link)
-            artist_name = get_spotify_artist_name(artist_id)
-            if artist_exists(artist_id, user_id):
-                await interaction.response.send_message(f"❌ Already tracking **{artist_name}**.")
+            if not artist_id:
+                await interaction.followup.send("❌ Invalid Spotify artist link.")
                 return
-            add_artist("spotify", artist_id, artist_name, link, user_id)
+            artist_name = get_spotify_artist_name(artist_id)
 
         elif "soundcloud.com" in link:
-            artist_id = extract_soundcloud_id(link)
-            artist_name = get_soundcloud_artist_name(link)
-            if artist_exists(artist_id, user_id):
-                await interaction.response.send_message(f"❌ Already tracking **{artist_name}**.")
+            platform = "soundcloud"
+            artist_id = get_soundcloud_artist_id(link)
+            if not artist_id:
+                await interaction.followup.send("❌ Could not resolve SoundCloud artist.")
                 return
-            add_artist("soundcloud", artist_id, artist_name, link, user_id)
+            artist_name = get_soundcloud_artist_name(link)
 
         else:
-            await interaction.response.send_message("❌ Invalid link.")
+            await interaction.followup.send("❌ Unsupported platform.")
             return
 
-        await bot.log_event(f"➕ {interaction.user.name} started tracking **{artist_name}**.")
-        await interaction.response.send_message(f"✅ Now tracking **{artist_name}**.")
+        # Register the artist in your database
+        add_artist(
+            owner_id=interaction.user.id,
+            platform=platform,
+            artist_id=artist_id,
+            artist_name=artist_name,
+            artist_url=link,
+            last_release_date=None
+        )
+
+        await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.title()}!")
 
     except Exception as e:
-        await bot.log_event(f"❌ Error: {str(e)}")
-        await interaction.response.send_message(f"❌ Error: `{str(e)}`")
-
+        await interaction.followup.send(f"❌ Error: {str(e)}")
 
 @bot.tree.command(name="untrack", description="Stop tracking an artist.")
 @app_commands.describe(artist_identifier="Spotify/SoundCloud artist link or artist ID")
