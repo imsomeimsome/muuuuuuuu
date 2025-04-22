@@ -196,7 +196,7 @@ async def release_check_scheduler(bot):
         try:
             check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
-            await check_for_new_releases()
+            await check_for_new_releases(bot)
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
