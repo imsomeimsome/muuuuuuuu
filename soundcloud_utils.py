@@ -9,20 +9,25 @@ from datetime import datetime
 load_dotenv()
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 
+# Global headers for all requests to avoid 403 errors
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+}
+
 # --- Core URL Handling ---
 
 def clean_soundcloud_url(url):
     """Normalize and verify SoundCloud URLs."""
     try:
         if 'on.soundcloud.com' in url:
-            response = requests.head(url, allow_redirects=True, timeout=10)
+            response = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
             url = response.url
 
         parsed = urlparse(url)
         if 'soundcloud.com' not in parsed.netloc:
             raise ValueError("Invalid SoundCloud domain")
 
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
@@ -51,9 +56,8 @@ def get_artist_info(url_or_username):
         else:
             username = url_or_username
 
-        # Final resolve (once only)
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
-        response = requests.get(resolve_url, timeout=10)
+        response = requests.get(resolve_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         data = response.json()
@@ -80,7 +84,7 @@ def get_last_release_date(artist_url):
         artist_id = artist_info['id']
 
         tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=1&order=created_at"
-        response = requests.get(tracks_url, timeout=10)
+        response = requests.get(tracks_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         tracks = response.json()
@@ -97,7 +101,7 @@ def get_release_info(url):
     try:
         clean_url = clean_soundcloud_url(url)
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-        response = requests.get(resolve_url, timeout=10)
+        response = requests.get(resolve_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         data = response.json()
@@ -162,7 +166,7 @@ def get_artist_release(artist_data):
     """Get latest track release for artist."""
     try:
         tracks_url = f"https://api-v2.soundcloud.com/users/{artist_data['id']}/tracks?client_id={CLIENT_ID}&limit=1"
-        response = requests.get(tracks_url, timeout=10)
+        response = requests.get(tracks_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
         tracks = response.json()
