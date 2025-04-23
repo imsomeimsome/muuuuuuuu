@@ -172,7 +172,7 @@ async def release_check_scheduler(bot):
     logging.info("⏳ Release checker initializing...")
 
     while not bot.is_closed():
-        now = datetime.now(datetime.UTC)
+        now = datetime.now(timezone.utc)
 
         next_run_minute = (now.minute // 5 + 1) * 5
         if next_run_minute >= 60:
