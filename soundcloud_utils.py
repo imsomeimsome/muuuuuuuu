@@ -226,3 +226,7 @@ def get_soundcloud_release_info(url):
     except Exception as e:
         print(f"SoundCloud release info fetch failed: {e}")
         return None
+
+def extract_soundcloud_id(url):
+    """Alias for extract_soundcloud_username, for compatibility."""
+    return extract_soundcloud_username(url)
