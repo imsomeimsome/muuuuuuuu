@@ -165,11 +165,21 @@ def process_playlist(playlist_data):
 def get_artist_release(artist_data):
     """Get latest track release for artist."""
     try:
-        tracks_url = f"https://api-v2.soundcloud.com/users/{artist_data['id']}/tracks?client_id={CLIENT_ID}&limit=1"
+        tracks_url = (
+            f"https://api-v2.soundcloud.com/users/{artist_data['id']}/tracks"
+            f"?client_id={CLIENT_ID}&limit=1&linked_partitioning=1&representation=full"
+        )
         response = requests.get(tracks_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
-        tracks = response.json()
+        data = response.json()
+
+        print(f"🔍 Fetched artist ID {artist_data['id']} tracks")
+        print(f"📦 Raw API response: {data}")
+
+        # Some responses return 'collection', not raw list
+        tracks = data.get('collection', data if isinstance(data, list) else [])
+
         if not tracks:
             raise ValueError("No tracks found")
 
