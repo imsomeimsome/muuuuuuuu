@@ -43,9 +43,15 @@ def extract_soundcloud_username(url):
 
 # --- Artist Data Fetching ---
 
-def get_artist_info(username):
-    """Get complete artist metadata."""
+def get_artist_info(url_or_username):
+    """Resolve a SoundCloud user from a full profile URL or username."""
     try:
+        if url_or_username.startswith("http"):
+            username = extract_soundcloud_username(url_or_username)
+        else:
+            username = url_or_username
+
+        # Final resolve (once only)
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
         response = requests.get(resolve_url, timeout=10)
         response.raise_for_status()
@@ -70,8 +76,7 @@ def get_artist_info(username):
 def get_last_release_date(artist_url):
     """Get most recent release date."""
     try:
-        username = extract_soundcloud_username(artist_url)
-        artist_info = get_artist_info(username)
+        artist_info = get_artist_info(artist_url)
         artist_id = artist_info['id']
 
         tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=1&order=created_at"
@@ -198,10 +203,9 @@ def extract_features(title):
 # --- Bot Integration Helpers ---
 
 def get_soundcloud_artist_name(url):
-    """Get display name for database storage."""
+    """Get artist name from SoundCloud profile URL."""
     try:
-        username = extract_soundcloud_username(url)
-        return get_artist_info(username)['name']
+        return get_artist_info(url)['name']
     except Exception as e:
         print(f"Error getting artist name: {e}")
         return "Unknown Artist"
@@ -211,10 +215,10 @@ def get_artist_name_by_url(url):
     return get_soundcloud_artist_name(url)
 
 def get_soundcloud_artist_id(url):
-    """Resolve SoundCloud artist URL to numeric artist ID."""
+    """Get the numeric artist ID from a SoundCloud URL."""
     try:
-        username = extract_soundcloud_username(url)
-        return get_artist_info(username)['id']
+        artist_info = get_artist_info(url)
+        return artist_info['id']
     except Exception as e:
         print(f"Error getting artist ID: {e}")
         return None
