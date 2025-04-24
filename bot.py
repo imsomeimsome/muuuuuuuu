@@ -207,6 +207,7 @@ async def release_check_scheduler(bot):
 
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     logging.info("🚀 Release checker started")
     logging.info("⏳ Release checker initializing...")
