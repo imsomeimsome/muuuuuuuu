@@ -589,6 +589,7 @@ if __name__ == "__main__":
     bot.run(TOKEN)
 
 @bot.tree.command(name="channels", description="Show the current channels for releases, logs, and commands.")
+@require_registration
 @app_commands.checks.has_permissions(manage_guild=True)
 async def channels_command(interaction: discord.Interaction):
     guild = interaction.guild
@@ -620,6 +621,7 @@ async def channels_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually")
+@require_registration
 @app_commands.describe(url="A SoundCloud artist or release URL")
 async def debug_soundcloud(interaction: discord.Interaction, url: str):
     from soundcloud_utils import get_soundcloud_release_info
