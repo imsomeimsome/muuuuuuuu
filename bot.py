@@ -37,7 +37,6 @@ from soundcloud_utils import (
     extract_soundcloud_username as extract_soundcloud_id
 )
 
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -88,10 +87,19 @@ def require_registration(func):
 
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
     logging.info(f"🔎 Looking for release channel: Guild ID = {guild_id}, Platform = {platform}")
+
     channel_id = get_channel(guild_id, platform)
-    if channel_id:
-        return bot.get_channel(int(channel_id))
-    return None
+
+    if not channel_id:
+        logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id}")
+        return None
+
+    channel = bot.get_channel(int(channel_id))
+    if channel is None:
+        logging.warning(f"⚠️ Channel ID {channel_id} for {platform} not found in bot cache")
+        return None
+
+    return channel
 
 async def check_for_new_releases(bot):
     logging.info("🔍 Checking for new releases...")
