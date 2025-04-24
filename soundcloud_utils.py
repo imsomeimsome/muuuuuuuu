@@ -174,8 +174,6 @@ def get_artist_release(artist_data):
 
         data = response.json()
 
-        print(f"🔍 Fetched artist ID {artist_data['id']} tracks")
-        print(f"📦 Raw API response: {data}")
 
         # Some responses return 'collection', not raw list
         tracks = data.get('collection', data if isinstance(data, list) else [])

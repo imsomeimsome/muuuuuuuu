@@ -578,3 +578,34 @@ async def export_command(interaction: discord.Interaction):
 if __name__ == "__main__":
     keep_alive()  # Start the web server for UptimeRobot
     bot.run(TOKEN)
+
+@bot.tree.command(name="channels", description="Show the current channels for releases, logs, and commands.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def channels_command(interaction: discord.Interaction):
+    guild = interaction.guild
+    guild_id = str(guild.id)
+
+    # All channel types that can be configured
+    platforms = {
+        "spotify": "🟢 Spotify",
+        "soundcloud": "🎧 SoundCloud",
+        "logs": "🪵 Logs",
+        "commands": "💬 Commands"
+    }
+
+    lines = []
+    for key, label in platforms.items():
+        channel_id = get_channel(guild_id, key)  # Make sure your get_channel function supports all keys
+        if channel_id:
+            channel = bot.get_channel(int(channel_id))
+            channel_mention = channel.mention if channel else f"`{channel_id}`"
+        else:
+            channel_mention = "*Not Set*"
+        lines.append(f"{label} — {channel_mention}")
+
+    embed = discord.Embed(
+        title="📡 Configured Channels",
+        description="\n".join(lines),
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
