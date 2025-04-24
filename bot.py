@@ -207,14 +207,22 @@ async def release_check_scheduler(bot):
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    await bot.wait_until_ready()
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
     logging.info("🚀 Release checker started")
     logging.info("⏳ Release checker initializing...")
 
+    # ✅ Sync slash commands on startup
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"🌐 Synced {len(synced)} slash commands.")
+    except Exception as e:
+        logging.error(f"❌ Failed to sync slash commands: {e}")
+
+    # ✅ Only start scheduler once
     if not hasattr(bot, 'release_checker_started'):
         bot.release_checker_started = True
-        asyncio.create_task(release_check_scheduler(bot))  # ✅ pass bot here properly
+        asyncio.create_task(release_check_scheduler(bot))
         logging.info("🚀 Started release checker")
 
 # --- Commands --- 
