@@ -595,7 +595,6 @@ async def channels_command(interaction: discord.Interaction):
     guild = interaction.guild
     guild_id = str(guild.id)
 
-    # All channel types that can be configured
     platforms = {
         "spotify": "🟢 Spotify",
         "soundcloud": "🎧 SoundCloud",
@@ -605,7 +604,7 @@ async def channels_command(interaction: discord.Interaction):
 
     lines = []
     for key, label in platforms.items():
-        channel_id = get_channel(guild_id, key)  # Make sure your get_channel function supports all keys
+        channel_id = get_channel(guild_id, key)
         if channel_id:
             channel = bot.get_channel(int(channel_id))
             channel_mention = channel.mention if channel else f"`{channel_id}`"
@@ -620,28 +619,32 @@ async def channels_command(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-@bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually")
-@require_registration
+@bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually.")
 @app_commands.describe(url="A SoundCloud artist or release URL")
+@require_registration
 async def debug_soundcloud(interaction: discord.Interaction, url: str):
     from soundcloud_utils import get_soundcloud_release_info
     await interaction.response.defer()
+
     try:
         info = get_soundcloud_release_info(url)
         if info is None:
             await interaction.followup.send("❌ Could not fetch release info. Check the URL or client ID.")
-        else:
-            embed = discord.Embed(
-                title=info["title"],
-                description=f"By {info['artist_name']}\nReleased: {info['release_date']}\nTracks: {info['track_count']}",
-                color=0xFFA500  # Orange for SoundCloud
-            )
-            embed.set_thumbnail(url=info["cover_url"])
-            embed.add_field(name="Duration", value=info["duration"])
-            embed.add_field(name="Features", value=info["features"])
-            embed.add_field(name="Genres", value=", ".join(info["genres"]) or "None")
-            embed.add_field(name="Repost?", value="📌 Yes" if info.get("repost") else "No")
-            embed.url = info["url"]
-            await interaction.followup.send(embed=embed)
+            return
+
+        embed = discord.Embed(
+            title=info["title"],
+            description=f"By {info['artist_name']}\nReleased: {info['release_date']}\nTracks: {info['track_count']}",
+            color=discord.Color.orange()
+        )
+        embed.set_thumbnail(url=info["cover_url"])
+        embed.add_field(name="Duration", value=info["duration"], inline=True)
+        embed.add_field(name="Features", value=info["features"], inline=True)
+        embed.add_field(name="Genres", value=", ".join(info["genres"]) or "None", inline=False)
+        embed.add_field(name="Repost?", value="📌 Yes" if info.get("repost") else "No", inline=True)
+        embed.url = info["url"]
+
+        await interaction.followup.send(embed=embed)
+
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
