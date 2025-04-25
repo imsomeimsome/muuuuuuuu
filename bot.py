@@ -98,6 +98,10 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
     if channel is None:
         logging.warning(f"⚠️ Channel ID {channel_id} for {platform} not found in bot cache")
         return None
+    
+    if not isinstance(channel, discord.TextChannel):
+        logging.warning(f"⚠️ Channel ID {channel_id} exists but is not a text channel")
+        return None
 
     return channel
 
@@ -286,7 +290,9 @@ async def testrelease_command(interaction: discord.Interaction, artist_input: st
 
             # Rest of your existing logic
             try:
-                channel = await get_release_channel(str(interaction.guild.id), artist['platform'])
+                guild_id = artist.get('guild_id') or str(interaction.guild.id if interaction.guild else artist['owner_id'])
+                channel = await get_release_channel(guild_id, artist['platform'])
+
                 if not channel:
                     channel = interaction.channel
 
@@ -333,18 +339,26 @@ async def register_command(interaction: discord.Interaction):
 @require_registration
 async def help_command(interaction: discord.Interaction):
     help_text = (
-        "**Available Commands:**\n"
-        "📝 `/list` — Show tracked artists\n"
-        "➕ `/track` — Start tracking an artist\n"
-        "➖ `/untrack` — Stop tracking an artist\n"
-        "🏓 `/ping` — Pong!\n"
-        "🎨 `/testembed` — Preview a release embed\n"
-        "📤 `/export` — Export your artist list\n"
-        "ℹ️ `/info` — Show bot stats\n"
-        "📖 `/key` — Show emoji/color key\n"
-        "👤 `/userinfo` — Show your or other users' stats"
+        "**📜 Available Commands:**\n"
+        "🟢 `/track` — Start tracking an artist by link\n"
+        "🔴 `/untrack` — Stop tracking an artist\n"
+        "📋 `/list` — Show all tracked artists\n"
+        "📦 `/export` — Export your tracked artists list\n"
+        "🧪 `/testembed` — Preview a release embed using a link\n"
+        "🧪 `/testrelease` — Preview a release using tracked artist ID\n"
+        "🛰 `/setchannel` — Set notification channels for releases/logs\n"
+        "🔁 `/trackchange` — Toggle tracking of specific release types\n"
+        "📡 `/channels` — View which channels are configured\n"
+        "🔍 `/debugsoundcloud` — Manually fetch SoundCloud release info\n"
+        "📊 `/info` — Show general bot usage stats\n"
+        "🎨 `/key` — Emoji and color key for releases\n"
+        "👤 `/userinfo` — Show your bot stats\n"
+        "👤 `/userinfo other` — Admins: Check someone else's stats\n"
+        "🌐 `/ping` — Check if the bot is responsive\n"
+        "🧾 `/register` — Register yourself to start tracking"
     )
-    await interaction.response.send_message(help_text)
+    await interaction.response.send_message(help_text, ephemeral=True)
+
 
 @bot.tree.command(name="ping", description="Pong!")
 @require_registration
@@ -584,10 +598,6 @@ async def export_command(interaction: discord.Interaction):
     file = discord.File(filename, filename=filename)
     await interaction.response.send_message("📤 Here's your exported list of tracked artists:", file=file)
 
-if __name__ == "__main__":
-    keep_alive()  # Start the web server for UptimeRobot
-    bot.run(TOKEN)
-
 @bot.tree.command(name="channels", description="Show the current channels for releases, logs, and commands.")
 @require_registration
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -648,3 +658,7 @@ async def debug_soundcloud(interaction: discord.Interaction, url: str):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
+
+if __name__ == "__main__":
+    keep_alive()  # Start the web server for UptimeRobot
+    bot.run(TOKEN)
