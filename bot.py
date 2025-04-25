@@ -88,7 +88,8 @@ def require_registration(func):
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
     logging.info(f"🔎 Looking for release channel: Guild ID = {guild_id}, Platform = {platform}")
 
-    channel_id = get_channel(guild_id, platform)
+    channel_id = get_channel(str(guild_id), platform)
+
 
     if not channel_id:
         logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id}")
@@ -397,13 +398,14 @@ async def track_command(interaction: discord.Interaction, link: str):
 
         # Register the artist in your database
         add_artist(
-            owner_id=interaction.user.id,
-            platform=platform,
-            artist_id=artist_id,
-            artist_name=artist_name,
-            artist_url=link,
-            last_release_date=None
-        )
+    platform=platform,
+    artist_id=artist_id,
+    artist_name=artist_name,
+    artist_url=link,
+    owner_id=str(interaction.user.id),
+    # genres=genres,  # <-- Now defined safely
+)
+
 
         await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.title()}!")
 
