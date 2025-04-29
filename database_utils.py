@@ -166,17 +166,42 @@ def update_last_release_date(artist_id, owner_id, new_date):
     conn.close()
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None):
+    """Add a tracked artist to the database."""
     conn = get_connection()
     c = conn.cursor()
-    c.execute(
-        '''INSERT OR REPLACE INTO artists 
-        (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (platform, artist_id, artist_name, artist_url, None, owner_id, '', ",".join(genres) if genres else None, guild_id)
-    )
-    conn.commit()
-    conn.close()
 
+    # Ensure genres is a comma-separated string
+    genre_string = ",".join(genres) if genres else None
+
+    # Make sure guild_id is stored properly
+    if not guild_id:
+        print(f"⚠️ Warning: guild_id not provided for artist '{artist_name}' (owner_id: {owner_id})")
+
+    try:
+        c.execute(
+            '''
+            INSERT OR REPLACE INTO artists 
+            (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (
+                platform,
+                artist_id,
+                artist_name,
+                artist_url,
+                None,  # last_release_date
+                owner_id,
+                '',  # tracked_users
+                genre_string,
+                guild_id
+            )
+        )
+        conn.commit()
+        print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
+    except Exception as e:
+        print(f"❌ Failed to add artist '{artist_name}': {e}")
+    finally:
+        conn.close()
 
 def remove_artist(artist_id, owner_id):
     conn = get_connection()
