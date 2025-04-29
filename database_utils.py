@@ -185,13 +185,15 @@ def remove_artist(artist_id, owner_id):
     conn.commit()
     conn.close()
 
-def artist_exists(artist_id, owner_id):
+def artist_exists(platform, artist_id, owner_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT 1 FROM artists WHERE artist_id = ? AND owner_id = ?", (artist_id, owner_id))
-    exists = c.fetchone() is not None
+    c.execute('''
+        SELECT 1 FROM artists WHERE platform = ? AND artist_id = ? AND owner_id = ?
+    ''', (platform, artist_id, owner_id))
+    result = c.fetchone()
     conn.close()
-    return exists
+    return result is not None
 
 def get_artist_full_record(artist_id, owner_id):
     conn = get_connection()
