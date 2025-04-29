@@ -98,15 +98,25 @@ def get_last_release_date(artist_id):
 def get_latest_album_id(artist_id):
     """Get the latest album/single ID for an artist."""
     try:
+        # Fetch multiple releases
         releases = spotify.artist_albums(
             artist_id,
             album_type='album,single',
-            limit=1,
+            limit=10,
             country='US'
         )
-        if releases['items']:
-            return releases['items'][0]['id']
-        return None
+        if not releases['items']:
+            return None
+        
+        # Sort releases by release_date
+        sorted_releases = sorted(
+            releases['items'],
+            key=lambda x: x['release_date'],
+            reverse=True
+        )
+        
+        latest_album = sorted_releases[0]
+        return latest_album['id']
     except Exception as e:
         print(f"Error getting latest album for {artist_id}: {e}")
         return None

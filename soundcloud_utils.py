@@ -78,12 +78,11 @@ def get_artist_info(url_or_username):
 # --- Release Data Fetching ---
 
 def get_last_release_date(artist_url):
-    """Get most recent release date."""
     try:
         artist_info = get_artist_info(artist_url)
         artist_id = artist_info['id']
 
-        tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=1&order=created_at"
+        tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=5&order=created_at"
         response = requests.get(tracks_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
@@ -91,7 +90,10 @@ def get_last_release_date(artist_url):
         if not tracks:
             return None
 
-        return tracks[0].get('created_at', '')[:10]
+        # Get track with latest created_at timestamp
+        latest_track = max(tracks, key=lambda t: t['created_at'])
+
+        return latest_track.get('created_at')  # full timestamp
     except Exception as e:
         print(f"Error getting last release: {e}")
         return None
@@ -126,7 +128,7 @@ def process_track(track_data):
         'artist_name': track_data['user']['username'],
         'title': track_data['title'],
         'url': track_data['permalink_url'],
-        'release_date': track_data.get('created_at', '')[:10],
+        'release_date': track_data.get('created_at', ''),
         'cover_url': track_data.get('artwork_url') or track_data['user'].get('avatar_url', ''),
         'duration': format_duration(track_data.get('duration', 0)),
         'features': extract_features(track_data['title']),

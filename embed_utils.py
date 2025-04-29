@@ -28,7 +28,7 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
         f"**Duration**\n{duration}\n"
         f"**Tracks**\n{track_count}\n"
         f"**Features**\n{features}\n"
-        f"**Released on** {release_date}"
+        f"**Released on** {release_date[:10]}"
     )
 
     embed = discord.Embed(
