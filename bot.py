@@ -149,7 +149,9 @@ async def check_for_new_releases(bot):
 
             else:
                 continue
-
+            logging.info(f"👀 Checking {artist['artist_name']} ({artist['platform']})")
+            logging.info(f"→ Stored last_release_date: {artist['last_release_date']}")
+            logging.info(f"→ New release date from API: {current_date}")
             if current_date != artist['last_release_date']:
                 # ✅ Always update so it doesn’t re-post repeatedly
                 update_last_release_date(
