@@ -165,27 +165,18 @@ def update_last_release_date(artist_id, owner_id, new_date):
     conn.commit()
     conn.close()
 
-def add_artist(platform, artist_id, artist_name, artist_url, owner_id, genres=None, guild_id=None):
+def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None):
     conn = get_connection()
     c = conn.cursor()
     c.execute(
         '''INSERT OR REPLACE INTO artists 
         (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            platform,
-            artist_id,
-            artist_name,
-            artist_url,
-            None,  # default last_release_date
-            owner_id,
-            "",  # default tracked_users
-            ",".join(genres) if genres else None,
-            guild_id
-        )
+        (platform, artist_id, artist_name, artist_url, None, owner_id, '', ",".join(genres) if genres else None, guild_id)
     )
     conn.commit()
     conn.close()
+
 
 def remove_artist(artist_id, owner_id):
     conn = get_connection()

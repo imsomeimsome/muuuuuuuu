@@ -83,6 +83,18 @@ def require_registration(func):
         return await func(interaction, *args, **kwargs)
     return wrapper
 
+# Ensure the 'guild_id' column exists
+try:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute('ALTER TABLE artists ADD COLUMN guild_id TEXT')
+    conn.commit()
+    conn.close()
+    print("✅ Added 'guild_id' column to artists table")
+except Exception as e:
+    print(f"ℹ️ Skipped adding 'guild_id' column (probably already exists): {e}")
+
+
 # --- Release Checker ---
 
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
@@ -366,51 +378,50 @@ async def help_command(interaction: discord.Interaction):
 async def ping_command(interaction: discord.Interaction):
     await interaction.response.send_message("🏓 Pong!")
 
-@bot.tree.command(name="track", description="Start tracking an artist.")
-@app_commands.describe(link="Spotify or SoundCloud artist link")
+@bot.tree.command(name="track", description="Track a new artist from Spotify or SoundCloud")
+@require_registration
+@app_commands.describe(link="A Spotify or SoundCloud artist URL")
 async def track_command(interaction: discord.Interaction, link: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    guild_id = str(interaction.guild.id)
 
-    platform = None
-    artist_name = None
-    artist_id = None
+    # Detect platform
+    if "spotify.com" in link:
+        platform = "spotify"
+        artist_id = extract_spotify_id(link)
+        artist_name = get_spotify_artist_name(artist_id)
+        artist_url = f"https://open.spotify.com/artist/{artist_id}"
+        genres = get_spotify_artist_info(artist_id).get("genres", [])
 
-    try:
-        if "spotify.com" in link:
-            platform = "spotify"
-            artist_id = extract_spotify_id(link)
-            if not artist_id:
-                await interaction.followup.send("❌ Invalid Spotify artist link.")
-                return
-            artist_name = get_spotify_artist_name(artist_id)
+    elif "soundcloud.com" in link:
+        platform = "soundcloud"
+        artist_id = extract_soundcloud_id(link)
+        artist_name = get_soundcloud_artist_name(link)
+        artist_url = f"https://soundcloud.com/{artist_id}"
+        genres = []  # SoundCloud genre support is optional
 
-        elif "soundcloud.com" in link:
-            platform = "soundcloud"
-            artist_id = get_soundcloud_artist_id(link)
-            if not artist_id:
-                await interaction.followup.send("❌ Could not resolve SoundCloud artist.")
-                return
-            artist_name = get_soundcloud_artist_name(link)
+    else:
+        await interaction.followup.send("❌ Link must be a valid Spotify or SoundCloud artist URL.")
+        return
 
-        else:
-            await interaction.followup.send("❌ Unsupported platform.")
-            return
+    # Already tracked?
+    if artist_exists(platform, artist_id, user_id):
+        await interaction.followup.send("⚠️ You're already tracking this artist.")
+        return
 
-        # Register the artist in your database
-        add_artist(
-    platform=platform,
-    artist_id=artist_id,
-    artist_name=artist_name,
-    artist_url=link,
-    owner_id=str(interaction.user.id),
-    # genres=genres,  # <-- Now defined safely
-)
+    # Add artist
+    add_artist(
+        platform=platform,
+        artist_id=artist_id,
+        artist_name=artist_name,
+        artist_url=artist_url,
+        owner_id=user_id,
+        guild_id=guild_id,
+        genres=genres
+    )
 
-
-        await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.title()}!")
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
+    await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.capitalize()}.")
 
 @bot.tree.command(name="untrack", description="Stop tracking an artist.")
 @app_commands.describe(artist_identifier="Spotify/SoundCloud artist link or artist ID")
