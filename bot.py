@@ -151,6 +151,7 @@ async def check_for_new_releases(bot):
                 continue
 
             if current_date != artist['last_release_date']:
+                # ✅ Always update so it doesn’t re-post repeatedly
                 update_last_release_date(
                     artist['artist_id'],
                     artist['owner_id'],
@@ -162,7 +163,7 @@ async def check_for_new_releases(bot):
                     platform=artist['platform']
                 )
                 if not channel:
-                    logging.warning(f"No release channel set for {artist['platform']} (artist: {artist['artist_name']}) in guild {artist.get('guild_id') or artist['owner_id']}")
+                    logging.warning(...)
                     continue
 
                 embed = create_music_embed(
