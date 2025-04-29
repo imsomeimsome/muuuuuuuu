@@ -162,7 +162,7 @@ async def check_for_new_releases(bot):
                     platform=artist['platform']
                 )
                 if not channel:
-                    logging.warning(f"No channel found for {artist['artist_name']}")
+                    logging.warning(f"No release channel set for {artist['platform']} (artist: {artist['artist_name']}) in guild {artist.get('guild_id') or artist['owner_id']}")
                     continue
 
                 embed = create_music_embed(
