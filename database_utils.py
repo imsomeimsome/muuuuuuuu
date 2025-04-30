@@ -96,15 +96,12 @@ def ensure_artists_table_has_unique_constraint():
     conn = get_connection()
     c = conn.cursor()
 
-    # Check if the current artists table already has the constraint
     c.execute("PRAGMA index_list(artists);")
     indexes = c.fetchall()
     has_unique = any("platform" in str(index) and "artist_id" in str(index) and "owner_id" in str(index) for index in indexes)
 
     if not has_unique:
         print("⚠️ Migrating 'artists' table to include UNIQUE(platform, artist_id, owner_id)...")
-
-        # Recreate the table with correct constraints
         c.execute('''
             CREATE TABLE IF NOT EXISTS artists_new (
                 platform TEXT,
@@ -138,18 +135,17 @@ def ensure_artists_table_has_unique_constraint():
 def get_all_artists():
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM artists")
+
+    c.execute('''
+        SELECT * FROM artists
+        GROUP BY platform, artist_id, owner_id
+    ''')  # ensures unique artist per user
+
     rows = c.fetchall()
+    columns = [col[0] for col in c.description]
     conn.close()
-    return [{
-        "platform": row[0],
-        "artist_id": row[1],
-        "artist_name": row[2],
-        "artist_url": row[3],
-        "last_release_date": row[4],
-        "owner_id": row[5],
-        "genres": row[6]
-    } for row in rows]
+
+    return [dict(zip(columns, row)) for row in rows]
 
 def get_artists_by_owner(owner_id):
     conn = get_connection()
@@ -210,28 +206,23 @@ def update_last_release_date(artist_id, owner_id, new_date):
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None):
     conn = get_connection()
     c = conn.cursor()
-
     genre_string = ",".join(genres) if genres else None
 
     try:
-        # Step 1: Insert new row if it doesn't already exist
+        # Clean up duplicates (if any) — this is critical
+        c.execute(
+            "DELETE FROM artists WHERE platform = ? AND artist_id = ? AND owner_id = ?",
+            (platform, artist_id, owner_id)
+        )
+
+        # Insert cleanly
         c.execute(
             '''
-            INSERT OR IGNORE INTO artists 
+            INSERT INTO artists 
             (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (platform, artist_id, artist_name, artist_url, None, owner_id, '', genre_string, guild_id)
-        )
-
-        # Step 2: Always update guild_id and metadata
-        c.execute(
-            '''
-            UPDATE artists
-            SET artist_name = ?, artist_url = ?, genres = ?, guild_id = ?
-            WHERE platform = ? AND artist_id = ? AND owner_id = ?
-            ''',
-            (artist_name, artist_url, genre_string, guild_id, platform, artist_id, owner_id)
         )
 
         conn.commit()
@@ -455,6 +446,23 @@ def get_release_prefs(user_id, artist_id):
         'reposts': bool(row[5])
     } if row else None
 
+def cleanup_duplicate_artists():
+    conn = get_connection()
+    c = conn.cursor()
+    print("🧹 Cleaning up duplicate artists...")
+
+    c.execute('''
+        DELETE FROM artists
+        WHERE rowid NOT IN (
+            SELECT MIN(rowid)
+            FROM artists
+            GROUP BY platform, artist_id, owner_id
+        )
+    ''')
+
+    conn.commit()
+    conn.close()
+    print("✅ Removed duplicate artist entries.")
 
 
 
