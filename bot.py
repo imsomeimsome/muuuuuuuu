@@ -50,6 +50,18 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
 
+# Ensure the 'guild_id' column exists in the artists table
+try:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("ALTER TABLE artists ADD COLUMN guild_id TEXT")
+    conn.commit()
+    conn.close()
+    print("✅ Added 'guild_id' column to artists table")
+except Exception as e:
+    print(f"ℹ️ Skipped adding 'guild_id' column (probably already exists): {e}")
+
+
 class MusicBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
