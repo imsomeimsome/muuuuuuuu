@@ -94,6 +94,19 @@ try:
 except Exception as e:
     print(f"ℹ️ Skipped adding 'guild_id' column (probably already exists): {e}")
 
+import sqlite3
+
+def check_artist_table_columns():
+    conn = sqlite3.connect("/data/artists.db")
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(artists);")
+    columns = c.fetchall()
+    print("📊 Columns in artists table:")
+    for col in columns:
+        print(f"- {col[1]}")
+    conn.close()
+
+check_artist_table_columns()
 
 # --- Release Checker ---
 
