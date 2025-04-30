@@ -394,6 +394,8 @@ async def track_command(interaction: discord.Interaction, link: str):
     user_id = interaction.user.id
     guild_id = str(interaction.guild.id) if interaction.guild else None
 
+    print(f"📥 /track called by {interaction.user.name} in guild: {guild_id}")
+
     # Detect platform
     if "spotify.com" in link:
         platform = "spotify"
@@ -407,7 +409,7 @@ async def track_command(interaction: discord.Interaction, link: str):
         artist_id = extract_soundcloud_id(link)
         artist_name = get_soundcloud_artist_name(link)
         artist_url = f"https://soundcloud.com/{artist_id}"
-        genres = []  # SoundCloud genre support is optional
+        genres = []  # Optional: fetch genres from SC profile if needed
 
     else:
         await interaction.followup.send("❌ Link must be a valid Spotify or SoundCloud artist URL.")
@@ -428,6 +430,8 @@ async def track_command(interaction: discord.Interaction, link: str):
         guild_id=guild_id,
         genres=genres
     )
+
+    print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
 
     await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.capitalize()}.")
 
