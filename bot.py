@@ -16,7 +16,7 @@ from database_utils import (
     update_last_release_date, add_release, get_release_stats, get_all_artists,
     get_artists_by_owner, add_user, is_user_registered, get_username,
     get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
-    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier
+    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier, ensure_artists_table_has_unique_constraint
 )
 from embed_utils import create_music_embed
 from spotify_utils import (
@@ -84,6 +84,7 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 
+ensure_artists_table_has_unique_constraint()
 # --- Decorators ---
 def require_registration(func):
     @functools.wraps(func)

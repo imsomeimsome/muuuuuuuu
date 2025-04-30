@@ -92,6 +92,48 @@ CREATE TABLE IF NOT EXISTS artists (
     conn.commit()
     conn.close()
 
+def ensure_artists_table_has_unique_constraint():
+    conn = get_connection()
+    c = conn.cursor()
+
+    # Check if the current artists table already has the constraint
+    c.execute("PRAGMA index_list(artists);")
+    indexes = c.fetchall()
+    has_unique = any("platform" in str(index) and "artist_id" in str(index) and "owner_id" in str(index) for index in indexes)
+
+    if not has_unique:
+        print("⚠️ Migrating 'artists' table to include UNIQUE(platform, artist_id, owner_id)...")
+
+        # Recreate the table with correct constraints
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS artists_new (
+                platform TEXT,
+                artist_id TEXT,
+                artist_name TEXT,
+                artist_url TEXT,
+                last_release_date TEXT,
+                owner_id TEXT,
+                tracked_users TEXT,
+                genres TEXT,
+                guild_id TEXT,
+                UNIQUE(platform, artist_id, owner_id)
+            );
+        ''')
+
+        c.execute('''
+            INSERT INTO artists_new
+            SELECT * FROM artists;
+        ''')
+
+        c.execute('DROP TABLE artists;')
+        c.execute('ALTER TABLE artists_new RENAME TO artists;')
+
+        conn.commit()
+        print("✅ 'artists' table migrated successfully.")
+    else:
+        print("✅ 'artists' table already has UNIQUE constraint.")
+    conn.close()
+
 # --- Artist Functions ---
 def get_all_artists():
     conn = get_connection()
@@ -178,24 +220,26 @@ def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=
         print(f"⚠️ Warning: guild_id not provided for artist '{artist_name}' (owner_id: {owner_id})")
 
     try:
+        # Insert only if not already tracked
         c.execute(
             '''
-            INSERT OR REPLACE INTO artists 
+            INSERT OR IGNORE INTO artists 
             (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (
-                platform,
-                artist_id,
-                artist_name,
-                artist_url,
-                None,  # last_release_date
-                owner_id,
-                '',  # tracked_users
-                genre_string,
-                guild_id
-            )
+            (platform, artist_id, artist_name, artist_url, None, owner_id, '', genre_string, guild_id)
         )
+
+        # Always update the guild_id, genres, and artist_name
+        c.execute(
+            '''
+            UPDATE artists
+            SET artist_name = ?, artist_url = ?, genres = ?, guild_id = ?
+            WHERE platform = ? AND artist_id = ? AND owner_id = ?
+            ''',
+            (artist_name, artist_url, genre_string, guild_id, platform, artist_id, owner_id)
+        )
+
         conn.commit()
         print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
     except Exception as e:
