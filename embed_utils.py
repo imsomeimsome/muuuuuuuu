@@ -18,12 +18,17 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
         emoji = "🔊"
 
     if repost:
-        emoji += " 📢"  # new repost emoji
+        emoji += " 📢"
 
-    # Description with genres
+    # Build embed description
     description = f"[{title}]({url})\n\n"
-    if genres:
-        description += f"**Genres:** {', '.join(genres[:3])}\n"
+    
+    # ✅ Genres (Always show, or show "None" if empty)
+    if genres and len(genres) > 0:
+        description += f"**Genres**\n{', '.join(genres[:3])}\n"
+    else:
+        description += f"**Genres**\nNone\n"
+
     description += (
         f"**Duration**\n{duration}\n"
         f"**Tracks**\n{track_count}\n"
@@ -31,14 +36,12 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
         f"**Released on** {release_date[:10]}"
     )
 
+    # Create embed with correct description
     embed = discord.Embed(
         title=f"{emoji} New {artist_name} Release!",
-        description=f"[{title}]({url})\n\n"
-                    f"**Duration**\n{duration}\n"
-                    f"**Tracks**\n{track_count}\n"
-                    f"**Features**\n{features}\n"
-                    f"**Released on** {release_date}",
+        description=description,
         color=embed_color
     )
+
     embed.set_thumbnail(url=cover_url)
     return embed
