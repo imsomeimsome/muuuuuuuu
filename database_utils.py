@@ -203,7 +203,7 @@ def update_last_release_date(artist_id, owner_id, new_date):
     conn.commit()
     conn.close()
 
-def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None):
+def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
     conn = get_connection()
     c = conn.cursor()
     genre_string = ",".join(genres) if genres else None
@@ -215,18 +215,18 @@ def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=
             (platform, artist_id, owner_id)
         )
 
-        # Insert cleanly
+        # Insert cleanly with passed last_release_date (important fix!)
         c.execute(
             '''
             INSERT INTO artists 
             (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
-            (platform, artist_id, artist_name, artist_url, None, owner_id, '', genre_string, guild_id)
+            (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, '', genre_string, guild_id)
         )
 
         conn.commit()
-        print(f"✅ Added/updated artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
+        print(f"✅ Added/updated artist '{artist_name}' ({platform}) with guild_id: {guild_id} and last_release_date: {last_release_date}")
 
     except Exception as e:
         print(f"❌ Error adding artist {artist_name}: {e}")

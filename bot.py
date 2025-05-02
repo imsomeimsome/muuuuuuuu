@@ -163,7 +163,7 @@ async def check_for_new_releases(bot):
             owner_id = artist['owner_id']
             guild_id = artist.get('guild_id')
 
-            # Platform-specific fetch
+            # Fetch latest release info based on platform
             if platform == 'spotify':
                 latest_album_id = get_spotify_latest_album_id(artist_id)
                 if not latest_album_id:
@@ -183,16 +183,22 @@ async def check_for_new_releases(bot):
 
             current_date = release_info['release_date']
 
-            # Log comparison
+            # Log release check
             logging.info(f"👀 Checking {artist_name} ({platform})")
             logging.info(f"→ Stored last_release_date: {artist['last_release_date']}")
             logging.info(f"→ New release date from API: {current_date}")
 
-            # Check for release update
+            # ✅ First time check skip logic
+            if artist['last_release_date'] is None:
+                logging.info(f"⏭️ Skipping first check for {artist_name} — storing current release date.")
+                update_last_release_date(artist_id, owner_id, current_date)
+                continue
+
+            # ✅ Check if release is new
             if current_date != artist['last_release_date']:
                 update_last_release_date(artist_id, owner_id, current_date)
 
-                # Ensure we have a valid guild ID
+                # Validate guild_id
                 if not guild_id:
                     logging.warning(f"❌ Missing guild_id for artist {artist_name} — cannot post release.")
                     continue
@@ -202,6 +208,7 @@ async def check_for_new_releases(bot):
                     logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id} — skipping post for {artist_name}.")
                     continue
 
+                # Create and send embed
                 embed = create_music_embed(
                     platform=platform,
                     artist_name=release_info.get('artist_name', artist_name),
@@ -222,7 +229,7 @@ async def check_for_new_releases(bot):
             checked_count += 1
 
         except Exception as e:
-            logging.error(f"❌ Failed to check {platform} artist {artist['artist_name']}. Skipping.")
+            logging.error(f"❌ Failed to check {platform} artist {artist_name}. Skipping.")
             logging.error(str(e))
 
     logging.info(f"✅ Checked {checked_count} artists")
@@ -448,6 +455,10 @@ async def track_command(interaction: discord.Interaction, link: str):
         await interaction.followup.send("⚠️ You're already tracking this artist.")
         return
 
+    # ✅ Set last_release_date as time of tracking to prevent false first posts
+    from datetime import datetime
+    current_time = datetime.utcnow().isoformat()
+
     # Add artist
     add_artist(
         platform=platform,
@@ -456,7 +467,8 @@ async def track_command(interaction: discord.Interaction, link: str):
         artist_url=artist_url,
         owner_id=user_id,
         guild_id=guild_id,
-        genres=genres
+        genres=genres,
+        last_release_date=current_time  # ✅ store track time
     )
 
     print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
