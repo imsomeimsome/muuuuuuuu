@@ -119,6 +119,84 @@ def get_release_info(url):
     except Exception as e:
         raise ValueError(f"Release info fetch failed: {e}")
 
+def get_soundcloud_playlist_info(artist_url):
+    """Fetch latest playlist (album, ep, playlist) info."""
+    try:
+        artist_info = get_artist_info(artist_url)
+        artist_id = artist_info['id']
+
+        playlists_url = f"https://api-v2.soundcloud.com/users/{artist_id}/playlists?client_id={CLIENT_ID}&limit=5&order=created_at"
+        response = requests.get(playlists_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+
+        playlists = response.json()
+        if not playlists:
+            return None
+
+        latest_playlist = playlists[0]
+
+        playlist_type = latest_playlist.get('playlist_type') or "Playlist"
+        track_count = latest_playlist.get('track_count', 0)
+
+        release_info = {
+            "artist_name": latest_playlist.get('user', {}).get('username'),
+            "title": latest_playlist.get('title'),
+            "url": latest_playlist.get('permalink_url'),
+            "release_date": latest_playlist.get('created_at'),
+            "cover_url": latest_playlist.get('artwork_url'),
+            "features": None,
+            "track_count": track_count,
+            "duration": None,
+            "repost": latest_playlist.get('reposted', False),
+            "genres": [],
+            "release_type": playlist_type.capitalize()
+        }
+
+        return release_info
+
+    except Exception as e:
+        raise ValueError(f"Playlist info fetch failed: {e}")
+
+def get_soundcloud_likes_info(artist_url):
+    """Fetch latest liked track info."""
+    try:
+        artist_info = get_artist_info(artist_url)
+        artist_id = artist_info['id']
+
+        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
+        response = requests.get(likes_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+
+        likes = response.json()
+        if not likes:
+            return None
+
+        latest_like = likes[0]
+        if latest_like.get('track'):
+            track = latest_like['track']
+
+            release_info = {
+                "artist_name": track.get('user', {}).get('username'),
+                "title": track.get('title'),
+                "url": track.get('permalink_url'),
+                "release_date": track.get('created_at'),
+                "cover_url": track.get('artwork_url'),
+                "features": None,
+                "track_count": 1,
+                "duration": seconds_to_minutes_seconds(track.get('duration', 0) // 1000),
+                "repost": track.get('reposted', False),
+                "genres": [track.get('genre')] if track.get('genre') else [],
+                "release_type": "Like"
+            }
+
+            return release_info
+
+        return None
+
+    except Exception as e:
+        raise ValueError(f"Likes fetch failed: {e}")
+
+
 # --- Data Processing ---
 
 def process_track(track_data):
@@ -248,3 +326,9 @@ def get_soundcloud_release_info(url):
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
     return extract_soundcloud_username(url)
+
+def seconds_to_minutes_seconds(seconds):
+    """Helper to format duration."""
+    minutes = seconds // 60
+    seconds = seconds % 60
+    return f"{minutes}:{str(seconds).zfill(2)}"

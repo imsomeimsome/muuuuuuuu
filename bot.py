@@ -18,7 +18,7 @@ from database_utils import (
     get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier, ensure_artists_table_has_unique_constraint, cleanup_duplicate_artists
 )
-from embed_utils import create_music_embed
+from embed_utils import create_music_embed, create_repost_embed
 from spotify_utils import (
     extract_spotify_id,
     get_artist_name as get_spotify_artist_name,
@@ -34,7 +34,8 @@ from soundcloud_utils import (
     get_last_release_date as get_soundcloud_last_release_date,
     get_soundcloud_release_info,
     get_soundcloud_artist_id,
-    extract_soundcloud_username as extract_soundcloud_id
+    extract_soundcloud_username as extract_soundcloud_id,
+    get_soundcloud_playlist_info
 )
 
 # Configure logging
@@ -208,20 +209,35 @@ async def check_for_new_releases(bot):
                     logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id} — skipping post for {artist_name}.")
                     continue
 
-                # Create and send embed
-                embed = create_music_embed(
-                    platform=platform,
-                    artist_name=release_info.get('artist_name', artist_name),
-                    title=release_info.get('title', 'New Release'),
-                    url=release_info.get('url', artist['artist_url']),
-                    release_date=current_date[:10],  # show only date
-                    cover_url=release_info.get('cover_url'),
-                    features=release_info.get('features'),
-                    track_count=release_info.get('track_count'),
-                    duration=release_info.get('duration'),
-                    repost=release_info.get('repost', False),
-                    genres=release_info.get('genres')
-                )
+                # ✅ Determine repost or normal
+                if release_info.get('repost', False):
+                    embed = create_repost_embed(
+                        platform=platform,
+                        reposted_by=artist_name,
+                        original_artist=release_info.get('artist_name'),
+                        title=release_info.get('title'),
+                        url=release_info.get('url'),
+                        release_date=current_date,
+                        cover_url=release_info.get('cover_url'),
+                        features=release_info.get('features'),
+                        track_count=release_info.get('track_count'),
+                        duration=release_info.get('duration'),
+                        genres=release_info.get('genres')
+                    )
+                else:
+                    embed = create_music_embed(
+                        platform=platform,
+                        artist_name=release_info.get('artist_name', artist_name),
+                        title=release_info.get('title', 'New Release'),
+                        url=release_info.get('url', artist['artist_url']),
+                        release_date=current_date[:10],  # show only date
+                        cover_url=release_info.get('cover_url'),
+                        features=release_info.get('features'),
+                        track_count=release_info.get('track_count'),
+                        duration=release_info.get('duration'),
+                        repost=release_info.get('repost', False),
+                        genres=release_info.get('genres')
+                    )
 
                 await channel.send(embed=embed)
                 logging.info(f"✅ Posted new release for {artist_name}")
@@ -233,6 +249,85 @@ async def check_for_new_releases(bot):
             logging.error(str(e))
 
     logging.info(f"✅ Checked {checked_count} artists")
+
+async def check_for_new_playlists(bot):
+    logging.info("🔍 Checking for new playlists...")
+    artists = get_all_artists()
+    if not artists:
+        logging.info("No artists to check.")
+        return
+
+    checked_count = 0
+
+    for artist in artists:
+        try:
+            if artist['platform'] != 'soundcloud':
+                continue
+
+            playlist_info = get_soundcloud_playlist_info(artist['artist_url'])
+            if not playlist_info:
+                continue
+
+            current_date = playlist_info['release_date']
+            artist_name = artist['artist_name']
+            stored_date = artist['last_release_date']
+
+            logging.info(f"👀 Checking playlist for {artist_name} (soundcloud)")
+            logging.info(f"→ Stored last_release_date: {stored_date}")
+            logging.info(f"→ New playlist date from API: {current_date}")
+
+            if stored_date != current_date:
+                update_last_release_date(artist['artist_id'], artist['owner_id'], current_date)
+
+                guild_id = artist.get('guild_id')
+                if not guild_id:
+                    logging.warning(f"❌ Missing guild_id for {artist_name} — cannot post playlist.")
+                    continue
+
+                channel = await get_release_channel(guild_id=guild_id, platform="soundcloud")
+                if not channel:
+                    logging.warning(f"⚠️ No channel configured for playlists in guild {guild_id} — skipping post.")
+                    continue
+
+                if playlist_info.get('repost', False):
+                    embed = create_repost_embed(
+                        platform="soundcloud",
+                        reposted_by=artist_name,
+                        original_artist=playlist_info.get('artist_name'),
+                        title=playlist_info.get('title'),
+                        url=playlist_info.get('url'),
+                        release_date=current_date,
+                        cover_url=playlist_info.get('cover_url'),
+                        features=playlist_info.get('features'),
+                        track_count=playlist_info.get('track_count'),
+                        duration=playlist_info.get('duration'),
+                        genres=playlist_info.get('genres')
+                    )
+                else:
+                    embed = create_music_embed(
+                        platform="soundcloud",
+                        artist_name=playlist_info.get('artist_name'),
+                        title=playlist_info.get('title'),
+                        url=playlist_info.get('url'),
+                        release_date=current_date,
+                        cover_url=playlist_info.get('cover_url'),
+                        features=playlist_info.get('features'),
+                        track_count=playlist_info.get('track_count'),
+                        duration=playlist_info.get('duration'),
+                        repost=playlist_info.get('repost', False),
+                        genres=playlist_info.get('genres'),
+                        release_type=playlist_info.get('release_type')
+                    )
+
+                await channel.send(embed=embed)
+                logging.info(f"✅ Posted new playlist for {artist_name}")
+
+            checked_count += 1
+
+        except Exception as e:
+            logging.error(f"❌ Playlist check failed for {artist['artist_name']}: {e}")
+
+    logging.info(f"✅ Checked {checked_count} artists for playlists")
 
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()
@@ -587,15 +682,26 @@ async def info_command(interaction: discord.Interaction):
     )
     await interaction.response.send_message(message)
 
-@bot.tree.command(name="key", description="Show the emoji and color key.")
-@require_registration
+@bot.tree.command(name="key", description="Show release tracking key for what the bot posts.")
 async def key_command(interaction: discord.Interaction):
-    text = (
-        "**🎨 Emoji & Color Key:**\n"
-        "💿 Album | 📀 Deluxe | 🎶 EP | 🎵 Single | 🔊 Feature | 📌 Repost\n"
-        "🟢 Spotify (#1DB954) | 🟠 SoundCloud (#FF5500)"
+    embed = discord.Embed(
+        title="📚 Release Key",
+        description="Here's what each release type and field means:",
+        color=0x7289DA
     )
-    await interaction.response.send_message(text)
+
+    embed.add_field(name="💿 Album", value="7 or more tracks released together or marked as album/mixtape.", inline=False)
+    embed.add_field(name="🎶 EP", value="2 to 6 tracks released together or marked as EP.", inline=False)
+    embed.add_field(name="🎵 Single", value="Only 1 track released.", inline=False)
+    embed.add_field(name="📑 Playlist", value="Newly posted playlist by artist.", inline=False)
+    embed.add_field(name="❤️ Like", value="Track liked by the artist.", inline=False)
+    embed.add_field(name="📢 Repost", value="Release reposted by the artist (not uploaded by them).", inline=False)
+    embed.add_field(name="Features", value="Artists featured in the release, if detected.", inline=False)
+    embed.add_field(name="Genres", value="Genres of the release if available.", inline=False)
+    embed.add_field(name="Tracks", value="Total tracks in release/playlist.", inline=False)
+    embed.add_field(name="Released on", value="Release date from SoundCloud or Spotify.", inline=False)
+
+    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="testembed", description="Preview a music release embed from a Spotify or SoundCloud link.")
 @app_commands.describe(link="Spotify or SoundCloud release link")
