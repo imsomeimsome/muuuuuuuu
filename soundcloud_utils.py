@@ -345,3 +345,52 @@ def safe_get(url, headers=None, retries=3):
         response.raise_for_status()
         return response
     return None
+
+
+# === Likes support ===
+
+import requests
+from datetime import datetime
+from utils import safe_get
+
+def get_soundcloud_likes_info(artist_url):
+    """Fetch SoundCloud likes for artist."""
+    try:
+        # Extract artist username from URL
+        artist_username = artist_url.strip("/").split("/")[-1]
+        user_info_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{artist_username}&client_id={CLIENT_ID}"
+        user_info = safe_get(user_info_url).json()
+        artist_id = user_info['id']
+
+        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=1"
+        response = safe_get(likes_url)
+        likes = response.json()
+
+        if not likes.get('collection'):
+            return None
+
+        latest_like = likes['collection'][0]
+
+        if 'track' not in latest_like:
+            return None
+
+        track = latest_like['track']
+        release_date = track.get("created_at")
+        if not release_date:
+            return None
+
+        return {
+            "release_date": release_date,
+            "artist_name": track.get("user", {}).get("username", "Unknown Artist"),
+            "title": track.get("title", "Liked Track"),
+            "url": track.get("permalink_url"),
+            "cover_url": track.get("artwork_url"),
+            "features": None,
+            "track_count": 1,
+            "duration": str(int(track.get("duration", 0) / 1000)) + "s",
+            "repost": False,
+            "genres": track.get("genre")
+        }
+    except Exception as e:
+        print(f"SoundCloud likes fetch failed: {e}")
+        return None

@@ -36,8 +36,10 @@ from soundcloud_utils import (
     get_soundcloud_release_info,
     get_soundcloud_artist_id,
     extract_soundcloud_username as extract_soundcloud_id,
-    get_soundcloud_playlist_info
+    get_soundcloud_playlist_info,
+    get_soundcloud_likes_info
 )
+from utils import run_blocking, log_release
 
 # Configure logging
 logging.basicConfig(
@@ -219,6 +221,7 @@ async def check_for_new_releases(bot):
                 )
 
                 await channel.send(embed=embed)
+                await log_release(bot, f"📢 Posted repost by {artist_name}: {release_info.get('title')} → {release_info.get('url')}")
                 logging.info(f"✅ Posted repost for {artist_name}")
 
             # ✅ Handle normal releases
@@ -248,6 +251,7 @@ async def check_for_new_releases(bot):
                 )
 
                 await channel.send(embed=embed)
+                await log_release(bot, f"🎉 Posted new release for {artist_name}: {release_info.get('title', 'New Release')} → {release_info.get('url')}")
                 logging.info(f"✅ Posted new release for {artist_name}")
 
             checked_count += 1
@@ -327,6 +331,7 @@ async def check_for_new_playlists(bot):
                     )
 
                 await channel.send(embed=embed)
+                await log_release(bot, f"🎶 Posted new playlist for {artist_name}: {playlist_info.get('title')} → {playlist_info.get('url')}")
                 logging.info(f"✅ Posted new playlist for {artist_name}")
 
             checked_count += 1
@@ -846,3 +851,76 @@ async def debug_soundcloud(interaction: discord.Interaction, url: str):
 if __name__ == "__main__":
     keep_alive()  # Start the web server for UptimeRobot
     bot.run(TOKEN)
+
+# === Likes checker ===
+
+async def check_for_new_likes(bot):
+    logging.info("🔍 Checking for new likes...")
+    artists = get_all_artists()
+    if not artists:
+        logging.info("No artists to check.")
+        return
+
+    checked_count = 0
+
+    for artist in artists:
+        try:
+            if artist['platform'] != "soundcloud":
+                continue
+
+            artist_name = artist['artist_name']
+            artist_id = artist['artist_id']
+            owner_id = artist['owner_id']
+            guild_id = artist.get('guild_id')
+
+            # Fetch latest like info
+            release_info = await run_blocking(get_soundcloud_likes_info, artist['artist_url'])
+            if not release_info:
+                continue
+
+            current_date = release_info['release_date']
+
+            logging.info(f"👀 Checking likes for {artist_name}")
+            logging.info(f"→ Stored last_release_date: {artist['last_release_date']}")
+            logging.info(f"→ New like date from API: {current_date}")
+
+            # First time skip
+            if artist['last_release_date'] is None:
+                logging.info(f"⏭️ Skipping first check for {artist_name} likes")
+                update_last_release_date(artist_id, owner_id, current_date)
+                continue
+
+            if current_date != artist['last_release_date']:
+                update_last_release_date(artist_id, owner_id, current_date)
+
+                if not guild_id:
+                    continue
+
+                channel = await get_release_channel(guild_id=guild_id, platform="soundcloud")
+                if not channel:
+                    continue
+
+                embed = create_music_embed(
+                    platform="soundcloud",
+                    artist_name=release_info.get('artist_name', artist_name),
+                    title=release_info.get('title', 'Liked Track'),
+                    url=release_info.get('url', artist['artist_url']),
+                    release_date=current_date[:10],
+                    cover_url=release_info.get('cover_url'),
+                    features=release_info.get('features'),
+                    track_count=release_info.get('track_count'),
+                    duration=release_info.get('duration'),
+                    repost=False,
+                    genres=release_info.get('genres')
+                )
+
+                await channel.send(embed=embed)
+                await log_release(bot, f"❤️ {artist_name} liked → {release_info.get('title')} → {release_info.get('url')}")
+                logging.info(f"✅ Posted new like for {artist_name}")
+
+            checked_count += 1
+
+        except Exception as e:
+            logging.error(f"❌ Failed likes check for {artist['artist_name']}: {e}")
+
+    logging.info(f"✅ Checked {checked_count} artists for likes")
