@@ -8,6 +8,7 @@ from discord.ext import tasks
 import asyncio
 from datetime import datetime, timezone, timedelta
 from keep_alive import keep_alive
+from functools import partial
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
@@ -164,80 +165,86 @@ async def check_for_new_releases(bot):
             owner_id = artist['owner_id']
             guild_id = artist.get('guild_id')
 
-            # Fetch latest release info based on platform
+            # Fetch release info → safe blocking
             if platform == 'spotify':
-                latest_album_id = get_spotify_latest_album_id(artist_id)
+                latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
                 if not latest_album_id:
                     continue
 
-                release_info = get_spotify_release_info(latest_album_id)
+                release_info = await run_blocking(get_spotify_release_info, latest_album_id)
                 if not release_info:
                     continue
 
             elif platform == 'soundcloud':
-                release_info = get_soundcloud_release_info(artist['artist_url'])
+                release_info = await run_blocking(get_soundcloud_release_info, artist['artist_url'])
                 if not release_info:
                     continue
 
             else:
-                continue  # Unknown platform
+                continue
 
             current_date = release_info['release_date']
 
-            # Log release check
             logging.info(f"👀 Checking {artist_name} ({platform})")
             logging.info(f"→ Stored last_release_date: {artist['last_release_date']}")
             logging.info(f"→ New release date from API: {current_date}")
 
-            # ✅ First time check skip logic
+            # First time → skip
             if artist['last_release_date'] is None:
-                logging.info(f"⏭️ Skipping first check for {artist_name} — storing current release date.")
+                logging.info(f"⏭️ Skipping first check for {artist_name}")
                 update_last_release_date(artist_id, owner_id, current_date)
                 continue
 
-            # ✅ Check if release is new
-            if current_date != artist['last_release_date']:
-                update_last_release_date(artist_id, owner_id, current_date)
-
-                # Validate guild_id
+            # ✅ Repost check → always post reposts
+            if release_info.get('repost', False):
                 if not guild_id:
-                    logging.warning(f"❌ Missing guild_id for artist {artist_name} — cannot post release.")
                     continue
 
                 channel = await get_release_channel(guild_id=guild_id, platform=platform)
                 if not channel:
-                    logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id} — skipping post for {artist_name}.")
                     continue
 
-                # ✅ Determine repost or normal
-                if release_info.get('repost', False):
-                    embed = create_repost_embed(
-                        platform=platform,
-                        reposted_by=artist_name,
-                        original_artist=release_info.get('artist_name'),
-                        title=release_info.get('title'),
-                        url=release_info.get('url'),
-                        release_date=current_date,
-                        cover_url=release_info.get('cover_url'),
-                        features=release_info.get('features'),
-                        track_count=release_info.get('track_count'),
-                        duration=release_info.get('duration'),
-                        genres=release_info.get('genres')
-                    )
-                else:
-                    embed = create_music_embed(
-                        platform=platform,
-                        artist_name=release_info.get('artist_name', artist_name),
-                        title=release_info.get('title', 'New Release'),
-                        url=release_info.get('url', artist['artist_url']),
-                        release_date=current_date[:10],  # show only date
-                        cover_url=release_info.get('cover_url'),
-                        features=release_info.get('features'),
-                        track_count=release_info.get('track_count'),
-                        duration=release_info.get('duration'),
-                        repost=release_info.get('repost', False),
-                        genres=release_info.get('genres')
-                    )
+                embed = create_repost_embed(
+                    platform=platform,
+                    reposted_by=artist_name,
+                    original_artist=release_info.get('artist_name'),
+                    title=release_info.get('title'),
+                    url=release_info.get('url'),
+                    release_date=current_date,
+                    cover_url=release_info.get('cover_url'),
+                    features=release_info.get('features'),
+                    track_count=release_info.get('track_count'),
+                    duration=release_info.get('duration'),
+                    genres=release_info.get('genres')
+                )
+                await channel.send(embed=embed)
+                logging.info(f"✅ Posted repost for {artist_name}")
+
+            # ✅ Normal release check
+            elif current_date != artist['last_release_date']:
+                update_last_release_date(artist_id, owner_id, current_date)
+
+                if not guild_id:
+                    continue
+
+                channel = await get_release_channel(guild_id=guild_id, platform=platform)
+                if not channel:
+                    continue
+
+                embed = create_music_embed(
+                    platform=platform,
+                    artist_name=release_info.get('artist_name', artist_name),
+                    title=release_info.get('title'),
+                    url=release_info.get('url'),
+                    release_date=current_date[:10],
+                    cover_url=release_info.get('cover_url'),
+                    features=release_info.get('features'),
+                    track_count=release_info.get('track_count'),
+                    duration=release_info.get('duration'),
+                    repost=release_info.get('repost', False),
+                    genres=release_info.get('genres'),
+                    release_type=release_info.get('release_type')
+                )
 
                 await channel.send(embed=embed)
                 logging.info(f"✅ Posted new release for {artist_name}")
@@ -245,8 +252,7 @@ async def check_for_new_releases(bot):
             checked_count += 1
 
         except Exception as e:
-            logging.error(f"❌ Failed to check {platform} artist {artist_name}. Skipping.")
-            logging.error(str(e))
+            logging.error(f"❌ Failed release check for {artist_name}: {e}")
 
     logging.info(f"✅ Checked {checked_count} artists")
 
@@ -264,7 +270,7 @@ async def check_for_new_playlists(bot):
             if artist['platform'] != 'soundcloud':
                 continue
 
-            playlist_info = get_soundcloud_playlist_info(artist['artist_url'])
+            playlist_info = await run_blocking(get_soundcloud_playlist_info, artist['artist_url'])
             if not playlist_info:
                 continue
 
@@ -352,13 +358,13 @@ async def release_check_scheduler(bot):
         try:
             check_time = datetime.utcnow().strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
+
             await check_for_new_releases(bot)
+            await check_for_new_playlists(bot)  # ✅ Add playlists checking here too
+
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
-
-        logging.info(f"⏰ Next check scheduled at {(datetime.utcnow() + timedelta(minutes=5)).strftime('%H:%M:%S')} UTC (in 300.0s)")
-
 
 @bot.event
 async def on_ready():
@@ -379,6 +385,12 @@ async def on_ready():
         bot.release_checker_started = True
         asyncio.create_task(release_check_scheduler(bot))
         logging.info("🚀 Started release checker")
+
+
+async def run_blocking(func, *args, **kwargs):
+    """Run blocking (sync) function safely without blocking bot."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
