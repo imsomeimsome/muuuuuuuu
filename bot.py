@@ -165,7 +165,7 @@ async def check_for_new_releases(bot):
             owner_id = artist['owner_id']
             guild_id = artist.get('guild_id')
 
-            # Fetch release info → safe blocking
+            # ✅ Use run_blocking for API calls
             if platform == 'spotify':
                 latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
                 if not latest_album_id:
@@ -195,7 +195,7 @@ async def check_for_new_releases(bot):
                 update_last_release_date(artist_id, owner_id, current_date)
                 continue
 
-            # ✅ Repost check → always post reposts
+            # ✅ Handle reposts separately
             if release_info.get('repost', False):
                 if not guild_id:
                     continue
@@ -217,10 +217,11 @@ async def check_for_new_releases(bot):
                     duration=release_info.get('duration'),
                     genres=release_info.get('genres')
                 )
+
                 await channel.send(embed=embed)
                 logging.info(f"✅ Posted repost for {artist_name}")
 
-            # ✅ Normal release check
+            # ✅ Handle normal releases
             elif current_date != artist['last_release_date']:
                 update_last_release_date(artist_id, owner_id, current_date)
 
@@ -360,7 +361,7 @@ async def release_check_scheduler(bot):
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
 
             await check_for_new_releases(bot)
-            await check_for_new_playlists(bot)  # ✅ Add playlists checking here too
+            await check_for_new_playlists(bot)  # ✅ ADD THIS LINE
 
             logging.info("✅ Completed release check cycle")
         except Exception as e:

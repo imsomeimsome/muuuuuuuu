@@ -1,6 +1,7 @@
 import os
 import requests
 import re
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime
@@ -332,3 +333,15 @@ def seconds_to_minutes_seconds(seconds):
     minutes = seconds // 60
     seconds = seconds % 60
     return f"{minutes}:{str(seconds).zfill(2)}"
+
+def safe_get(url, headers=None, retries=3):
+    for attempt in range(retries):
+        response = requests.get(url, headers=headers)
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 5))
+            print(f"Rate limited. Sleeping for {retry_after} seconds...")
+            time.sleep(retry_after)
+            continue
+        response.raise_for_status()
+        return response
+    return None
