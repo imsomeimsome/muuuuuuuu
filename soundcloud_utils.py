@@ -127,14 +127,14 @@ def get_soundcloud_playlist_info(artist_url):
         artist_id = artist_info['id']
 
         playlists_url = f"https://api-v2.soundcloud.com/users/{artist_id}/playlists?client_id={CLIENT_ID}&limit=5&order=created_at"
-        response = requests.get(playlists_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-
+        response = safe_get(playlists_url, headers=HEADERS)
         playlists = response.json()
-        if not playlists:
+
+        # If no playlists found, skip (this is normal and not an error)
+        if not playlists or not playlists.get('collection'):
             return None
 
-        latest_playlist = playlists[0]
+        latest_playlist = playlists['collection'][0]
 
         playlist_type = latest_playlist.get('playlist_type') or "Playlist"
         track_count = latest_playlist.get('track_count', 0)
