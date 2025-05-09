@@ -464,7 +464,36 @@ def cleanup_duplicate_artists():
     conn.close()
     print("✅ Removed duplicate artist entries.")
 
+import datetime
 
+def import_artists_from_json(data, owner_id, guild_id):
+    conn = get_connection()
+    c = conn.cursor()
+    imported = 0
+
+    for entry in data:
+        platform = entry.get("platform")
+        artist_id = entry.get("artist_id")
+        artist_name = entry.get("artist_name")
+        artist_url = entry.get("artist_url")
+        genres = entry.get("genres", [])
+        genre_str = ",".join(genres) if genres else None
+
+        now_timestamp = datetime.datetime.utcnow().isoformat()
+
+        c.execute(
+            '''
+            INSERT OR IGNORE INTO artists
+            (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''',
+            (platform, artist_id, artist_name, artist_url, now_timestamp, owner_id, '', genre_str, guild_id)
+        )
+        imported += 1
+
+    conn.commit()
+    conn.close()
+    return imported
 
 # --- Initialize DB on module import ---
 initialize_database()

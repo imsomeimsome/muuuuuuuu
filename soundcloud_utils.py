@@ -121,20 +121,21 @@ def get_release_info(url):
         raise ValueError(f"Release info fetch failed: {e}")
 
 def get_soundcloud_playlist_info(artist_url):
-    """Fetch latest playlist (album, ep, playlist) info."""
     try:
         artist_info = get_artist_info(artist_url)
         artist_id = artist_info['id']
 
         playlists_url = f"https://api-v2.soundcloud.com/users/{artist_id}/playlists?client_id={CLIENT_ID}&limit=5&order=created_at"
-        response = safe_get(playlists_url, headers=HEADERS)
-        playlists = response.json()
+        response = requests.get(playlists_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
 
-        # If no playlists found, skip (this is normal and not an error)
-        if not playlists or not playlists.get('collection'):
+        playlists = response.json()
+        if not playlists:
             return None
 
-        latest_playlist = playlists['collection'][0]
+        latest_playlist = playlists[0]
+
+        release_date = latest_playlist.get('created_at')
 
         playlist_type = latest_playlist.get('playlist_type') or "Playlist"
         track_count = latest_playlist.get('track_count', 0)
@@ -143,14 +144,14 @@ def get_soundcloud_playlist_info(artist_url):
             "artist_name": latest_playlist.get('user', {}).get('username'),
             "title": latest_playlist.get('title'),
             "url": latest_playlist.get('permalink_url'),
-            "release_date": latest_playlist.get('created_at'),
+            "release_date": release_date,
             "cover_url": latest_playlist.get('artwork_url'),
             "features": None,
             "track_count": track_count,
             "duration": None,
-            "repost": latest_playlist.get('reposted', False),
+            "repost": False,
             "genres": [],
-            "release_type": playlist_type.capitalize()
+            "release_type": "Album" if track_count >= 7 else "EP" if track_count >= 2 else "Single"
         }
 
         return release_info
@@ -353,44 +354,66 @@ import requests
 from datetime import datetime
 from utils import safe_get
 
-def get_soundcloud_likes_info(artist_url):
-    """Fetch SoundCloud likes for artist."""
+def get_soundcloud_likes(artist_url):
     try:
-        # Extract artist username from URL
-        artist_username = artist_url.strip("/").split("/")[-1]
-        user_info_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{artist_username}&client_id={CLIENT_ID}"
-        user_info = safe_get(user_info_url).json()
-        artist_id = user_info['id']
+        artist_info = get_artist_info(artist_url)
+        artist_id = artist_info['id']
 
-        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=1"
-        response = safe_get(likes_url)
-        likes = response.json()
+        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
+        response = requests.get(likes_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
 
-        if not likes.get('collection'):
-            return None
-
-        latest_like = likes['collection'][0]
-
-        if 'track' not in latest_like:
-            return None
-
-        track = latest_like['track']
-        release_date = track.get("created_at")
-        if not release_date:
-            return None
-
-        return {
-            "release_date": release_date,
-            "artist_name": track.get("user", {}).get("username", "Unknown Artist"),
-            "title": track.get("title", "Liked Track"),
-            "url": track.get("permalink_url"),
-            "cover_url": track.get("artwork_url"),
-            "features": None,
-            "track_count": 1,
-            "duration": str(int(track.get("duration", 0) / 1000)) + "s",
-            "repost": False,
-            "genres": track.get("genre")
-        }
+        items = response.json().get('collection', [])
+        likes = []
+        for item in items:
+            if item.get('track'):
+                track = item['track']
+                likes.append({
+                    "artist_name": track.get('user', {}).get('username'),
+                    "title": track.get('title'),
+                    "url": track.get('permalink_url'),
+                    "release_date": track.get('created_at'),
+                    "cover_url": track.get('artwork_url'),
+                    "features": None,
+                    "track_count": 1,
+                    "duration": track.get('full_duration', 0) // 1000,
+                    "repost": False,
+                    "genres": track.get('genre', []),
+                    "release_type": "Like"
+                })
+        return likes
     except Exception as e:
         print(f"SoundCloud likes fetch failed: {e}")
-        return None
+        return []
+    
+def get_soundcloud_reposts(artist_url):
+    try:
+        artist_info = get_artist_info(artist_url)
+        artist_id = artist_info['id']
+
+        reposts_url = f"https://api-v2.soundcloud.com/users/{artist_id}/reposts?client_id={CLIENT_ID}&limit=5"
+        response = requests.get(reposts_url, headers=HEADERS, timeout=10)
+        response.raise_for_status()
+
+        items = response.json().get('collection', [])
+        reposts = []
+        for item in items:
+            if item.get('track'):
+                track = item['track']
+                reposts.append({
+                    "artist_name": track.get('user', {}).get('username'),
+                    "title": track.get('title'),
+                    "url": track.get('permalink_url'),
+                    "release_date": track.get('created_at'),
+                    "cover_url": track.get('artwork_url'),
+                    "features": None,
+                    "track_count": 1,
+                    "duration": track.get('full_duration', 0) // 1000,
+                    "repost": True,
+                    "genres": track.get('genre', []),
+                    "release_type": "Repost"
+                })
+        return reposts
+    except Exception as e:
+        print(f"SoundCloud repost fetch failed: {e}")
+        return []
