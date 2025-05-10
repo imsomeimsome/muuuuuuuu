@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from spotify_utils import extract_spotify_id
 from soundcloud_utils import extract_soundcloud_id
 
@@ -9,24 +9,41 @@ def get_connection():
 
 # --- Table Initialization ---
 def initialize_database():
-    conn = get_connection()
-    c = conn.cursor()
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS artists (
+                platform TEXT,
+                artist_id TEXT,
+                artist_name TEXT,
+                artist_url TEXT,
+                owner_id TEXT,
+                guild_id TEXT,
+                genres TEXT,
+                last_release_date TEXT,
+                PRIMARY KEY (artist_id, owner_id, guild_id)
+            )
+        ''')
 
-    # Main artists table with genres
-    c.execute('''
-CREATE TABLE IF NOT EXISTS artists (
-            platform TEXT,
-            artist_id TEXT,
-            artist_name TEXT,
-            artist_url TEXT,
-            last_release_date TEXT,
-            owner_id TEXT,
-            tracked_users TEXT DEFAULT '',
-            genres TEXT,
-            PRIMARY KEY (artist_id, owner_id)
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS posted_likes (
+                artist_id TEXT,
+                guild_id TEXT,
+                like_id TEXT,
+                PRIMARY KEY (artist_id, guild_id, like_id)
+            )
+        ''')
 
-        )
-    ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS posted_reposts (
+                artist_id TEXT,
+                guild_id TEXT,
+                repost_id TEXT,
+                PRIMARY KEY (artist_id, guild_id, repost_id)
+            )
+        ''')
+
+        conn.commit()
 
         # --- ADD THIS BLOCK: check if tracked_users exists, and add if not ---
     c.execute("PRAGMA table_info(artists);")
@@ -131,21 +148,28 @@ def ensure_artists_table_has_unique_constraint():
         print("✅ 'artists' table already has UNIQUE constraint.")
     conn.close()
 
+def initialize_posted_likes_table():
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS posted_likes (
+                artist_id TEXT,
+                guild_id TEXT,
+                like_id TEXT,
+                PRIMARY KEY (artist_id, guild_id, like_id)
+            )
+        ''')
+        conn.commit()
+
 # --- Artist Functions ---
-def get_all_artists():
-    conn = get_connection()
-    c = conn.cursor()
-
-    c.execute('''
-        SELECT * FROM artists
-        GROUP BY platform, artist_id, owner_id
-    ''')  # ensures unique artist per user
-
-    rows = c.fetchall()
-    columns = [col[0] for col in c.description]
-    conn.close()
-
-    return [dict(zip(columns, row)) for row in rows]
+def get_all_artists(guild_id=None):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if guild_id:
+            cursor.execute("SELECT * FROM artists WHERE guild_id = ?", (guild_id,))
+        else:
+            cursor.execute("SELECT * FROM artists")
+        return cursor.fetchall()
 
 def get_artists_by_owner(owner_id):
     conn = get_connection()
@@ -194,34 +218,21 @@ def update_last_release_date(artist_id, owner_id, guild_id, new_date):
         conn.commit()
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
-    conn = get_connection()
-    c = conn.cursor()
-    genre_string = ",".join(genres) if genres else None
+    if guild_id is None:
+        raise ValueError("guild_id must be provided when adding an artist")
 
-    try:
-        # Clean up duplicates (if any) — this is critical
-        c.execute(
-            "DELETE FROM artists WHERE platform = ? AND artist_id = ? AND owner_id = ?",
-            (platform, artist_id, owner_id)
-        )
+    # Use timezone-aware datetime to avoid false release triggers
+    if last_release_date is None:
+        last_release_date = datetime.now(timezone.utc).isoformat()
 
-        # Insert cleanly with passed last_release_date (important fix!)
-        c.execute(
-            '''
-            INSERT INTO artists 
-            (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, tracked_users, genres, guild_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''',
-            (platform, artist_id, artist_name, artist_url, last_release_date, owner_id, '', genre_string, guild_id)
-        )
-
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO artists
+            (platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date))
         conn.commit()
-        print(f"✅ Added/updated artist '{artist_name}' ({platform}) with guild_id: {guild_id} and last_release_date: {last_release_date}")
-
-    except Exception as e:
-        print(f"❌ Error adding artist {artist_name}: {e}")
-    finally:
-        conn.close()
 
 def remove_artist(artist_id, owner_id):
     conn = get_connection()
@@ -485,6 +496,42 @@ def import_artists_from_json(data, owner_id, guild_id):
     conn.commit()
     conn.close()
     return imported
+
+def is_already_posted_like(artist_id, guild_id, like_id):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT 1 FROM posted_likes
+            WHERE artist_id = ? AND guild_id = ? AND like_id = ?
+        ''', (artist_id, guild_id, like_id))
+        return cursor.fetchone() is not None
+
+def mark_posted_like(artist_id, guild_id, like_id):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO posted_likes (artist_id, guild_id, like_id)
+            VALUES (?, ?, ?)
+        ''', (artist_id, guild_id, like_id))
+        conn.commit()
+
+def is_already_posted_repost(artist_id, guild_id, repost_id):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            SELECT 1 FROM posted_reposts
+            WHERE artist_id = ? AND guild_id = ? AND repost_id = ?
+        ''', (artist_id, guild_id, repost_id))
+        return c.fetchone() is not None
+
+def mark_posted_repost(artist_id, guild_id, repost_id):
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute('''
+            INSERT OR IGNORE INTO posted_reposts (artist_id, guild_id, repost_id)
+            VALUES (?, ?, ?)
+        ''', (artist_id, guild_id, repost_id))
+        conn.commit()
 
 # --- Initialize DB on module import ---
 initialize_database()

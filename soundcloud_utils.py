@@ -5,6 +5,7 @@ import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime
+import logging
 
 # Load environment variables
 load_dotenv()
@@ -28,11 +29,19 @@ def clean_soundcloud_url(url):
         if 'soundcloud.com' not in parsed.netloc:
             raise ValueError("Invalid SoundCloud domain")
 
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        try:
+            response = requests.get(url, headers=HEADERS, timeout=10)
+            if response.status_code == 404:
+                logging.warning(f"⚠️ 404 from SoundCloud for {url}")
+                raise ValueError("SoundCloud URL returned 404")
+            response.raise_for_status()
+        except requests.RequestException as req_err:
+            logging.error(f"❌ Request failed for SoundCloud URL {url}: {req_err}")
+            raise ValueError("SoundCloud request error")
 
         match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
         return match.group(1) if match else url
+
     except Exception as e:
         raise ValueError(f"URL validation failed: {e}")
 
@@ -160,44 +169,41 @@ def get_soundcloud_playlist_info(artist_url):
         raise ValueError(f"Playlist info fetch failed: {e}")
 
 def get_soundcloud_likes_info(artist_url):
-    """Fetch latest liked track info."""
     try:
         artist_info = get_artist_info(artist_url)
-        artist_id = artist_info['id']
+        artist_id = artist_info["id"]
 
         likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
         response = requests.get(likes_url, headers=HEADERS, timeout=10)
         response.raise_for_status()
 
-        likes = response.json()
-        if not likes:
+        data = response.json()
+        if not data or "collection" not in data:
             return None
 
-        latest_like = likes[0]
-        if latest_like.get('track'):
-            track = latest_like['track']
+        for item in data["collection"]:
+            track = item.get("track")
+            if not track:
+                continue
 
-            release_info = {
-                "artist_name": track.get('user', {}).get('username'),
-                "title": track.get('title'),
-                "url": track.get('permalink_url'),
-                "release_date": track.get('created_at'),
-                "cover_url": track.get('artwork_url'),
+            return {
+                "artist_name": artist_info.get("username"),
+                "title": track.get("title"),
+                "url": track.get("permalink_url"),
+                "release_date": track.get("created_at"),
+                "cover_url": track.get("artwork_url"),
                 "features": None,
                 "track_count": 1,
-                "duration": seconds_to_minutes_seconds(track.get('duration', 0) // 1000),
-                "repost": track.get('reposted', False),
-                "genres": [track.get('genre')] if track.get('genre') else [],
+                "duration": format_duration(track.get("duration", 0)),
+                "repost": False,
+                "genres": [track.get("genre")] if track.get("genre") else [],
                 "release_type": "Like"
             }
-
-            return release_info
 
         return None
 
     except Exception as e:
-        raise ValueError(f"Likes fetch failed: {e}")
-
+        raise ValueError(f"Like fetch failed: {e}")
 
 # --- Data Processing ---
 

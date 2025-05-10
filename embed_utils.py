@@ -2,7 +2,21 @@ import discord
 
 import discord
 
-def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features, track_count, duration, repost, genres=None, release_type=None, custom_color=None):
+def create_music_embed(
+    platform,
+    artist_name,
+    title,
+    url,
+    release_date,
+    cover_url,
+    features,
+    track_count,
+    duration,
+    repost,
+    genres=None,
+    release_type=None,
+    custom_color=None
+):
     platform_color = 0x1DB954 if platform == "spotify" else 0xFF5500
     embed_color = int(custom_color, 16) if custom_color else platform_color
 
@@ -27,8 +41,13 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
     if release_type:
         description += f"**Release Type**\n{release_type}\n"
 
-    if genres and len(genres) > 0:
-        description += f"**Genres**\n{', '.join(genres)}\n"
+    # ✅ FIXED GENRES SECTION
+    if genres:
+        if isinstance(genres, list):
+            genre_text = ", ".join(genres)
+        else:
+            genre_text = str(genres)
+        description += f"**Genres**\n{genre_text}\n"
     else:
         description += f"**Genres**\nNone\n"
 
