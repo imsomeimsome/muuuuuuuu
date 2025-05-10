@@ -3,3 +3,4 @@ python-dotenv>=1.0.0
 spotipy>=2.23.0
 requests>=2.31.0
 Flask>=3.0.2
+python-dateutil>=2.8.2
