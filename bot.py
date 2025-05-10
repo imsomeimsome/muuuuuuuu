@@ -229,11 +229,11 @@ async def check_for_new_releases(bot):
             # First time tracking skip logic
             if artist['last_release_date'] is None:
                 logging.info(f"⏭️ Skipping first check for {artist_name} — storing current release date.")
-                update_last_release_date(artist_id, owner_id, current_date)
+                update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 continue
 
             if current_date != artist['last_release_date']:
-                update_last_release_date(artist_id, owner_id, current_date)
+                update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 await handle_release(bot, artist, release_info, "release")
 
             checked_count += 1
@@ -257,7 +257,7 @@ async def check_for_new_releases(bot):
 
             playlist_date = release_info['release_date']
             if playlist_date != artist['last_release_date']:
-                update_last_release_date(artist['artist_id'], artist['owner_id'], playlist_date)
+                update_last_release_date(artist['artist_id'], artist['owner_id'], artist['guild_id'], playlist_date)
                 await handle_release(bot, artist, release_info, "playlist")
 
         except Exception as e:
@@ -274,7 +274,7 @@ async def check_for_new_releases(bot):
             for repost in reposts:
                 repost_date = repost['release_date']
                 if repost_date != artist['last_release_date']:
-                    update_last_release_date(artist['artist_id'], artist['owner_id'], repost_date)
+                    update_last_release_date(artist['artist_id'], artist['owner_id'], artist['guild_id'], repost_date)
                     await handle_release(bot, artist, repost, "repost")
 
         except Exception as e:
@@ -291,7 +291,7 @@ async def check_for_new_releases(bot):
             for like in likes:
                 like_date = like['release_date']
                 if like_date != artist['last_release_date']:
-                    update_last_release_date(artist['artist_id'], artist['owner_id'], like_date)
+                    update_last_release_date(artist['artist_id'], artist['owner_id'], artist['guild_id'], like_date)
                     await handle_release(bot, artist, like, "like")
 
         except Exception as e:
@@ -332,11 +332,11 @@ async def check_for_new_likes(bot):
             # First-time check (store only, don't post)
             if last_release is None:
                 logging.info(f"⏭️ First like check for {artist_name} — storing but skipping post")
-                update_last_release_date(artist_id, owner_id, current_date)
+                update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 continue
 
             if current_date != last_release:
-                update_last_release_date(artist_id, owner_id, current_date)
+                update_last_release_date(artist_id, owner_id, guild_id, current_date)
 
                 if not guild_id:
                     logging.warning(f"⚠️ No guild_id for {artist_name} — skipping post")
@@ -404,7 +404,7 @@ async def check_for_new_playlists(bot):
             logging.info(f"→ New playlist date from API: {current_date}")
 
             if stored_date != current_date:
-                update_last_release_date(artist['artist_id'], artist['owner_id'], current_date)
+                update_last_release_date(artist['artist_id'], artist['owner_id'], artist['guild_id'], current_date)
 
                 guild_id = artist.get('guild_id')
                 if not guild_id:
@@ -717,7 +717,8 @@ async def untrack_command(interaction: discord.Interaction, artist_identifier: s
             artist_id = extract_soundcloud_id(artist_identifier)
         else:
             artist_id = artist_identifier.strip()
-        artist = get_artist_by_id(artist_id, user_id)
+        guild_id = str(interaction.guild.id)
+        artist = get_artist_by_id(artist_id, user_id, guild_id)
         if not artist:
             await interaction.followup.send(f"❌ No artist found.")
             return
@@ -728,6 +729,7 @@ async def untrack_command(interaction: discord.Interaction, artist_identifier: s
     except Exception as e:
         await bot.log_event(f"❌ Error: {str(e)}")
         await interaction.followup.send(f"❌ Error: `{str(e)}`")
+
 @bot.tree.command(name="list", description="List your tracked artists.")
 @require_registration
 async def list_command(interaction: discord.Interaction):

@@ -163,24 +163,14 @@ def get_artists_by_owner(owner_id):
         "genres": row[6]
     } for row in rows]
 
-def get_artist_by_id(artist_id, owner_id):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM artists WHERE artist_id = ? AND owner_id = ?", (artist_id, owner_id))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "platform": row[0],
-            "artist_id": row[1],
-            "artist_name": row[2],
-            "artist_url": row[3],
-            "last_release_date": row[4],
-            "owner_id": row[5],
-            "genres": row[6]
-        }
-    else:
-        return None
+def get_artist_by_id(artist_id, owner_id, guild_id):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT * FROM artists
+            WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
+        ''', (artist_id, owner_id, guild_id))
+        return cursor.fetchone()
 
 def get_artist_url(artist_id, owner_id):
     conn = get_connection()
@@ -193,15 +183,15 @@ def get_artist_url(artist_id, owner_id):
     else:
         return None
 
-def update_last_release_date(artist_id, owner_id, new_date):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute(
-        "UPDATE artists SET last_release_date = ? WHERE artist_id = ? AND owner_id = ?",
-        (new_date, artist_id, owner_id)
-    )
-    conn.commit()
-    conn.close()
+def update_last_release_date(artist_id, owner_id, guild_id, new_date):
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            UPDATE artists
+            SET last_release_date = ?
+            WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
+        ''', (new_date, artist_id, owner_id, guild_id))
+        conn.commit()
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
     conn = get_connection()
@@ -419,6 +409,7 @@ def set_release_prefs(user_id, artist_id, release_type, state):
     )
     conn.commit()
     conn.close()
+
 def get_artist_by_identifier(identifier: str, owner_id: str):
     """Get artist by URL or ID, handling both Spotify and SoundCloud."""
     # Try to extract ID from URL
