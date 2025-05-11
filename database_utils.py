@@ -169,7 +169,10 @@ def get_all_artists(guild_id=None):
             cursor.execute("SELECT * FROM artists WHERE guild_id = ?", (guild_id,))
         else:
             cursor.execute("SELECT * FROM artists")
-        return cursor.fetchall()
+
+        columns = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+        return [dict(zip(columns, row)) for row in rows]
 
 def get_artists_by_owner(owner_id):
     conn = get_connection()
