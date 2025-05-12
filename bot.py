@@ -294,24 +294,28 @@ async def check_for_new_releases(bot):
         except Exception as e:
             logging.error(f"❌ Repost check failed for {artist.get('artist_name', 'unknown')}: {e}")
 
-    # ----- LIKES -----
+# ----- LIKES -----
     logging.info("🔍 Checking for likes...")
     for artist in artists:
-        if artist.get("platform") != 'soundcloud':
+        if artist['platform'] != 'soundcloud':
             continue
 
         try:
             likes = get_soundcloud_likes_info(artist['artist_url'])
+            if not likes:
+                continue
+
             for like in likes:
                 like_id = like.get("track_id")
                 if not like_id:
                     continue
+
                 if is_already_posted_like(artist['artist_id'], artist['guild_id'], like_id):
                     continue
 
                 embed = create_music_embed(
                     platform="soundcloud",
-                    artist_name=like.get("artist_name", artist["artist_name"]),
+                    artist_name=like.get("artist_name"),
                     title=like.get("title"),
                     url=like.get("url"),
                     release_date=like.get("release_date"),
@@ -319,7 +323,7 @@ async def check_for_new_releases(bot):
                     features=like.get("features"),
                     track_count=like.get("track_count"),
                     duration=like.get("duration"),
-                    repost=False,
+                    repost=like.get("repost"),
                     genres=like.get("genres"),
                     release_type="Like"
                 )
@@ -331,7 +335,8 @@ async def check_for_new_releases(bot):
                 mark_posted_like(artist['artist_id'], artist['guild_id'], like_id)
 
         except Exception as e:
-            logging.error(f"❌ Like check failed for {artist.get('artist_name', 'unknown')}: {e}")
+            logging.error(f"❌ Like check failed for {artist['artist_name']}: {e}")
+
 
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()

@@ -18,6 +18,17 @@ HEADERS = {
 
 # --- Core URL Handling ---
 
+def extract_soundcloud_user_id(artist_url):
+    """Fetch SoundCloud user ID from artist profile URL."""
+    try:
+        res = requests.get(f"https://api-v2.soundcloud.com/resolve?url={artist_url}&client_id={CLIENT_ID}", timeout=10)
+        res.raise_for_status()
+        data = res.json()
+        return data.get("id")
+    except Exception as e:
+        raise ValueError(f"Failed to extract user ID from URL: {e}")
+
+
 def clean_soundcloud_url(url):
     """Normalize and verify SoundCloud URLs."""
     try:
@@ -170,40 +181,38 @@ def get_soundcloud_playlist_info(artist_url):
 
 def get_soundcloud_likes_info(artist_url):
     try:
-        artist_info = get_artist_info(artist_url)
-        artist_id = artist_info["id"]
+        user_id = extract_soundcloud_user_id(artist_url)
+        url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=5"
 
-        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
-        response = requests.get(likes_url, headers=HEADERS, timeout=10)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
 
         data = response.json()
-        if not data or "collection" not in data:
-            return None
+        likes = []
 
-        for item in data["collection"]:
-            track = item.get("track")
-            if not track:
-                continue
+        for item in data.get("collection", []):
+            if item.get("type") == "track-like":
+                track = item.get("track")
+                if not track:
+                    continue
+                likes.append({
+                    "track_id": track.get("id"),
+                    "title": track.get("title"),
+                    "artist_name": track.get("user", {}).get("username"),
+                    "url": track.get("permalink_url"),
+                    "release_date": track.get("created_at"),
+                    "cover_url": track.get("artwork_url"),
+                    "features": None,
+                    "track_count": 1,
+                    "duration": str(round(track.get("duration", 0) / 1000)) + "s",
+                    "genres": [track.get("genre")] if track.get("genre") else [],
+                    "repost": False
+                })
 
-            return {
-                "artist_name": artist_info.get("username"),
-                "title": track.get("title"),
-                "url": track.get("permalink_url"),
-                "release_date": track.get("created_at"),
-                "cover_url": track.get("artwork_url"),
-                "features": None,
-                "track_count": 1,
-                "duration": format_duration(track.get("duration", 0)),
-                "repost": False,
-                "genres": [track.get("genre")] if track.get("genre") else [],
-                "release_type": "Like"
-            }
-
-        return None
-
+        return likes
     except Exception as e:
-        raise ValueError(f"Like fetch failed: {e}")
+        logging.error(f"SoundCloud likes fetch failed: {e}")
+        return None
 
 # --- Data Processing ---
 
@@ -353,13 +362,6 @@ def safe_get(url, headers=None, retries=3):
         return response
     return None
 
-
-# === Likes support ===
-
-import requests
-from datetime import datetime
-from utils import safe_get
-
 def get_soundcloud_likes(artist_url):
     try:
         artist_info = get_artist_info(artist_url)
@@ -394,32 +396,35 @@ def get_soundcloud_likes(artist_url):
     
 def get_soundcloud_reposts(artist_url):
     try:
-        artist_info = get_artist_info(artist_url)
-        artist_id = artist_info['id']
+        user_id = extract_soundcloud_user_id(artist_url)
+        url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
 
-        reposts_url = f"https://api-v2.soundcloud.com/users/{artist_id}/reposts?client_id={CLIENT_ID}&limit=5"
-        response = requests.get(reposts_url, headers=HEADERS, timeout=10)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
 
-        items = response.json().get('collection', [])
+        data = response.json()
         reposts = []
-        for item in items:
-            if item.get('track'):
-                track = item['track']
+
+        for item in data.get("collection", []):
+            if item.get("type") == "track-repost":
+                track = item.get("track")
+                if not track:
+                    continue
                 reposts.append({
-                    "artist_name": track.get('user', {}).get('username'),
-                    "title": track.get('title'),
-                    "url": track.get('permalink_url'),
-                    "release_date": track.get('created_at'),
-                    "cover_url": track.get('artwork_url'),
+                    "track_id": track.get("id"),
+                    "title": track.get("title"),
+                    "artist_name": track.get("user", {}).get("username"),
+                    "url": track.get("permalink_url"),
+                    "release_date": track.get("created_at"),
+                    "cover_url": track.get("artwork_url"),
                     "features": None,
                     "track_count": 1,
-                    "duration": track.get('full_duration', 0) // 1000,
-                    "repost": True,
-                    "genres": track.get('genre', []),
-                    "release_type": "Repost"
+                    "duration": str(round(track.get("duration", 0) / 1000)) + "s",
+                    "genres": [track.get("genre")] if track.get("genre") else [],
+                    "repost": True
                 })
+
         return reposts
     except Exception as e:
-        print(f"SoundCloud repost fetch failed: {e}")
-        return []
+        logging.error(f"SoundCloud repost fetch failed: {e}")
+        return None
