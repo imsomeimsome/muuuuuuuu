@@ -196,27 +196,27 @@ async def check_for_new_releases(bot):
     for artist in artists:
         platform = artist.get("platform", "unknown")
         artist_name = artist.get("artist_name", "unknown")
+
         try:
             artist_id = artist['artist_id']
             owner_id = artist['owner_id']
             guild_id = artist.get('guild_id')
 
-            # Spotify
             if platform == 'spotify':
-                latest_album_id = get_spotify_latest_album_id(artist_id)
+                latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
                 if not latest_album_id:
                     continue
-                release_info = get_spotify_release_info(latest_album_id)
+                release_info = await run_blocking(get_spotify_release_info, latest_album_id)
                 if not release_info:
                     continue
                 current_date = release_info['release_date']
 
-            # SoundCloud
             elif platform == 'soundcloud':
-                release_info = get_soundcloud_release_info(artist['artist_url'])
+                release_info = await run_blocking(get_soundcloud_release_info, artist['artist_url'])
                 if not release_info:
                     continue
                 current_date = release_info['release_date']
+
             else:
                 continue
 
@@ -251,7 +251,7 @@ async def check_for_new_releases(bot):
             continue
 
         try:
-            release_info = get_soundcloud_playlist_info(artist['artist_url'])
+            release_info = await run_blocking(get_soundcloud_playlist_info, artist['artist_url'])
             if not release_info:
                 continue
 
@@ -276,7 +276,7 @@ async def check_for_new_releases(bot):
             continue
 
         try:
-            reposts = get_soundcloud_reposts(artist['artist_url'])
+            reposts = await run_blocking(get_soundcloud_reposts, artist['artist_url'])
             for repost in reposts:
                 repost_id = str(repost['track'].get('id'))
                 if not repost_id:
@@ -294,14 +294,14 @@ async def check_for_new_releases(bot):
         except Exception as e:
             logging.error(f"❌ Repost check failed for {artist.get('artist_name', 'unknown')}: {e}")
 
-# ----- LIKES -----
+    # ----- LIKES -----
     logging.info("🔍 Checking for likes...")
     for artist in artists:
         if artist['platform'] != 'soundcloud':
             continue
 
         try:
-            likes = get_soundcloud_likes_info(artist['artist_url'])
+            likes = await run_blocking(get_soundcloud_likes_info, artist['artist_url'])
             if not likes:
                 continue
 
@@ -337,7 +337,6 @@ async def check_for_new_releases(bot):
         except Exception as e:
             logging.error(f"❌ Like check failed for {artist['artist_name']}: {e}")
 
-
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()
     logging.info("🚀 Release checker started")
@@ -356,7 +355,11 @@ async def release_check_scheduler(bot):
         delay = max(delay, 0)
 
         logging.info(f"🕰️ First check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-        await asyncio.sleep(delay)
+        sleep_interval = 60
+        while delay > 0:
+            await asyncio.sleep(min(delay, sleep_interval))
+            delay -= sleep_interval
+
 
         try:
             check_time = datetime.utcnow().strftime('%H:%M:%S')
@@ -544,16 +547,18 @@ async def track_command(interaction: discord.Interaction, link: str):
     if "spotify.com" in link:
         platform = "spotify"
         artist_id = extract_spotify_id(link)
-        artist_name = get_spotify_artist_name(artist_id)
+        artist_name = await run_blocking(get_spotify_artist_name, artist_id)
         artist_url = f"https://open.spotify.com/artist/{artist_id}"
-        genres = get_spotify_artist_info(artist_id).get("genres", [])
+        artist_info = await run_blocking(get_spotify_artist_info, artist_id)
+        genres = artist_info.get("genres", []) if artist_info else []
+
 
     elif "soundcloud.com" in link:
         platform = "soundcloud"
         artist_id = extract_soundcloud_id(link)
-        artist_name = get_soundcloud_artist_name(link)
+        artist_name = await run_blocking(get_soundcloud_artist_name, link)
         artist_url = f"https://soundcloud.com/{artist_id}"
-        genres = []  # Optional: fetch genres from SC profile if needed
+        genres = []  # Optional
 
     else:
         await interaction.followup.send("❌ Link must be a valid Spotify or SoundCloud artist URL.")
@@ -729,10 +734,10 @@ async def testembed_command(interaction: discord.Interaction, link: str):
             release_id = extract_spotify_id(link)
             if not release_id:
                 raise ValueError("Invalid Spotify URL.")
-            release_info = get_spotify_release_info(release_id)
+            release_info = await run_blocking(get_spotify_release_info, release_id)
             color = 0x1DB954
         elif "soundcloud.com" in link:
-            release_info = get_soundcloud_release_info(link)
+            release_info = await run_blocking(get_soundcloud_release_info, link)
             color = 0xFF5500
         else:
             raise ValueError("Unsupported link. Only Spotify and SoundCloud are supported.")
