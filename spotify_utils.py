@@ -9,6 +9,29 @@ load_dotenv()
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 
+# === PATCHED: Enhanced exception handling and rate limiting ===
+
+import time
+from spotipy.exceptions import SpotifyException
+
+def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
+    for attempt in range(retries):
+        try:
+            return callable_fn(*args, **kwargs)
+        except SpotifyException as e:
+            if e.http_status == 429 and 'Retry-After' in e.headers:
+                wait = int(e.headers['Retry-After'])
+                print(f"Rate limited by Spotify. Retrying in {wait} seconds...")
+                time.sleep(wait)
+            else:
+                print(f"Spotify API error: {e}")
+                break
+        except Exception as e:
+            print(f"Unexpected Spotify error: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+    return None
+
 # Spotify API client setup
 spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
     client_id=SPOTIFY_CLIENT_ID,

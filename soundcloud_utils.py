@@ -16,6 +16,25 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
+# === PATCHED: Enhanced exception handling and rate limiting ===
+
+def safe_request(url, headers=None, retries=3, timeout=10):
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 5))
+                print(f"SoundCloud rate limited. Sleeping for {retry_after} seconds...")
+                time.sleep(retry_after)
+                continue
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            print(f"SoundCloud request error: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)
+    return None
+
 # --- Core URL Handling ---
 
 def extract_soundcloud_user_id(artist_url):
