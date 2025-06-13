@@ -2,6 +2,7 @@ import os
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 import spotipy
+import logging
 from spotipy.oauth2 import SpotifyClientCredentials
 
 # Load environment variables
@@ -37,6 +38,29 @@ spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
     client_id=SPOTIFY_CLIENT_ID,
     client_secret=SPOTIFY_CLIENT_SECRET
 ))
+
+
+def retry_on_rate_limit(func, *args, **kwargs):
+    try:
+        return func(*args, **kwargs)
+    except SpotifyException as e:
+        if e.http_status == 429:
+            retry_after = 10  # fallback default
+            if e.headers:
+                retry_after = int(e.headers.get("Retry-After", 10))
+            logging.warning(f"Rate limit hit. Retrying after {retry_after} seconds...")
+            time.sleep(retry_after)
+            try:
+                return func(*args, **kwargs)
+            except Exception as e2:
+                logging.error(f"Retry after rate limit failed: {e2}")
+                return None
+        else:
+            logging.error(f"Spotify API error: {e}")
+            return None
+    except Exception as e:
+        logging.error(f"Spotify call failed: {e}")
+        return None
 
 # --- Utilities ---
 
@@ -195,3 +219,6 @@ def get_release_info(release_id):
     except Exception as e:
         print(f"Error fetching release info for {release_id}: {str(e)}")
         return None
+    
+
+
