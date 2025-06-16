@@ -873,6 +873,22 @@ async def import_command(interaction: discord.Interaction, file: discord.Attachm
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to import: {e}")
 
+@bot.tree.command(name="reset_artists", description="Delete all tracked artists (admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_artists_command(interaction: discord.Interaction):
+    deleted = reset_artist_data_from_bot()
+    await interaction.response.send_message(f"✅ Wiped all artist tracking ({deleted} entries).")
+
+def reset_artist_data_from_bot():
+    import sqlite3
+    conn = sqlite3.connect('artists.db')  # adjust path
+    c = conn.cursor()
+    c.execute("DELETE FROM artists;")
+    count = c.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
 if __name__ == "__main__":
     keep_alive()  # Start the web server for UptimeRobot
     bot.run(TOKEN)
