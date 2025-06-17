@@ -46,7 +46,7 @@ from soundcloud_utils import (
 from utils import run_blocking, log_release
 import reset_artists
 
-reset_artists.reset_all_artist_data()
+reset_artists.reset_tables()
 
 # Configure logging
 logging.basicConfig(
