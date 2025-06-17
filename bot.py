@@ -46,8 +46,6 @@ from soundcloud_utils import (
 from utils import run_blocking, log_release
 import reset_artists
 
-reset_artists.reset_tables()
-
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -400,6 +398,9 @@ async def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
+
+
+reset_artists.reset_tables()
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
 @app_commands.checks.has_permissions(administrator=True)
