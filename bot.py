@@ -44,6 +44,9 @@ from soundcloud_utils import (
     get_soundcloud_likes
 )
 from utils import run_blocking, log_release
+import reset_artists
+
+reset_artists.reset_all_artist_data()
 
 # Configure logging
 logging.basicConfig(
