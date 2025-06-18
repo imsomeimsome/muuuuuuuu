@@ -75,7 +75,8 @@ def extract_soundcloud_user_id(artist_url):
             f"https://api-v2.soundcloud.com/resolve?url={artist_url}&client_id={CLIENT_ID}",
             headers=HEADERS,
         )
-        res.raise_for_status()
+        if not res:
+            raise ValueError("Request failed")
         data = res.json()
         return data.get("id")
     except Exception as e:
