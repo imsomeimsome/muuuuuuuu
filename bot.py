@@ -56,6 +56,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("release_checker")
 
+# Helper to parse dates consistently
+def parse_date(date_str: str) -> datetime:
+    """Return timezone-aware datetime for any ISO date string."""
+    dt = isoparse(date_str)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
@@ -251,7 +259,7 @@ async def check_for_new_releases(bot):
                 update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 continue
 
-            if isoparse(current_date) > isoparse(last_date):
+            if parse_date(current_date) > parse_date(last_date):
                 update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 await handle_release(bot, artist, release_info, "release")
                 checked_count += 1
@@ -276,7 +284,7 @@ async def check_for_new_releases(bot):
             if not info:
                 continue
             release_date = info["release_date"]
-            if not artist["last_release_date"] or isoparse(release_date) > isoparse(artist["last_release_date"]):
+            if not artist["last_release_date"] or parse_date(release_date) > parse_date(artist["last_release_date"]):
                 update_last_release_date(artist["artist_id"], artist["owner_id"], artist["guild_id"], release_date)
                 await handle_release(bot, artist, info, "playlist")
 

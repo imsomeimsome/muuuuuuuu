@@ -1,11 +1,22 @@
 import sqlite3
 from datetime import datetime, timezone
+from dateutil.parser import isoparse
 from spotify_utils import extract_spotify_id
 from soundcloud_utils import extract_soundcloud_id
 
 # --- Connection Helper ---
 def get_connection():
     return sqlite3.connect("/data/artists.db")
+
+# Ensure all dates stored with timezone info
+def normalize_date_str(date_str: str) -> str:
+    try:
+        dt = isoparse(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except Exception:
+        return date_str
 
 # --- Table Initialization ---
 def initialize_database():
@@ -217,7 +228,7 @@ def update_last_release_date(artist_id, owner_id, guild_id, new_date):
             UPDATE artists
             SET last_release_date = ?
             WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
-        ''', (new_date, artist_id, owner_id, guild_id))
+        ''', (normalize_date_str(new_date), artist_id, owner_id, guild_id))
         conn.commit()
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
@@ -227,8 +238,9 @@ def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=
     # Use timezone-aware datetime to avoid false release triggers
     if last_release_date is None:
         last_release_date = datetime.now(timezone.utc).isoformat()
-
-# sqlite doesn't support list objects directly; store genres as a comma
+    else:
+        last_release_date = normalize_date_str(last_release_date)
+    # sqlite doesn't support list objects directly; store genres as a comma
     # separated string for consistency
     if isinstance(genres, list):
         genres = ",".join(genres) if genres else None
