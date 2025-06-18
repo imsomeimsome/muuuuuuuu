@@ -1,7 +1,7 @@
 import sqlite3
 import os
 
-DB_PATH = "data.db"  # Adjust if your actual DB file is named differently
+DB_PATH = "/data/artists.db"
 
 def reset_tables():
     if not os.path.exists(DB_PATH):
