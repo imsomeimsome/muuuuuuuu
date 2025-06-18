@@ -32,17 +32,15 @@ def refresh_client_id():
 
 # Quick helper to verify the configured client ID works
 def verify_client_id(client_id: str | None = None) -> bool:
-    """Return True if a simple SoundCloud request succeeds."""
+    """Verify client_id using a safe, public, rate-tolerant endpoint."""
     cid = client_id or CLIENT_ID
     if not cid:
         return False
-    test_url = (
-        "https://api-v2.soundcloud.com/resolve"
-        "?url=https://soundcloud.com/soundcloud"
-        f"&client_id={cid}"
-    )
+
+    test_url = f"https://api-v2.soundcloud.com/search/tracks?q=test&client_id={cid}&limit=1"
+
     response = safe_request(test_url)
-    return bool(response and response.status_code not in {401, 403})
+    return bool(response and response.status_code == 200 and "collection" in response.json())
 
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
