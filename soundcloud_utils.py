@@ -16,6 +16,20 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
+# Try to refresh client_id automatically when unauthorized
+def refresh_client_id():
+    """Attempt to fetch a working SoundCloud client ID."""
+    global CLIENT_ID
+    try:
+        html = requests.get("https://soundcloud.com", headers=HEADERS, timeout=10).text
+        match = re.search(r"client_id\s*:\s*\"([a-zA-Z0-9_-]{32})\"", html)
+        if match:
+            CLIENT_ID = match.group(1)
+            return CLIENT_ID
+    except Exception as e:
+        logging.error(f"Failed to refresh SoundCloud client ID: {e}")
+    return None
+
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
 def safe_request(url, headers=None, retries=3, timeout=10):
@@ -26,6 +40,10 @@ def safe_request(url, headers=None, retries=3, timeout=10):
                 retry_after = int(response.headers.get("Retry-After", 5))
                 print(f"SoundCloud rate limited. Sleeping for {retry_after} seconds...")
                 time.sleep(retry_after)
+                continue
+            if response.status_code in {401, 403} and attempt < retries - 1:
+                refresh_client_id()
+                time.sleep(1)
                 continue
             response.raise_for_status()
             return response
@@ -40,7 +58,10 @@ def safe_request(url, headers=None, retries=3, timeout=10):
 def extract_soundcloud_user_id(artist_url):
     """Fetch SoundCloud user ID from artist profile URL."""
     try:
-        res = requests.get(f"https://api-v2.soundcloud.com/resolve?url={artist_url}&client_id={CLIENT_ID}", timeout=10)
+        res = safe_request(
+            f"https://api-v2.soundcloud.com/resolve?url={artist_url}&client_id={CLIENT_ID}",
+            headers=HEADERS,
+        )
         res.raise_for_status()
         data = res.json()
         return data.get("id")
@@ -97,8 +118,9 @@ def get_artist_info(url_or_username):
             username = url_or_username
 
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
-        response = requests.get(resolve_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        response = safe_request(resolve_url, headers=HEADERS)
+        if not response:
+            raise ValueError("Request failed")
 
         data = response.json()
         if data.get('kind') != 'user':
@@ -123,9 +145,10 @@ def get_last_release_date(artist_url):
         artist_id = artist_info['id']
 
         tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=5&order=created_at"
-        response = requests.get(tracks_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
-
+        response = safe_request(tracks_url, headers=HEADERS)
+        if not response:
+            return None
+        
         tracks = response.json()
         if not tracks:
             return None
@@ -143,8 +166,9 @@ def get_release_info(url):
     try:
         clean_url = clean_soundcloud_url(url)
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-        response = requests.get(resolve_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        response = safe_request(resolve_url, headers=HEADERS)
+        if not response:
+            raise ValueError("Request failed")
 
         data = response.json()
 
@@ -165,8 +189,9 @@ def get_soundcloud_playlist_info(artist_url):
         artist_id = artist_info['id']
 
         playlists_url = f"https://api-v2.soundcloud.com/users/{artist_id}/playlists?client_id={CLIENT_ID}&limit=5&order=created_at"
-        response = requests.get(playlists_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        response = safe_request(playlists_url, headers=HEADERS)
+        if not response:
+            return None
 
         playlists = response.json()
         if not playlists:
@@ -202,9 +227,9 @@ def get_soundcloud_likes_info(artist_url):
     try:
         user_id = extract_soundcloud_user_id(artist_url)
         url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=5"
-
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        response = safe_request(url)
+        if not response:
+            return []
 
         data = response.json()
         likes = []
@@ -231,7 +256,7 @@ def get_soundcloud_likes_info(artist_url):
         return likes
     except Exception as e:
         logging.error(f"SoundCloud likes fetch failed: {e}")
-        return None
+        return []
 
 # --- Data Processing ---
 
@@ -285,8 +310,9 @@ def get_artist_release(artist_data):
             f"https://api-v2.soundcloud.com/users/{artist_data['id']}/tracks"
             f"?client_id={CLIENT_ID}&limit=1&linked_partitioning=1&representation=full"
         )
-        response = requests.get(tracks_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        response = safe_request(tracks_url, headers=HEADERS)
+        if not response:
+            raise ValueError("Request failed")
 
         data = response.json()
 
@@ -387,8 +413,9 @@ def get_soundcloud_likes(artist_url):
         artist_id = artist_info['id']
 
         likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
-        response = requests.get(likes_url, headers=HEADERS, timeout=10)
-        response.raise_for_status()
+        response = safe_request(likes_url, headers=HEADERS)
+        if not response:
+            return []
 
         items = response.json().get('collection', [])
         likes = []
@@ -417,10 +444,10 @@ def get_soundcloud_reposts(artist_url):
     try:
         user_id = extract_soundcloud_user_id(artist_url)
         url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
-
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-
+        response = safe_request(url)
+        if not response:
+            return []
+        
         data = response.json()
         reposts = []
 
@@ -446,4 +473,4 @@ def get_soundcloud_reposts(artist_url):
         return reposts
     except Exception as e:
         logging.error(f"SoundCloud repost fetch failed: {e}")
-        return None
+        return []

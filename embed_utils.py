@@ -1,7 +1,5 @@
 import discord
 
-import discord
-
 def create_music_embed(
     platform,
     artist_name,
@@ -98,29 +96,28 @@ def create_repost_embed(platform, reposted_by, original_artist, title, url, rele
 
     return embed
 
-
-    # Build embed description
-    description = f"[{title}]({url})\n\n"
-    
-    # ✅ Genres (Always show, or show "None" if empty)
-    if genres and len(genres) > 0:
-        description += f"**Genres**\n{', '.join(genres[:3])}\n"
-    else:
-        description += f"**Genres**\nNone\n"
-
-    description += (
-        f"**Duration**\n{duration}\n"
-        f"**Tracks**\n{track_count}\n"
-        f"**Features**\n{features}\n"
-        f"**Released on** {release_date[:10]}"
-    )
-
-    # Create embed with correct description
-    embed = discord.Embed(
-        title=f"{emoji} New {artist_name} Release!",
-        description=description,
-        color=embed_color
-    )
-
-    embed.set_thumbnail(url=cover_url)
-    return embed
+#
+#    # Build embed description
+#    description = f"[{title}]({url})\n\n"
+#    
+#    # ✅ Genres (Always show, or show "None" if empty)
+#    if genres and len(genres) > 0:
+#        description += f"**Genres**\n{', '.join(genres[:3])}\n"
+#    else:
+#        description += f"**Genres**\nNone\n"
+#
+#    description += (
+#        f"**Duration**\n{duration}\n"
+#        f"**Features**\n{features}\n"
+#        f"**Released on** {release_date[:10]}"
+#    )
+#
+#    # Create embed with correct description
+#    embed = discord.Embed(
+#        title=f"{emoji} New {artist_name} Release!",
+#        description=description,
+#        color=embed_color
+#    )
+#
+#    embed.set_thumbnail(url=cover_url)
+#    return embed
