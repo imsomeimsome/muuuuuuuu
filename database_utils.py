@@ -228,6 +228,11 @@ def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=
     if last_release_date is None:
         last_release_date = datetime.now(timezone.utc).isoformat()
 
+# sqlite doesn't support list objects directly; store genres as a comma
+    # separated string for consistency
+    if isinstance(genres, list):
+        genres = ",".join(genres) if genres else None
+
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
