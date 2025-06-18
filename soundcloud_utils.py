@@ -37,8 +37,9 @@ def verify_client_id(client_id: str | None = None) -> bool:
     if not cid:
         return False
     test_url = (
-        "https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/&client_id="
-        + cid
+        "https://api-v2.soundcloud.com/resolve"
+        "?url=https://soundcloud.com/soundcloud"
+        f"&client_id={cid}"
     )
     response = safe_request(test_url)
     return bool(response and response.status_code not in {401, 403})
@@ -51,13 +52,16 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", 5))
-                print(f"SoundCloud rate limited. Sleeping for {retry_after} seconds...")
+                print(
+                    f"SoundCloud rate limited. Sleeping for {retry_after} seconds..."
+                )
                 time.sleep(retry_after)
                 continue
-            if response.status_code in {401, 403} and attempt < retries - 1:
-                refresh_client_id()
-                time.sleep(1)
-                continue
+            if response.status_code in {401, 403}:
+                # Do not auto-refresh when using official client IDs
+                print(
+                    f"SoundCloud request unauthorized (status {response.status_code})."
+                )
             response.raise_for_status()
             return response
         except Exception as e:
