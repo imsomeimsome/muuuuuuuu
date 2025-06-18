@@ -61,6 +61,7 @@ To start tracking any artist!
 - `/untrack` → Stop tracking an artist
 - `/channels` → View configured channels
 - `/key` → Debug + info command
+- `/checkscid` → Verify SoundCloud client ID
 
 ## Advanced Configuration (Optional)
 

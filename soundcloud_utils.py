@@ -30,6 +30,19 @@ def refresh_client_id():
         logging.error(f"Failed to refresh SoundCloud client ID: {e}")
     return None
 
+# Quick helper to verify the configured client ID works
+def verify_client_id(client_id: str | None = None) -> bool:
+    """Return True if a simple SoundCloud request succeeds."""
+    cid = client_id or CLIENT_ID
+    if not cid:
+        return False
+    test_url = (
+        "https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/&client_id="
+        + cid
+    )
+    response = safe_request(test_url)
+    return bool(response and response.status_code not in {401, 403})
+
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
 def safe_request(url, headers=None, retries=3, timeout=10):

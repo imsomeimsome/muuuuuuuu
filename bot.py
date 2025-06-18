@@ -211,7 +211,8 @@ async def check_for_new_releases(bot):
         logging.error(f"❌ Failed to fetch artists from database: {e}")
         return
 
-    checked_count = 0
+    total_checked = 0
+    new_release_count = 0
     for artist in artists:
         platform = artist.get("platform")
         artist_name = artist.get("artist_name", "unknown")
@@ -246,6 +247,8 @@ async def check_for_new_releases(bot):
             if not release_info:
                 continue
 
+            total_checked += 1
+
             current_date = release_info.get("release_date")
             if not current_date:
                 continue
@@ -262,12 +265,13 @@ async def check_for_new_releases(bot):
             if parse_date(current_date) > parse_date(last_date):
                 update_last_release_date(artist_id, owner_id, guild_id, current_date)
                 await handle_release(bot, artist, release_info, "release")
-                checked_count += 1
+                new_release_count += 1
 
         except Exception as e:
             logging.error(f"❌ Failed to check {platform} artist {artist_name}: {e}")
 
-    logging.info(f"✅ Checked {checked_count} artists")
+    logging.info(f"✅ Checked {total_checked} artists")
+    logging.info(f"🆕 New releases detected: {new_release_count}")
 
     if soundcloud_retry_after and now < soundcloud_retry_after:
         logging.warning("⏭️ Skipping SoundCloud playlist/repost/like checks due to cooldown.")
@@ -862,6 +866,16 @@ async def debug_soundcloud(interaction: discord.Interaction, url: str):
 
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {e}")
+
+@bot.tree.command(name="checkscid", description="Verify SoundCloud client ID is valid")
+@require_registration
+async def check_scid_command(interaction: discord.Interaction):
+    from soundcloud_utils import verify_client_id
+    await interaction.response.defer(ephemeral=True)
+    if verify_client_id():
+        await interaction.followup.send("✅ SoundCloud client ID appears valid.")
+    else:
+        await interaction.followup.send("❌ SoundCloud client ID check failed. Verify the ID.")
 
 @bot.tree.command(name="import", description="Import previously exported tracked artists")
 @app_commands.describe(file="Upload a previously exported JSON file")
