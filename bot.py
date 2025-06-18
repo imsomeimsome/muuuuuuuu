@@ -45,6 +45,10 @@ from soundcloud_utils import (
 )
 from utils import run_blocking, log_release
 import reset_artists
+from reset_artists import reset_tables
+
+reset_tables.reset_tables()
+
 
 # Configure logging
 logging.basicConfig(
@@ -398,9 +402,6 @@ async def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, partial(func, *args, **kwargs))
 
-
-
-reset_artists.reset_tables()
 # --- Commands --- 
 @bot.tree.command(name="setchannel")
 @app_commands.checks.has_permissions(administrator=True)
@@ -877,21 +878,6 @@ async def import_command(interaction: discord.Interaction, file: discord.Attachm
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to import: {e}")
 
-@bot.tree.command(name="reset_artists", description="Delete all tracked artists (admin only)")
-@app_commands.checks.has_permissions(administrator=True)
-async def reset_artists_command(interaction: discord.Interaction):
-    deleted = reset_artist_data_from_bot()
-    await interaction.response.send_message(f"✅ Wiped all artist tracking ({deleted} entries).")
-
-def reset_artist_data_from_bot():
-    import sqlite3
-    conn = sqlite3.connect('artists.db')  # adjust path
-    c = conn.cursor()
-    c.execute("DELETE FROM artists;")
-    count = c.rowcount
-    conn.commit()
-    conn.close()
-    return count
 
 if __name__ == "__main__":
     keep_alive()  # Start the web server for UptimeRobot

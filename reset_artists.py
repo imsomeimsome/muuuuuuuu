@@ -1,25 +1,41 @@
 import sqlite3
+import os
+
+DB_PATH = "data.db"  # Adjust if your actual DB file is named differently
 
 def reset_tables():
-    conn = sqlite3.connect("artists.db")
+    if not os.path.exists(DB_PATH):
+        print(f"❌ Database file '{DB_PATH}' does not exist.")
+        return
+
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
+
+    tables = ["artists", "reposts", "likes"]
+
     try:
-        print("Resetting 'artists' table...")
-        c.execute("DELETE FROM artists")
-        print("✅ Cleared 'artists' table.")
+        for table in tables:
+            print(f"🔁 Resetting '{table}' table...")
 
-        print("Resetting 'reposts' table...")
-        c.execute("DELETE FROM reposts")
-        print("✅ Cleared 'reposts' table.")
+            # Check if table exists
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+            if not c.fetchone():
+                print(f"⚠️ Table '{table}' does not exist — skipping.")
+                continue
 
-        print("Resetting 'likes' table...")
-        c.execute("DELETE FROM likes")
-        print("✅ Cleared 'likes' table.")
+            # Delete all records
+            c.execute(f"DELETE FROM {table}")
+            print(f"✅ Cleared all records from '{table}'.")
+
+            # Reset auto-increment (optional, if there's an integer PK)
+            c.execute(f"DELETE FROM sqlite_sequence WHERE name='{table}'")
+
     except Exception as e:
-        print(f"⚠️ Error while resetting tables: {e}")
+        print(f"❌ Error during reset: {e}")
     finally:
         conn.commit()
         conn.close()
+        print("✅ All done.")
 
 if __name__ == "__main__":
     reset_tables()
