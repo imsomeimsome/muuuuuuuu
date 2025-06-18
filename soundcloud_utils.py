@@ -208,8 +208,11 @@ def get_soundcloud_playlist_info(artist_url):
         response = safe_request(playlists_url, headers=HEADERS)
         if not response:
             return None
+        playlists_data = response.json()
+        if not playlists_data:
+            return None
 
-        playlists = response.json()
+        playlists = playlists_data.get('collection', playlists_data if isinstance(playlists_data, list) else [])
         if not playlists:
             return None
 
