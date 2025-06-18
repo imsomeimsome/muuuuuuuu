@@ -91,8 +91,9 @@ class MusicBot(commands.Bot):
 
     async def log_event(self, content: str):
         if self.log_channel:
-            await self.log_channel.send(f"`[{datetime.utcnow()}]` {content}")
-
+            await self.log_channel.send(
+                f"`[{datetime.now(timezone.utc)}]` {content}"
+            )
 bot = MusicBot()
 
 ensure_artists_table_has_unique_constraint()
@@ -189,11 +190,11 @@ async def handle_release(bot, artist, release_info, release_type):
 
 async def check_for_new_releases(bot):
     import logging
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
     from dateutil.parser import isoparse
 
     logging.info("🔍 Checking for new releases...")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     soundcloud_retry_after = None
 
     try:
@@ -365,7 +366,7 @@ async def release_check_scheduler(bot):
 
 
         try:
-            check_time = datetime.utcnow().strftime('%H:%M:%S')
+            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
             logging.info(f"🔍 Starting release check at {check_time} UTC...")
 
             await check_for_new_releases(bot)
@@ -573,8 +574,8 @@ async def track_command(interaction: discord.Interaction, link: str):
         return
 
     # ✅ Set last_release_date as time of tracking to prevent false first posts
-    from datetime import datetime
-    current_time = datetime.utcnow().isoformat()
+    from datetime import datetime, timezone
+    current_time = datetime.now(timezone.utc).isoformat()
 
     # Add artist
     add_artist(

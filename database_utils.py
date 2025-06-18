@@ -301,7 +301,7 @@ def is_user_registered(user_id):
 def add_user(user_id, username):
     conn = get_connection()
     c = conn.cursor()
-    registered_at = datetime.utcnow().isoformat()
+    registered_at = datetime.now(timezone.utc).isoformat()
     try:
         c.execute(
             "INSERT INTO users (user_id, username, registered_at) VALUES (?, ?, ?)",
@@ -373,7 +373,7 @@ def get_release_stats(user_id=None):
 def log_untrack(user_id, artist_id):
     conn = get_connection()
     c = conn.cursor()
-    timestamp = datetime.utcnow().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     c.execute(
         "INSERT INTO untrack_logs (user_id, artist_id, timestamp) VALUES (?, ?, ?)",
         (str(user_id), artist_id, timestamp)
@@ -484,7 +484,7 @@ def import_artists_from_json(data, owner_id, guild_id):
         genres = entry.get("genres", [])
         genre_str = ",".join(genres) if genres else None
 
-        now_timestamp = datetime.datetime.utcnow().isoformat()
+        now_timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         c.execute(
             '''
