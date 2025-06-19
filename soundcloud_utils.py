@@ -6,6 +6,10 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime
 import logging
+from utils import cache
+
+# Cache duration for repeated SoundCloud lookups
+CACHE_TTL = 300  # 5 minutes
 
 # Load environment variables
 load_dotenv()
@@ -72,6 +76,10 @@ def safe_request(url, headers=None, retries=3, timeout=10):
 
 def extract_soundcloud_user_id(artist_url):
     """Fetch SoundCloud user ID from artist profile URL."""
+    cache_key = f"sc_user_id:{artist_url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         res = safe_request(
             f"https://api-v2.soundcloud.com/resolve?url={artist_url}&client_id={CLIENT_ID}",
@@ -80,7 +88,10 @@ def extract_soundcloud_user_id(artist_url):
         if not res:
             raise ValueError("Request failed")
         data = res.json()
-        return data.get("id")
+        user_id = data.get("id")
+        if user_id:
+            cache.set(cache_key, user_id, ttl=CACHE_TTL)
+        return user_id
     except Exception as e:
         raise ValueError(f"Failed to extract user ID from URL: {e}")
 
@@ -127,6 +138,10 @@ def extract_soundcloud_username(url):
 
 def get_artist_info(url_or_username):
     """Resolve a SoundCloud user from a full profile URL or username."""
+    cache_key = f"sc_artist_info:{url_or_username}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         if url_or_username.startswith("http"):
             username = extract_soundcloud_username(url_or_username)
@@ -142,7 +157,7 @@ def get_artist_info(url_or_username):
         if data.get('kind') != 'user':
             raise ValueError("Not an artist profile")
 
-        return {
+        info = {
             'id': data['id'],
             'name': data['username'],
             'url': data['permalink_url'],
@@ -150,12 +165,18 @@ def get_artist_info(url_or_username):
             'avatar_url': data.get('avatar_url', ''),
             'followers': data.get('followers_count', 0)
         }
+        cache.set(cache_key, info, ttl=CACHE_TTL)
+        return info
     except Exception as e:
         raise ValueError(f"Artist info fetch failed: {e}")
 
 # --- Release Data Fetching ---
 
 def get_last_release_date(artist_url):
+    cache_key = f"sc_last_release:{artist_url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         artist_info = get_artist_info(artist_url)
         artist_id = artist_info['id']
@@ -169,16 +190,21 @@ def get_last_release_date(artist_url):
         if not tracks:
             return None
 
-        # Get track with latest created_at timestamp
         latest_track = max(tracks, key=lambda t: t['created_at'])
-
-        return latest_track.get('created_at')  # full timestamp
+        created = latest_track.get('created_at')
+        if created:
+            cache.set(cache_key, created, ttl=CACHE_TTL)
+        return created
     except Exception as e:
         print(f"Error getting last release: {e}")
         return None
 
 def get_release_info(url):
     """Universal release info fetcher for tracks/playlists/artists."""
+    cache_key = f"sc_release:{url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         clean_url = clean_soundcloud_url(url)
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
@@ -189,17 +215,24 @@ def get_release_info(url):
         data = response.json()
 
         if data['kind'] == 'track':
-            return process_track(data)
+            info = process_track(data)
         elif data['kind'] == 'playlist':
-            return process_playlist(data)
+            info = process_playlist(data)
         elif data['kind'] == 'user':
-            return get_artist_release(data)
+            info = get_artist_release(data)
         else:
             raise ValueError("Unsupported content type")
+    
+        cache.set(cache_key, info, ttl=CACHE_TTL)
+        return info
     except Exception as e:
         raise ValueError(f"Release info fetch failed: {e}")
 
 def get_soundcloud_playlist_info(artist_url):
+    cache_key = f"sc_playlist:{artist_url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         artist_info = get_artist_info(artist_url)
         artist_id = artist_info['id']
@@ -237,12 +270,17 @@ def get_soundcloud_playlist_info(artist_url):
             "release_type": "Album" if track_count >= 7 else "EP" if track_count >= 2 else "Single"
         }
 
+        cache.set(cache_key, release_info, ttl=CACHE_TTL)
         return release_info
 
     except Exception as e:
         raise ValueError(f"Playlist info fetch failed: {e}")
 
 def get_soundcloud_likes_info(artist_url):
+    cache_key = f"sc_likes:{artist_url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         user_id = extract_soundcloud_user_id(artist_url)
         url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=5"
@@ -272,6 +310,7 @@ def get_soundcloud_likes_info(artist_url):
                     "repost": False
                 })
 
+        cache.set(cache_key, likes, ttl=CACHE_TTL)
         return likes
     except Exception as e:
         logging.error(f"SoundCloud likes fetch failed: {e}")
@@ -460,6 +499,10 @@ def get_soundcloud_likes(artist_url):
         return []
     
 def get_soundcloud_reposts(artist_url):
+    cache_key = f"sc_reposts:{artist_url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
     try:
         user_id = extract_soundcloud_user_id(artist_url)
         url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
@@ -489,6 +532,7 @@ def get_soundcloud_reposts(artist_url):
                     "repost": True
                 })
 
+        cache.set(cache_key, reposts, ttl=CACHE_TTL)
         return reposts
     except Exception as e:
         logging.error(f"SoundCloud repost fetch failed: {e}")
