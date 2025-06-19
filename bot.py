@@ -46,7 +46,7 @@ from soundcloud_utils import (
 from utils import run_blocking, log_release
 from reset_artists import reset_tables
 
-# reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
+reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
 
 # Configure logging
 logging.basicConfig(
@@ -214,6 +214,7 @@ async def check_for_new_releases(bot):
     total_checked = 0
     new_release_count = 0
     for artist in artists:
+        total_checked += 1
         platform = artist.get("platform")
         artist_name = artist.get("artist_name", "unknown")
         artist_id = artist.get("artist_id")
@@ -245,9 +246,8 @@ async def check_for_new_releases(bot):
                 continue
 
             if not release_info:
+                logging.info(f"⚠️ No release info found for {artist_name} ({platform})")
                 continue
-
-            total_checked += 1
 
             current_date = release_info.get("release_date")
             if not current_date:
