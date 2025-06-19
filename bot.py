@@ -164,6 +164,9 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
         logging.warning(f"⚠️ Channel ID {channel_id} exists but is not a text channel")
         return None
 
+    logging.info(
+        f"✅ Found release channel #{channel.name} ({channel.id}) for {platform} in guild {guild_id}"
+    )
     return channel
 
 async def handle_release(bot, artist, release_info, release_type):
@@ -284,10 +287,15 @@ async def check_for_new_releases(bot):
             continue
 
         try:
+            logging.info(
+                f"👀 Checking playlists for {artist.get('artist_name', 'unknown')}"
+            )
             info = await run_blocking(get_soundcloud_playlist_info, artist["artist_url"])
             if not info:
                 continue
             release_date = info["release_date"]
+            logging.info(f"→ Stored last_release_date: {artist.get('last_release_date')}")
+            logging.info(f"→ Playlist release date from API: {release_date}")
             if not artist["last_release_date"] or parse_date(release_date) > parse_date(artist["last_release_date"]):
                 update_last_release_date(artist["artist_id"], artist["owner_id"], artist["guild_id"], release_date)
                 await handle_release(bot, artist, info, "playlist")
@@ -302,7 +310,11 @@ async def check_for_new_releases(bot):
             continue
 
         try:
+            logging.info(
+                f"👀 Checking reposts for {artist.get('artist_name', 'unknown')}"
+            )
             reposts = await run_blocking(get_soundcloud_reposts, artist["artist_url"])
+            logging.info(f"→ {len(reposts)} recent repost(s) fetched")
             for repost in reposts:
                 repost_id = str(repost.get("track_id"))
                 if not repost_id or is_already_posted_repost(artist["artist_id"], artist["guild_id"], repost_id):
@@ -324,6 +336,9 @@ async def check_for_new_releases(bot):
                 channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
+                    logging.info(
+                        f"✅ Posted repost {repost_id} for {artist.get('artist_name')} to #{channel.name}"
+                    )
                     mark_posted_repost(artist["artist_id"], artist["guild_id"], repost_id)
 
         except Exception as e:
@@ -336,7 +351,11 @@ async def check_for_new_releases(bot):
             continue
 
         try:
+            logging.info(
+                f"👀 Checking likes for {artist.get('artist_name', 'unknown')}"
+            )
             likes = await run_blocking(get_soundcloud_likes_info, artist["artist_url"])
+            logging.info(f"→ {len(likes)} recent like(s) fetched")
             for like in likes:
                 like_id = like.get("track_id")
                 if not like_id or is_already_posted_like(artist["artist_id"], artist["guild_id"], like_id):
@@ -359,6 +378,9 @@ async def check_for_new_releases(bot):
                 channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
+                    logging.info(
+                        f"✅ Posted like {like_id} for {artist.get('artist_name')} to #{channel.name}"
+                    )
                     mark_posted_like(artist["artist_id"], artist["guild_id"], like_id)
 
         except Exception as e:
