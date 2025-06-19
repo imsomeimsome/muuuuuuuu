@@ -52,6 +52,9 @@ def safe_request(url, headers=None, retries=3, timeout=10):
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            if response.status_code == 404:
+                # Not found - no need to retry
+                return None
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", 5))
                 print(

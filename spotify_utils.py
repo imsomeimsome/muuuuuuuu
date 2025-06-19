@@ -24,13 +24,20 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
                 wait = int(e.headers['Retry-After'])
                 print(f"Rate limited by Spotify. Retrying in {wait} seconds...")
                 time.sleep(wait)
-            else:
-                print(f"Spotify API error: {e}")
-                break
+                continue
+            if e.http_status and 500 <= e.http_status < 600:
+                # server error, retry
+                print(f"Spotify temporary error: {e}")
+                if attempt < retries - 1:
+                    time.sleep(delay)
+                    continue
+            print(f"Spotify API error: {e}")
+            break
         except Exception as e:
             print(f"Unexpected Spotify error: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
+                continue
     return None
 
 # Spotify API client setup
@@ -79,16 +86,19 @@ def extract_spotify_id(url):
 def get_artist_name(artist_id):
     """Fetch the artist's display name by Spotify artist ID."""
     try:
-        artist = spotify.artist(artist_id)
-        return artist["name"]
+        artist = safe_spotify_call(spotify.artist, artist_id)
+        if artist:
+            return artist["name"]
     except Exception as e:
         print(f"Error fetching artist name for {artist_id}: {e}")
-        return "Unknown Artist"
+    return "Unknown Artist"
 
 def get_artist_info(artist_id):
     """Fetch artist info including genres and URL."""
     try:
-        artist = spotify.artist(artist_id)
+        artist = safe_spotify_call(spotify.artist, artist_id)
+        if not artist:
+            return None
         return {
             'name': artist['name'],
             'genres': artist.get('genres', []),
@@ -102,8 +112,11 @@ def get_artist_info(artist_id):
 def get_artist_discography(artist_id):
     """Get full discography with genre tagging."""
     try:
-        albums = spotify.artist_albums(artist_id, album_type='album,single')
-        artist_genres = spotify.artist(artist_id).get('genres', [])
+        albums = safe_spotify_call(spotify.artist_albums, artist_id, album_type='album,single')
+        artist = safe_spotify_call(spotify.artist, artist_id)
+        if not albums or not artist:
+            return []
+        artist_genres = artist.get('genres', [])
         return [{
             'id': album['id'],
             'name': album['name'],
@@ -118,7 +131,9 @@ def get_artist_discography(artist_id):
 def search_artist(query):
     """Search artists by name."""
     try:
-        results = spotify.search(q=query, type='artist', limit=5)
+        results = safe_spotify_call(spotify.search, q=query, type='artist', limit=5)
+        if not results:
+            return []
         return [{
             'id': item['id'],
             'name': item['name'],
@@ -134,8 +149,13 @@ def search_artist(query):
 def get_last_release_date(artist_id):
     """Fetch the most recent release date for an artist."""
     try:
-        releases = spotify.artist_albums(artist_id, album_type='album,single', limit=1)
-        if releases['items']:
+        releases = safe_spotify_call(
+            spotify.artist_albums,
+            artist_id,
+            album_type='album,single',
+            limit=1
+        )
+        if releases and releases.get('items'):
             return releases['items'][0]['release_date']
         return "N/A"
     except Exception as e:
@@ -146,13 +166,14 @@ def get_latest_album_id(artist_id):
     """Get the latest album/single ID for an artist."""
     try:
         # Fetch multiple releases
-        releases = spotify.artist_albums(
+        releases = safe_spotify_call(
+            spotify.artist_albums,
             artist_id,
             album_type='album,single',
             limit=10,
             country='US'
         )
-        if not releases['items']:
+        if not releases or not releases.get('items'):
             return None
         
         # Sort releases by release_date
@@ -171,7 +192,7 @@ def get_latest_album_id(artist_id):
 def get_release_info(release_id):
     """Fetch detailed release info for a Spotify album or single."""
     try:
-        album = spotify.album(release_id)
+        album = safe_spotify_call(spotify.album, release_id)
         if not album:
             return None
 
@@ -198,8 +219,9 @@ def get_release_info(release_id):
         genres = album.get('genres', [])
         for artist_id in main_artist_ids:
             try:
-                artist_genres = spotify.artist(artist_id).get('genres', [])
-                genres.extend(artist_genres)
+                artist_info = safe_spotify_call(spotify.artist, artist_id)
+                if artist_info:
+                    genres.extend(artist_info.get('genres', []))
             except Exception:
                 continue
         genres = list(sorted(set(genres)))
