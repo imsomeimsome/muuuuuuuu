@@ -370,7 +370,8 @@ def get_artist_release(artist_data):
         )
         response = safe_request(tracks_url, headers=HEADERS)
         if not response:
-            raise ValueError("Request failed")
+            logging.warning("SoundCloud artist tracks request failed")
+            return None
 
         data = response.json()
 
@@ -379,11 +380,12 @@ def get_artist_release(artist_data):
         tracks = data.get('collection', data if isinstance(data, list) else [])
 
         if not tracks:
-            raise ValueError("No tracks found")
+            return None
 
         return process_track(tracks[0])
     except Exception as e:
-        raise ValueError(f"Artist release fetch failed: {e}")
+        logging.error(f"Artist release fetch failed: {e}")
+        return None
 
 # --- Utility Functions ---
 
@@ -395,10 +397,10 @@ def format_duration(milliseconds):
 def extract_features(title):
     """Extract featured artists from track titles."""
     patterns = [
-        r"\(feat\.?\s*([^)]+)\)",
-        r"\[feat\.?\s*([^\]]+)\]",
-        r"ft\.?\s*([^\-–]+)",
-        r"w/ ?(.+?)(?:\)|$)"
+        r"\((?:feat|ft|with)\.?\s*([^)]+)\)",
+        r"\[(?:feat|ft|with)\.?\s*([^\]]+)\]",
+        r"(?:feat|ft|with)\.?\s+([^\-–()\[\]]+)",
+        r"w/\s*([^\-–()\[\]]+)"
     ]
     features = set()
 
@@ -408,8 +410,9 @@ def extract_features(title):
             cleaned = match.strip()
             for sep in ['/', '&', ',', ' and ', ' x ']:
                 cleaned = cleaned.replace(sep, ',')
-            features.update([name.strip() for name in cleaned.split(',') if name.strip()])
-
+            features.update(
+                [name.strip() for name in cleaned.split(',') if name.strip()]
+            )
     return ", ".join(sorted(features)) if features else "None"
 
 # --- Bot Integration Helpers ---
@@ -528,7 +531,7 @@ def get_soundcloud_reposts(artist_url):
                     "url": track.get("permalink_url"),
                     "release_date": track.get("created_at"),
                     "cover_url": track.get("artwork_url"),
-                    "features": None,
+                    "features": extract_features(track.get("title", "")),
                     "track_count": 1,
                     "duration": str(round(track.get("duration", 0) / 1000)) + "s",
                     "genres": [track.get("genre")] if track.get("genre") else [],
