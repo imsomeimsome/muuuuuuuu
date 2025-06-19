@@ -405,8 +405,8 @@ def extract_features(title):
     for pattern in patterns:
         matches = re.findall(pattern, title, re.IGNORECASE)
         for match in matches:
-            cleaned = re.sub(r"[()\[\]feat\.?|ft\.?|w/]", '', match)
-            for sep in ['/', '&', ',', ' and ']:
+            cleaned = match.strip()
+            for sep in ['/', '&', ',', ' and ', ' x ']:
                 cleaned = cleaned.replace(sep, ',')
             features.update([name.strip() for name in cleaned.split(',') if name.strip()])
 
@@ -507,6 +507,9 @@ def get_soundcloud_reposts(artist_url):
         user_id = extract_soundcloud_user_id(artist_url)
         url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
+        if response is None or response.status_code == 404:
+            alt_url = f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=5"
+            response = safe_request(alt_url)
         if not response:
             return []
         
