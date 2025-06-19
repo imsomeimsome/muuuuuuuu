@@ -304,13 +304,24 @@ async def check_for_new_releases(bot):
         try:
             reposts = await run_blocking(get_soundcloud_reposts, artist["artist_url"])
             for repost in reposts:
-                track = repost.get("track", {})
-                repost_id = str(track.get("id"))
+                repost_id = str(repost.get("track_id"))
                 if not repost_id or is_already_posted_repost(artist["artist_id"], artist["guild_id"], repost_id):
                     continue
 
-                embed = create_repost_embed(repost, artist)
-                channel = await get_release_channel(bot, artist["guild_id"], "soundcloud")
+                embed = create_repost_embed(
+                    platform=artist.get("platform"),
+                    reposted_by=artist.get("artist_name"),
+                    original_artist=repost.get("artist_name"),
+                    title=repost.get("title"),
+                    url=repost.get("url"),
+                    release_date=repost.get("release_date"),
+                    cover_url=repost.get("cover_url"),
+                    features=repost.get("features"),
+                    track_count=repost.get("track_count"),
+                    duration=repost.get("duration"),
+                    genres=repost.get("genres"),
+                )
+                channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
                     mark_posted_repost(artist["artist_id"], artist["guild_id"], repost_id)
@@ -345,7 +356,7 @@ async def check_for_new_releases(bot):
                     genres=like.get("genres"),
                     release_type="Like"
                 )
-                channel = await get_release_channel(bot, artist["guild_id"], "soundcloud")
+                channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
                     mark_posted_like(artist["artist_id"], artist["guild_id"], like_id)
