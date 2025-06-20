@@ -535,23 +535,24 @@ def mark_posted_like(artist_id, guild_id, like_id):
         ''', (artist_id, guild_id, like_id))
         conn.commit()
 
-def is_already_posted_repost(artist_id, guild_id, repost_id):
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute('''
-            SELECT 1 FROM posted_reposts
-            WHERE artist_id = ? AND guild_id = ? AND repost_id = ?
-        ''', (artist_id, guild_id, repost_id))
-        return c.fetchone() is not None
+def mark_posted_repost(artist_id: str, guild_id: str, repost_id: str):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        INSERT OR IGNORE INTO reposts (artist_id, guild_id, repost_id) VALUES (?, ?, ?)
+    """, (artist_id, guild_id, repost_id))
+    conn.commit()
+    conn.close()
 
-def mark_posted_repost(artist_id, guild_id, repost_id):
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute('''
-            INSERT OR IGNORE INTO posted_reposts (artist_id, guild_id, repost_id)
-            VALUES (?, ?, ?)
-        ''', (artist_id, guild_id, repost_id))
-        conn.commit()
+def is_already_posted_repost(artist_id: str, guild_id: str, repost_id: str) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT 1 FROM reposts WHERE artist_id=? AND guild_id=? AND repost_id=?
+    """, (artist_id, guild_id, repost_id))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
 
 # --- Initialize DB on module import ---
 initialize_database()

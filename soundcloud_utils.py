@@ -11,6 +11,31 @@ from utils import cache
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 
+
+def resolve_url(url):
+    cache_key = f"resolve:{url}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
+    response = safe_request(resolve_endpoint)
+    if response and response.status_code == 200:
+        data = response.json()
+        cache.set(cache_key, data, ttl=3600)
+        return data
+    return None
+
+def safe_request(url):
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        return response
+    except Exception as e:
+        logging.error(f"Request failed: {e}")
+        return None
+
+
 # Load environment variables
 load_dotenv()
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
@@ -231,47 +256,48 @@ def get_release_info(url):
     except Exception as e:
         raise ValueError(f"Release info fetch failed: {e}")
 
-def get_soundcloud_playlist_info(artist_url):
+def get_soundcloud_playlists_info(artist_url):
     try:
         cache_key = f"playlists:{artist_url}"
         cached = cache.get(cache_key)
         if cached:
             return cached
 
-        user_id = extract_soundcloud_user_id(artist_url)
+        resolved = resolve_url(artist_url)
+        if not resolved or "id" not in resolved:
+            logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
+            return []
+
+        user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response:
             logging.warning(f"No playlists found for {artist_url}")
-            return None
+            return []
 
         data = response.json()
-        playlists = data.get("collection") if isinstance(data, dict) else data
-        if not playlists:
-            return None
+        playlists = []
 
-        playlist = playlists[0]
-        result = {
-            "type": "Playlist",
-            "title": playlist["title"],
-            "artist_name": playlist["user"]["username"],
-            "url": playlist["permalink_url"],
-            "release_date": playlist["created_at"],
-            "cover_url": playlist.get("artwork_url"),
-            "features": None,
-            "track_count": playlist.get("track_count", 1),
-            "duration": None,
-            "genres": [playlist["genre"]] if playlist.get("genre") else [],
-            "repost": False,
-        }
+        for playlist in data.get("collection", []):
+            playlists.append({
+                "title": playlist.get("title"),
+                "artist_name": playlist.get("user", {}).get("username"),
+                "url": playlist.get("permalink_url"),
+                "release_date": playlist.get("created_at"),
+                "cover_url": playlist.get("artwork_url"),
+                "features": None,
+                "track_count": playlist.get("track_count", 1),
+                "duration": None,
+                "genres": [playlist.get("genre")] if playlist.get("genre") else [],
+                "playlist": True
+            })
 
-        cache.set(cache_key, result, ttl=300)
-        return result
+        cache.set(cache_key, playlists, ttl=300)
+        return playlists
 
     except Exception as e:
-        logging.error(f"Playlist info fetch failed: {e}")
-        return None
-
+        logging.error(f"Error fetching playlists for {artist_url}: {e}")
+        return []
 
 def get_soundcloud_likes_info(artist_url):
     try:
@@ -280,40 +306,44 @@ def get_soundcloud_likes_info(artist_url):
         if cached:
             return cached
 
-        user_id = extract_soundcloud_user_id(artist_url)
+        resolved = resolve_url(artist_url)
+        if not resolved or "id" not in resolved:
+            logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
+            return []
+
+        user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response:
             logging.warning(f"No likes found for {artist_url}")
             return []
 
-        data = response.json()
+        data = response.json().get("collection", [])
         likes = []
 
-        for item in data.get("collection", []):
-            liked = item.get("track") or item.get("playlist")
-            if not liked:
+        for item in data:
+            original = item.get("track") or item.get("playlist")
+            if not original:
                 continue
 
             likes.append({
-                "type": "track" if "track" in item else "playlist",
-                "title": liked.get("title"),
-                "artist_name": liked.get("user", {}).get("username"),
-                "url": liked.get("permalink_url"),
-                "release_date": liked.get("created_at"),
-                "cover_url": liked.get("artwork_url"),
+                "title": original.get("title"),
+                "artist_name": original.get("user", {}).get("username"),
+                "url": original.get("permalink_url"),
+                "release_date": original.get("created_at"),
+                "cover_url": original.get("artwork_url"),
                 "features": None,
-                "track_count": liked.get("track_count", 1),
-                "duration": format_duration(liked.get("duration", 0)) if liked.get("duration") else None,
-                "genres": [liked.get("genre")] if liked.get("genre") else [],
-                "repost": False
+                "track_count": original.get("track_count", 1),
+                "duration": format_duration(original.get("duration", 0)) if original.get("duration") else None,
+                "genres": [original.get("genre")] if original.get("genre") else [],
+                "liked": True
             })
 
-        cache.set(cache_key, likes, ttl=300)  # 5 minutes
+        cache.set(cache_key, likes, ttl=300)
         return likes
 
     except Exception as e:
-        logging.error(f"SoundCloud like fetch failed: {e}")
+        logging.error(f"Error fetching likes for {artist_url}: {e}")
         return []
 
 def get_soundcloud_reposts_info(artist_url):
@@ -323,7 +353,12 @@ def get_soundcloud_reposts_info(artist_url):
         if cached:
             return cached
 
-        user_id = extract_soundcloud_user_id(artist_url)
+        resolved = resolve_url(artist_url)
+        if not resolved or "id" not in resolved:
+            logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
+            return []
+
+        user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response:
@@ -356,8 +391,9 @@ def get_soundcloud_reposts_info(artist_url):
         return reposts
 
     except Exception as e:
-        logging.error(f"SoundCloud repost fetch failed: {e}")
+        logging.error(f"Error fetching reposts for {artist_url}: {e}")
         return []
+
 
 # --- Data Processing ---
 

@@ -66,35 +66,27 @@ def create_music_embed(
 
     return embed
 
-def create_repost_embed(platform, reposted_by, original_artist, title, url, release_date, cover_url, features, track_count, duration, genres=None, custom_color=None):
-    platform_color = 0x1DB954 if platform == "spotify" else 0xFF5500
-    embed_color = int(custom_color, 16) if custom_color else platform_color
-
-    emoji = "📢"
-
-    description = f"[{title}]({url})\n\n"
-    description += f"**By**\n{original_artist}\n"
-
-    if genres and len(genres) > 0:
-        description += f"**Genres**\n{', '.join(genres)}\n"
-    else:
-        description += f"**Genres**\nNone\n"
-
-    if duration:
-        description += f"**Duration**\n{duration}\n"
-
-    description += f"**Tracks**\n{track_count}\n"
-    description += f"**Features**\n{features or 'None'}\n"
-    description += f"**Original Release Date**\n{release_date[:10]}"
-
+# In embed_utils.py
+def create_repost_embed(platform, reposted_by, original_artist, title, url,
+                        release_date, cover_url, features, track_count,
+                        duration, genres) -> discord.Embed:
     embed = discord.Embed(
-        title=f"{emoji} New {reposted_by} Repost!",
-        description=description,
-        color=embed_color
+        title=title,
+        url=url,
+        description=f"📢 Reposted by **{reposted_by}**",
+        color=discord.Color.orange()
     )
-    embed.set_thumbnail(url=cover_url)
-
+    embed.set_author(name=f"By {original_artist}")
+    embed.set_thumbnail(url=cover_url or discord.Embed.Empty)
+    embed.add_field(name="Release Date", value=release_date, inline=True)
+    embed.add_field(name="Tracks", value=track_count or 1, inline=True)
+    embed.add_field(name="Duration", value=duration or "Unknown", inline=True)
+    if features:
+        embed.add_field(name="Features", value=features, inline=False)
+    if genres:
+        embed.add_field(name="Genres", value=', '.join(genres), inline=False)
     return embed
+
 
 #
 #    # Build embed description
