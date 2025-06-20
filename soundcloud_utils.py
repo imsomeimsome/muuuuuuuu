@@ -256,7 +256,7 @@ def get_release_info(url):
     except Exception as e:
         raise ValueError(f"Release info fetch failed: {e}")
 
-def get_soundcloud_playlists_info(artist_url):
+def get_soundcloud_playlist_info(artist_url):
     try:
         cache_key = f"playlists:{artist_url}"
         cached = cache.get(cache_key)
