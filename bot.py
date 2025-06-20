@@ -41,9 +41,10 @@ from soundcloud_utils import (
     get_soundcloud_playlist_info,
     get_soundcloud_likes_info,
     get_soundcloud_reposts,
-    get_soundcloud_likes
+    get_soundcloud_likes,
+    get_soundcloud_reposts_info
 )
-from utils import run_blocking, log_release
+from utils import run_blocking, log_release, parse_datetime
 from reset_artists import reset_tables
 
 # reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
@@ -303,23 +304,38 @@ async def check_for_new_releases(bot):
         except Exception as e:
             logging.error(f"❌ Playlist check failed for {artist.get('artist_name', 'unknown')}: {e}")
 
-    # REPOSTS
+    # === REPOSTS ===
     logging.info("🔍 Checking for reposts...")
     for artist in artists:
-        if artist.get("platform") != 'soundcloud':
+        if artist.get("platform") != "soundcloud":
             continue
 
         try:
-            logging.info(
-                f"👀 Checking reposts for {artist.get('artist_name', 'unknown')}"
-            )
-            reposts = await run_blocking(get_soundcloud_reposts, artist["artist_url"])
+            logging.info(f"👀 Checking reposts for {artist.get('artist_name', 'unknown')}")
+            reposts = await run_blocking(get_soundcloud_reposts_info, artist["artist_url"])
             logging.info(f"→ {len(reposts)} recent repost(s) fetched")
+
             for repost in reposts:
-                repost_id = str(repost.get("track_id"))
-                if not repost_id or is_already_posted_repost(artist["artist_id"], artist["guild_id"], repost_id):
+                # Determine repost ID from URL or fallback to track_id
+                repost_id = repost.get("url") or repost.get("track_id") or repost.get("title")
+                repost_id = str(repost_id)
+
+                if not repost_id:
+                    logging.warning(f"⚠️ No ID found for repost: {repost}")
                     continue
 
+                if is_already_posted_repost(artist["artist_id"], artist["guild_id"], repost_id):
+                    logging.info(f"⏭️ Repost already posted: {repost_id}")
+                    continue
+
+                repost_date = parse_datetime(repost.get("release_date"))
+                last_check = parse_datetime(artist.get("last_release_date"))
+
+                if repost_date and last_check and repost_date <= last_check:
+                    logging.info(f"⏭️ Skipping old repost ({repost_date} <= {last_check}): {repost['title']}")
+                    continue
+
+                # Create and send embed
                 embed = create_repost_embed(
                     platform=artist.get("platform"),
                     reposted_by=artist.get("artist_name"),
@@ -333,12 +349,11 @@ async def check_for_new_releases(bot):
                     duration=repost.get("duration"),
                     genres=repost.get("genres"),
                 )
+
                 channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
-                    logging.info(
-                        f"✅ Posted repost {repost_id} for {artist.get('artist_name')} to #{channel.name}"
-                    )
+                    logging.info(f"✅ Posted repost {repost_id} for {artist.get('artist_name')} to #{channel.name}")
                     mark_posted_repost(artist["artist_id"], artist["guild_id"], repost_id)
 
         except Exception as e:
