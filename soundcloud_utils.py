@@ -361,6 +361,11 @@ def get_soundcloud_reposts_info(artist_url):
         user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
+        if response is None or response.status_code == 404:
+            alt_url = (
+                f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=5"
+            )
+            response = safe_request(alt_url)
         if not response:
             logging.warning(f"No reposts found for {artist_url}")
             return []
