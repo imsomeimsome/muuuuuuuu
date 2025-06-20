@@ -3,6 +3,7 @@ import asyncio
 from functools import partial
 import time
 import requests
+from datetime import datetime
 
 async def run_blocking(func, *args, **kwargs):
     """Run blocking sync function in executor to avoid blocking bot."""
@@ -60,3 +61,11 @@ async def log_release(bot, message):
         await channel.send(message)
     except Exception as e:
         print(f"Failed to log release: {e}")
+
+def parse_datetime(dt_str):
+    if not dt_str:
+        return None
+    try:
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
