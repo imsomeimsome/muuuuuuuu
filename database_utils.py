@@ -554,5 +554,16 @@ def is_already_posted_repost(artist_id: str, guild_id: str, repost_id: str) -> b
     conn.close()
     return result is not None
 
+def update_last_like_date(artist_id, guild_id, new_date):
+    conn = sqlite3.connect("artists.db")
+    c = conn.cursor()
+    c.execute("""
+        UPDATE artists
+        SET last_like_date = ?
+        WHERE artist_id = ? AND guild_id = ?
+    """, (new_date, artist_id, guild_id))
+    conn.commit()
+    conn.close()
+
 # --- Initialize DB on module import ---
 initialize_database()

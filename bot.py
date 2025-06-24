@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from database_utils import (
     add_artist, remove_artist, artist_exists, get_artist_by_id, get_artist_url, import_artists_from_json,
     update_last_release_date, add_release, get_release_stats, get_all_artists,is_already_posted_repost, mark_posted_repost,
-    get_artists_by_owner, add_user, is_user_registered, get_username,is_already_posted_like, mark_posted_like,
+    get_artists_by_owner, add_user, is_user_registered, get_username,is_already_posted_like, mark_posted_like, update_last_like_date,
     get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier, ensure_artists_table_has_unique_constraint, cleanup_duplicate_artists
 )
@@ -46,6 +46,20 @@ from soundcloud_utils import (
 )
 from utils import run_blocking, log_release, parse_datetime
 from reset_artists import reset_tables
+import sqlite3
+
+def ensure_last_like_date_column():
+    conn = sqlite3.connect("artists.db")
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(artists)")
+    columns = [col[1] for col in c.fetchall()]
+    if "last_like_date" not in columns:
+        c.execute("ALTER TABLE artists ADD COLUMN last_like_date TEXT")
+        conn.commit()
+        print("✅ 'last_like_date' column added to 'artists' table.")
+    conn.close()
+
+ensure_last_like_date_column()
 
 # reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
 
@@ -362,41 +376,45 @@ async def check_for_new_releases(bot):
     # LIKES
     logging.info("🔍 Checking for likes...")
     for artist in artists:
-        if artist["platform"] != 'soundcloud':
+        if artist.get("platform") != 'soundcloud':
             continue
 
         try:
-            logging.info(
-                f"👀 Checking likes for {artist.get('artist_name', 'unknown')}"
-            )
+            logging.info(f"👀 Checking likes for {artist.get('artist_name', 'unknown')}")
             likes = await run_blocking(get_soundcloud_likes_info, artist["artist_url"])
             logging.info(f"→ {len(likes)} recent like(s) fetched")
+
             for like in likes:
-                like_id = like.get("track_id")
+                like_id = str(like.get("track_id"))
+                like_date = parse_datetime(like.get("release_date"))
+                last_like_date = parse_datetime(artist.get("last_like_date", "1970-01-01T00:00:00Z"))
+
                 if not like_id or is_already_posted_like(artist["artist_id"], artist["guild_id"], like_id):
                     continue
 
-                embed = create_music_embed(
-                    platform="soundcloud",
-                    artist_name=like.get("artist_name"),
+                if like_date <= last_like_date:
+                    logging.debug(f"⏩ Skipping like from {like_date}, older than last_like_date {last_like_date}")
+
+                    continue
+
+                embed = create_like_embed(
+                    platform=artist.get("platform"),
+                    artist_name=artist.get("artist_name"),
                     title=like.get("title"),
                     url=like.get("url"),
                     release_date=like.get("release_date"),
                     cover_url=like.get("cover_url"),
-                    features=like.get("features"),
-                    track_count=like.get("track_count"),
                     duration=like.get("duration"),
-                    repost=like.get("repost"),
                     genres=like.get("genres"),
-                    release_type="Like"
+                    features=like.get("features"),
                 )
+
                 channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                 if channel:
                     await channel.send(embed=embed)
-                    logging.info(
-                        f"✅ Posted like {like_id} for {artist.get('artist_name')} to #{channel.name}"
-                    )
+                    logging.info(f"✅ Posted liked track {like_id} for {artist.get('artist_name')} to #{channel.name}")
                     mark_posted_like(artist["artist_id"], artist["guild_id"], like_id)
+                    update_last_like_date(artist["artist_id"], artist["guild_id"], like.get("release_date"))
 
         except Exception as e:
             logging.error(f"❌ Like check failed for {artist.get('artist_name', 'unknown')}: {e}")
