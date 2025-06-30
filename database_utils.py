@@ -133,6 +133,15 @@ def ensure_artists_table_has_unique_constraint():
 
     if not has_unique:
         print("⚠️ Migrating 'artists' table to include UNIQUE(platform, artist_id, owner_id)...")
+        
+        # First, get the current table structure
+        c.execute("PRAGMA table_info(artists);")
+        columns_info = c.fetchall()
+        existing_columns = [col[1] for col in columns_info]
+        
+        print(f"📊 Existing columns: {existing_columns}")
+        
+        # Create new table with proper structure including all current columns
         c.execute('''
             CREATE TABLE IF NOT EXISTS artists_new (
                 platform TEXT,
@@ -141,16 +150,33 @@ def ensure_artists_table_has_unique_constraint():
                 artist_url TEXT,
                 last_release_date TEXT,
                 owner_id TEXT,
-                tracked_users TEXT,
+                tracked_users TEXT DEFAULT '',
                 genres TEXT,
                 guild_id TEXT,
+                last_like_date TEXT,
                 UNIQUE(platform, artist_id, owner_id)
             );
         ''')
 
-        c.execute('''
-            INSERT INTO artists_new
-            SELECT * FROM artists;
+        # Build dynamic INSERT statement based on existing columns
+        select_columns = []
+        for col in ['platform', 'artist_id', 'artist_name', 'artist_url', 'last_release_date', 
+                   'owner_id', 'tracked_users', 'genres', 'guild_id', 'last_like_date']:
+            if col in existing_columns:
+                select_columns.append(col)
+            else:
+                if col == 'tracked_users':
+                    select_columns.append("'' as tracked_users")
+                elif col == 'last_like_date':
+                    select_columns.append("NULL as last_like_date")
+                else:
+                    select_columns.append("NULL as " + col)
+        
+        select_statement = ', '.join(select_columns)
+        
+        c.execute(f'''
+            INSERT INTO artists_new 
+            SELECT {select_statement} FROM artists;
         ''')
 
         c.execute('DROP TABLE artists;')
@@ -587,6 +613,25 @@ def update_last_like_date(artist_id, guild_id, new_date):
     """, (new_date, artist_id, guild_id))
     conn.commit()
     conn.close()
+
+# Ensure the 'guild_id' column exists in the artists table
+def ensure_guild_id_column():
+    try:
+        conn = get_connection()
+        c = conn.cursor()
+        c.execute("PRAGMA table_info(artists)")
+        columns = [col[1] for col in c.fetchall()]
+        if "guild_id" not in columns:
+            c.execute("ALTER TABLE artists ADD COLUMN guild_id TEXT")
+            conn.commit()
+            print("✅ Added 'guild_id' column to artists table")
+        else:
+            print("ℹ️ 'guild_id' column already exists")
+        conn.close()
+    except Exception as e:
+        print(f"ℹ️ Error with guild_id column: {e}")
+
+ensure_guild_id_column()
 
 # --- Initialize DB on module import ---
 initialize_database()

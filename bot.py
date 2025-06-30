@@ -136,17 +136,6 @@ def require_registration(func):
         return await func(interaction, *args, **kwargs)
     return wrapper
 
-# Ensure the 'guild_id' column exists
-try:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('ALTER TABLE artists ADD COLUMN guild_id TEXT')
-    conn.commit()
-    conn.close()
-    print("✅ Added 'guild_id' column to artists table")
-except Exception as e:
-    print(f"ℹ️ Skipped adding 'guild_id' column (probably already exists): {e}")
-
 import sqlite3
 
 def check_artist_table_columns():
