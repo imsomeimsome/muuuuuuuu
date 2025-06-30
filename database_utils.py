@@ -141,7 +141,7 @@ def ensure_artists_table_has_unique_constraint():
         
         print(f"📊 Existing columns: {existing_columns}")
         
-        # Create new table with proper structure including all current columns
+        # Create new table with ALL columns (including tracked_users)
         c.execute('''
             CREATE TABLE IF NOT EXISTS artists_new (
                 platform TEXT,
@@ -158,25 +158,12 @@ def ensure_artists_table_has_unique_constraint():
             );
         ''')
 
-        # Build dynamic INSERT statement based on existing columns
-        select_columns = []
-        for col in ['platform', 'artist_id', 'artist_name', 'artist_url', 'last_release_date', 
-                   'owner_id', 'tracked_users', 'genres', 'guild_id', 'last_like_date']:
-            if col in existing_columns:
-                select_columns.append(col)
-            else:
-                if col == 'tracked_users':
-                    select_columns.append("'' as tracked_users")
-                elif col == 'last_like_date':
-                    select_columns.append("NULL as last_like_date")
-                else:
-                    select_columns.append("NULL as " + col)
-        
-        select_statement = ', '.join(select_columns)
+        # Copy ALL existing data - use all existing columns in order
+        existing_columns_str = ', '.join(existing_columns)
         
         c.execute(f'''
-            INSERT INTO artists_new 
-            SELECT {select_statement} FROM artists;
+            INSERT INTO artists_new ({existing_columns_str})
+            SELECT {existing_columns_str} FROM artists;
         ''')
 
         c.execute('DROP TABLE artists;')
