@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 from dateutil.parser import isoparse
 from spotify_utils import extract_spotify_id
 from soundcloud_utils import extract_soundcloud_id
+import os
 
 # --- Connection Helper ---
 def get_connection():
     return sqlite3.connect("/data/artists.db")
+
+DB_PATH = "/data/artists.db"
 
 # Ensure all dates stored with timezone info
 def normalize_date_str(date_str: str) -> str:
@@ -46,7 +49,7 @@ def initialize_database():
         ''')
 
         c.execute('''
-            CREATE TABLE IF NOT EXISTS posted_reposts (
+            CREATE TABLE IF NOT EXISTS reposts (
                 artist_id TEXT,
                 guild_id TEXT,
                 repost_id TEXT,
@@ -205,10 +208,24 @@ def get_artist_by_id(artist_id, owner_id, guild_id):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT * FROM artists
+            SELECT platform, artist_id, artist_name, artist_url, 
+                   last_release_date, owner_id, genres, guild_id
+            FROM artists
             WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
         ''', (artist_id, owner_id, guild_id))
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        if row:
+            return {
+                "platform": row[0],
+                "artist_id": row[1], 
+                "artist_name": row[2],
+                "artist_url": row[3],
+                "last_release_date": row[4],
+                "owner_id": row[5],
+                "genres": row[6],
+                "guild_id": row[7]
+            }
+        return None
 
 def get_artist_url(artist_id, owner_id):
     conn = get_connection()
@@ -274,7 +291,12 @@ def artist_exists(platform, artist_id, owner_id):
 def get_artist_full_record(artist_id, owner_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT * FROM artists WHERE artist_id = ? AND owner_id = ?", (artist_id, owner_id))
+    c.execute('''
+        SELECT platform, artist_id, artist_name, artist_url, 
+               last_release_date, owner_id, genres, guild_id
+        FROM artists 
+        WHERE artist_id = ? AND owner_id = ?
+    ''', (artist_id, owner_id))
     row = c.fetchone()
     conn.close()
     if row:
@@ -285,7 +307,8 @@ def get_artist_full_record(artist_id, owner_id):
             "artist_url": row[3],
             "last_release_date": row[4],
             "owner_id": row[5],
-            "genres": row[6]
+            "genres": row[6],
+            "guild_id": row[7]  # Add this line
         }
     else:
         return None
@@ -555,7 +578,7 @@ def is_already_posted_repost(artist_id: str, guild_id: str, repost_id: str) -> b
     return result is not None
 
 def update_last_like_date(artist_id, guild_id, new_date):
-    conn = sqlite3.connect("artists.db")
+    conn = sqlite3.connect("/data/artists.db")  # Change this line
     c = conn.cursor()
     c.execute("""
         UPDATE artists

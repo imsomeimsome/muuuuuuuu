@@ -266,38 +266,43 @@ def get_soundcloud_playlist_info(artist_url):
         resolved = resolve_url(artist_url)
         if not resolved or "id" not in resolved:
             logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
-            return []
+            return None
 
         user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response:
             logging.warning(f"No playlists found for {artist_url}")
-            return []
+            return None
 
         data = response.json()
-        playlists = []
+        playlists = data.get("collection", [])
+        
+        if not playlists:
+            return None
+            
+        # Return the most recent playlist
+        latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
+        
+        result = {
+            "title": latest_playlist.get("title"),
+            "artist_name": latest_playlist.get("user", {}).get("username"),
+            "url": latest_playlist.get("permalink_url"),
+            "release_date": latest_playlist.get("created_at"),
+            "cover_url": latest_playlist.get("artwork_url"),
+            "features": None,
+            "track_count": latest_playlist.get("track_count", 1),
+            "duration": None,
+            "genres": [latest_playlist.get("genre")] if latest_playlist.get("genre") else [],
+            "playlist": True
+        }
 
-        for playlist in data.get("collection", []):
-            playlists.append({
-                "title": playlist.get("title"),
-                "artist_name": playlist.get("user", {}).get("username"),
-                "url": playlist.get("permalink_url"),
-                "release_date": playlist.get("created_at"),
-                "cover_url": playlist.get("artwork_url"),
-                "features": None,
-                "track_count": playlist.get("track_count", 1),
-                "duration": None,
-                "genres": [playlist.get("genre")] if playlist.get("genre") else [],
-                "playlist": True
-            })
-
-        cache.set(cache_key, playlists, ttl=300)
-        return playlists
+        cache.set(cache_key, result, ttl=300)
+        return result
 
     except Exception as e:
         logging.error(f"Error fetching playlists for {artist_url}: {e}")
-        return []
+        return None
 
 def get_soundcloud_likes_info(artist_url):
     try:
@@ -327,6 +332,7 @@ def get_soundcloud_likes_info(artist_url):
                 continue
 
             likes.append({
+                "track_id": original.get("id"),  # Add this line
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),

@@ -21,7 +21,7 @@ from database_utils import (
     get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier, ensure_artists_table_has_unique_constraint, cleanup_duplicate_artists
 )
-from embed_utils import create_music_embed, create_repost_embed
+from embed_utils import create_music_embed, create_repost_embed, create_like_embed
 from spotify_utils import (
     extract_spotify_id,
     get_artist_name as get_spotify_artist_name,
@@ -48,8 +48,11 @@ from utils import run_blocking, log_release, parse_datetime
 from reset_artists import reset_tables
 import sqlite3
 
+# Ensure the /data directory exists
+os.makedirs('/data', exist_ok=True)
+
 def ensure_last_like_date_column():
-    conn = sqlite3.connect("artists.db")
+    conn = sqlite3.connect("/data/artists.db")  # Change this line
     c = conn.cursor()
     c.execute("PRAGMA table_info(artists)")
     columns = [col[1] for col in c.fetchall()]
