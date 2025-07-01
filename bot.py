@@ -15,11 +15,11 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from database_utils import (
-    add_artist, remove_artist, artist_exists, get_artist_by_id, get_artist_url, import_artists_from_json,
-    update_last_release_date, add_release, get_release_stats, get_all_artists,is_already_posted_repost, mark_posted_repost,
-    get_artists_by_owner, add_user, is_user_registered, get_username,is_already_posted_like, mark_posted_like, update_last_like_date,
-    get_user, log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
-    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier, ensure_artists_table_has_unique_constraint, cleanup_duplicate_artists
+    add_artist, remove_artist, artist_exists, get_artist_by_id, import_artists_from_json,
+    update_last_release_date, add_release, get_release_stats, get_all_artists, is_already_posted_repost, mark_posted_repost,
+    get_artists_by_owner, add_user, is_user_registered, get_username, is_already_posted_like, mark_posted_like, update_last_like_date,
+    log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
+    set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier
 )
 from embed_utils import create_music_embed, create_repost_embed, create_like_embed
 from spotify_utils import (
@@ -46,12 +46,14 @@ from soundcloud_utils import (
 )
 from utils import run_blocking, log_release, parse_datetime
 from reset_artists import reset_tables
+from tables import initialize_fresh_database
 import sqlite3
 
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
 
 # reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
+initialize_fresh_database()  # Uncomment this line ONCE to initialize the database, then comment it back out
 
 # Configure logging
 logging.basicConfig(
