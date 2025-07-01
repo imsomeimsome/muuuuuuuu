@@ -119,6 +119,35 @@ def artist_exists(platform, artist_id, owner_id):
         ''', (platform, artist_id, owner_id))
         return cursor.fetchone() is not None
 
+# Add this function to database_utils.py
+def update_artist_last_like_date_to_now(artist_id, guild_id):
+    """Set last_like_date to now to prevent posting old content."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists
+            SET last_like_date = ?, updated_at = ?
+            WHERE artist_id = ? AND guild_id = ?
+        """, (now, now, artist_id, guild_id))
+        conn.commit()
+        print(f"✅ Set last_like_date to {now} for artist {artist_id}")
+
+def reset_like_tracking_for_all():
+    """Reset all like tracking to current time to prevent old content flood."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists
+            SET last_like_date = ?, updated_at = ?
+            WHERE platform = 'soundcloud'
+        """, (now, now))
+        affected = cursor.rowcount
+        conn.commit()
+        print(f"✅ Reset like tracking for {affected} SoundCloud artists")
+        return affected
+    
 def get_all_artists(guild_id=None):
     with get_connection() as conn:
         cursor = conn.cursor()

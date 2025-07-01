@@ -270,6 +270,21 @@ def get_table_info():
         
         print("\n" + "=" * 50)
 
+# Add this to tables.py and run it once
+def reset_like_tracking():
+    """Reset like tracking to current time to prevent posting old content."""
+    from database_utils import reset_like_tracking_for_all
+    reset_like_tracking_for_all()
+
+if __name__ == "__main__":
+    # Run this to initialize a fresh database
+    initialize_fresh_database()
+    
+    # Reset like tracking to prevent old content flood
+    reset_like_tracking()
+    
+    get_table_info()
+
 if __name__ == "__main__":
     # Run this to initialize a fresh database
     initialize_fresh_database()
