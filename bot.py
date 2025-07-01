@@ -51,19 +51,6 @@ import sqlite3
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
 
-def ensure_last_like_date_column():
-    conn = sqlite3.connect("/data/artists.db")  # Change this line
-    c = conn.cursor()
-    c.execute("PRAGMA table_info(artists)")
-    columns = [col[1] for col in c.fetchall()]
-    if "last_like_date" not in columns:
-        c.execute("ALTER TABLE artists ADD COLUMN last_like_date TEXT")
-        conn.commit()
-        print("✅ 'last_like_date' column added to 'artists' table.")
-    conn.close()
-
-ensure_last_like_date_column()
-
 # reset_tables() # USE THIS LINE TO RESET ARTISTS TABLES
 
 # Configure logging
@@ -87,17 +74,6 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
 LOG_CHANNEL_ID = int(os.getenv("LOG_CHANNEL_ID", 0))
 
-# Ensure the 'guild_id' column exists in the artists table
-try:
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("ALTER TABLE artists ADD COLUMN guild_id TEXT")
-    conn.commit()
-    conn.close()
-    print("✅ Added 'guild_id' column to artists table")
-except Exception as e:
-    print(f"ℹ️ Skipped adding 'guild_id' column (probably already exists): {e}")
-
 
 class MusicBot(commands.Bot):
     def __init__(self):
@@ -105,7 +81,7 @@ class MusicBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.log_channel = None
-
+        
     async def setup_hook(self):
         if LOG_CHANNEL_ID:
             self.log_channel = self.get_channel(LOG_CHANNEL_ID)
@@ -122,8 +98,6 @@ class MusicBot(commands.Bot):
             )
 bot = MusicBot()
 
-ensure_artists_table_has_unique_constraint()
-cleanup_duplicate_artists()
 
 # --- Decorators ---
 def require_registration(func):
@@ -147,8 +121,6 @@ def check_artist_table_columns():
     for col in columns:
         print(f"- {col[1]}")
     conn.close()
-
-check_artist_table_columns()
 
 # --- Release Checker ---
 
