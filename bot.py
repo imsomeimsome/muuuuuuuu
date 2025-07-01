@@ -353,14 +353,21 @@ async def check_for_new_releases(bot):
             for like in likes:
                 like_id = str(like.get("track_id"))
                 like_date = parse_datetime(like.get("release_date"))
-                last_like_date = parse_datetime(artist.get("last_like_date", "1970-01-01T00:00:00Z"))
+                
+                # FIX: Handle None last_like_date properly
+                last_like_date_str = artist.get("last_like_date")
+                if last_like_date_str:
+                    last_like_date = parse_datetime(last_like_date_str)
+                else:
+                    # If no last_like_date exists, use epoch (1970) so all likes are considered new
+                    last_like_date = parse_datetime("1970-01-01T00:00:00Z")
 
                 if not like_id or is_already_posted_like(artist["artist_id"], artist["guild_id"], like_id):
                     continue
 
-                if like_date <= last_like_date:
+                # FIX: Now both sides are datetime objects, safe to compare
+                if like_date and like_date <= last_like_date:
                     logging.debug(f"⏩ Skipping like from {like_date}, older than last_like_date {last_like_date}")
-
                     continue
 
                 embed = create_like_embed(
@@ -384,7 +391,6 @@ async def check_for_new_releases(bot):
 
         except Exception as e:
             logging.error(f"❌ Like check failed for {artist.get('artist_name', 'unknown')}: {e}")
-
 async def release_check_scheduler(bot):
     await bot.wait_until_ready()
     logging.info("🚀 Release checker started")
