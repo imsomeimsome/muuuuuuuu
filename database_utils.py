@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dateutil.parser import isoparse
 from tables import get_connection, DB_PATH
 import os
@@ -402,3 +402,21 @@ def get_artist_by_identifier(identifier: str, owner_id: str):
         artist_id = identifier
     
     return get_artist_full_record(artist_id, owner_id)
+
+# Add to database_utils.py
+def reset_old_like_dates():
+    """Reset very old like dates to 1 week ago."""
+    one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists 
+            SET last_like_date = ? 
+            WHERE platform = 'soundcloud' 
+            AND (last_like_date IS NULL OR last_like_date < '2024-01-01')
+        """, (one_week_ago,))
+        affected = cursor.rowcount
+        conn.commit()
+        print(f"✅ Reset like tracking for {affected} artists to 1 week ago")
+        return affected
