@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import datetime, timezone, timedelta
+from dateutil.parser import parse as parse_datetime
 from dateutil.parser import isoparse
 from tables import get_connection, DB_PATH
 import os
@@ -420,3 +421,87 @@ def reset_old_like_dates():
         conn.commit()
         print(f"✅ Reset like tracking for {affected} artists to 1 week ago")
         return affected
+    
+def update_last_repost_date(artist_id, guild_id, new_date):
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists
+            SET last_repost_date = ?, updated_at = ?
+            WHERE artist_id = ? AND guild_id = ?
+        """, (new_date, now, artist_id, guild_id))
+        conn.commit()
+
+# Add to database_utils.py and run once
+def reset_activity_tracking():
+    """Reset like and repost tracking to 1 hour ago to catch recent activity."""
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists
+            SET last_like_date = ?, last_repost_date = ?, updated_at = ?
+            WHERE platform = 'soundcloud'
+        """, (one_hour_ago, one_hour_ago, one_hour_ago))
+        affected = cursor.rowcount
+        conn.commit()
+        print(f"✅ Reset activity tracking for {affected} artists to 1 hour ago")
+        return affected
+
+# Add to database_utils.py
+
+def record_bot_shutdown():
+    """Record when the bot goes down."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO activity_logs (user_id, action, details, timestamp, guild_id)
+            VALUES ('system', 'bot_shutdown', ?, ?, NULL)
+        """, (f"Bot shutdown at {now}", now))
+        conn.commit()
+
+def record_bot_startup():
+    """Record when the bot starts up and return last shutdown time."""
+    now = datetime.now(timezone.utc).isoformat()
+    
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Get last shutdown time
+        cursor.execute("""
+            SELECT timestamp FROM activity_logs 
+            WHERE user_id = 'system' AND action = 'bot_shutdown'
+            ORDER BY timestamp DESC LIMIT 1
+        """)
+        result = cursor.fetchone()
+        last_shutdown = result[0] if result else None
+        
+        # Record startup
+        cursor.execute("""
+            INSERT INTO activity_logs (user_id, action, details, timestamp, guild_id)
+            VALUES ('system', 'bot_startup', ?, ?, NULL)
+        """, (f"Bot started at {now}", now))
+        conn.commit()
+        
+        return last_shutdown
+
+def get_downtime_duration():
+    """Get how long the bot was down."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                (SELECT timestamp FROM activity_logs WHERE user_id = 'system' AND action = 'bot_shutdown' ORDER BY timestamp DESC LIMIT 1) as last_shutdown,
+                (SELECT timestamp FROM activity_logs WHERE user_id = 'system' AND action = 'bot_startup' ORDER BY timestamp DESC LIMIT 1) as last_startup
+        """)
+        result = cursor.fetchone()
+        
+        if result and result[0] and result[1]:
+            shutdown_time = parse_datetime(result[0])
+            startup_time = parse_datetime(result[1])
+            if shutdown_time and startup_time:
+                return startup_time - shutdown_time
+        return None

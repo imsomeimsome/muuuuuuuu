@@ -281,7 +281,6 @@ def get_soundcloud_playlist_info(artist_url):
         if not playlists:
             return None
             
-        # Return the most recent playlist
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
         
         result = {
@@ -317,7 +316,7 @@ def get_soundcloud_likes_info(artist_url):
             return []
 
         user_id = resolved["id"]
-        url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=5"
+        url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=10"
         response = safe_request(url)
         if not response:
             logging.warning(f"No likes found for {artist_url}")
@@ -331,12 +330,16 @@ def get_soundcloud_likes_info(artist_url):
             if not original:
                 continue
 
+            like_date = item.get("created_at")  # When the like happened
+            track_release_date = original.get("created_at")  # When the track was made
+
             likes.append({
-                "track_id": original.get("id"),  # Add this line
+                "track_id": original.get("id"),
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": original.get("created_at"),
+                "release_date": like_date,  # Use like date
+                "track_release_date": track_release_date,  # Original track date
                 "cover_url": original.get("artwork_url"),
                 "features": None,
                 "track_count": original.get("track_count", 1),
@@ -351,7 +354,7 @@ def get_soundcloud_likes_info(artist_url):
     except Exception as e:
         logging.error(f"Error fetching likes for {artist_url}: {e}")
         return []
-
+    
 def get_soundcloud_reposts_info(artist_url):
     try:
         cache_key = f"reposts:{artist_url}"
@@ -365,15 +368,20 @@ def get_soundcloud_reposts_info(artist_url):
             return []
 
         user_id = resolved["id"]
-        url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
-        response = safe_request(url)
-        if response is None or response.status_code == 404:
-            alt_url = (
-                f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=5"
-            )
-            response = safe_request(alt_url)
+        endpoints = [
+            f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=10",
+            f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=10",
+            f"https://api-v2.soundcloud.com/stream/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=10"
+        ]
+        
+        response = None
+        for endpoint in endpoints:
+            response = safe_request(endpoint)
+            if response and response.status_code == 200:
+                break
+        
         if not response:
-            logging.warning(f"No reposts found for {artist_url}")
+            logging.warning(f"No reposts found for {artist_url} (tried all endpoints)")
             return []
 
         data = response.json()
@@ -384,12 +392,17 @@ def get_soundcloud_reposts_info(artist_url):
             if not original:
                 continue
 
+            repost_date = item.get("created_at")  # When the repost happened
+            track_release_date = original.get("created_at")  # Original track date
+
             reposts.append({
+                "track_id": original.get("id"),
                 "type": "track" if item.get("type") == "track-repost" else "playlist",
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": original.get("created_at"),
+                "release_date": repost_date,  # Use repost date
+                "track_release_date": track_release_date,  # Original track date
                 "cover_url": original.get("artwork_url"),
                 "features": None,
                 "track_count": original.get("track_count", 1),
@@ -404,8 +417,6 @@ def get_soundcloud_reposts_info(artist_url):
     except Exception as e:
         logging.error(f"Error fetching reposts for {artist_url}: {e}")
         return []
-
-
 # --- Data Processing ---
 
 def process_track(track_data):
