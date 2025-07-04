@@ -527,3 +527,15 @@ def is_already_posted_playlist(artist_id, guild_id, playlist_id):
             WHERE artist_id = ? AND guild_id = ? AND content_type = 'playlist' AND content_id = ?
         """, (artist_id, guild_id, playlist_id))
         return cursor.fetchone() is not None
+    
+def mark_posted_playlist(artist_id, guild_id, playlist_id):
+    """Mark a playlist as posted."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO posted_content 
+            (artist_id, guild_id, platform, content_type, content_id, posted_at)
+            VALUES (?, ?, 'soundcloud', 'playlist', ?, ?)
+        """, (artist_id, guild_id, playlist_id, now))
+        conn.commit()
