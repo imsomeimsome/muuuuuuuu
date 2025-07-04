@@ -144,16 +144,16 @@ def create_all_tables():
         
         # Activity logs
         cursor.execute('''
-            CREATE TABLE activity_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                action TEXT NOT NULL CHECK(action IN ('track', 'untrack', 'register', 'channel_set', 'import', 'export', 'bot_startup', 'bot_shutdown')),
-                details TEXT,
-                timestamp TEXT NOT NULL,
-                guild_id TEXT,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        ''')
+        CREATE TABLE activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('track', 'untrack', 'register', 'channel_set', 'import', 'export', 'bot_startup', 'bot_shutdown')),
+            details TEXT,
+            timestamp TEXT NOT NULL,
+            guild_id TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    ''')
         print("✅ Created table: activity_logs")
         
         # ===== PLATFORM CONFIG =====
