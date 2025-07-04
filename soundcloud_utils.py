@@ -310,13 +310,16 @@ def get_soundcloud_playlist_info(artist_url):
         logging.error(f"Error fetching playlists for {artist_url}: {e}")
         return None
 
-def get_soundcloud_likes_info(artist_url):
+def get_soundcloud_likes_info(artist_url, force_refresh=False):
     try:
         cache_key = f"likes:{artist_url}"
-        cached = cache.get(cache_key)
-        if cached:
-            return cached
+        if not force_refresh:
+            cached = cache.get(cache_key)
+            if cached:
+                logging.info(f"✅ Cache hit for likes: {artist_url}")
+                return cached
 
+        logging.info(f"⏳ Fetching likes for {artist_url}...")
         resolved = resolve_url(artist_url)
         if not resolved or "id" not in resolved:
             logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
@@ -337,16 +340,18 @@ def get_soundcloud_likes_info(artist_url):
             if not original:
                 continue
 
-            like_date = item.get("created_at")  # When the like happened
-            track_release_date = original.get("created_at")  # When the track was made
+            like_date = item.get("created_at")
+            track_release_date = original.get("created_at")
+
+            logging.info(f"✅ Found like: {original.get('title')} (Liked at {like_date})")
 
             likes.append({
                 "track_id": original.get("id"),
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": like_date,  # Use like date
-                "track_release_date": track_release_date,  # Original track date
+                "release_date": like_date,
+                "track_release_date": track_release_date,
                 "cover_url": original.get("artwork_url"),
                 "features": None,
                 "track_count": original.get("track_count", 1),
@@ -355,7 +360,7 @@ def get_soundcloud_likes_info(artist_url):
                 "liked": True
             })
 
-        cache.set(cache_key, likes, ttl=300)
+        cache.set(cache_key, likes, ttl=CACHE_TTL)
         return likes
 
     except Exception as e:
