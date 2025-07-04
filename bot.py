@@ -53,7 +53,7 @@ import sqlite3
 import signal
 import sys
 
-initialize_fresh_database()
+# initialize_fresh_database()
 
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
@@ -508,7 +508,7 @@ async def check_for_new_releases(bot, is_catchup=False):
 
     logging.info("=" * 50)
     logging.info(f"✅ Posted {repost_count} {'catch-up ' if is_catchup else ''}reposts")
-
+    
     # === LIKES ===
     logging.info(f"\n❤️ CHECKING LIKES{'(CATCH-UP)' if is_catchup else ''}...")
     logging.info("=" * 50)
@@ -623,7 +623,6 @@ async def check_for_new_releases(bot, is_catchup=False):
     logging.info("=" * 50)
     logging.info(f"✅ Posted {like_count} {'catch-up ' if is_catchup else ''}likes")
     logging.info(f"🎉 {'Catch-up' if is_catchup else 'Release check'} cycle complete!")
-
 # --- SCHEDULER ---
 
 async def release_check_scheduler(bot):
@@ -633,21 +632,14 @@ async def release_check_scheduler(bot):
 
     while not bot.is_closed():
         now = datetime.now(timezone.utc)
-
-        next_run_minute = (now.minute // 5 + 1) * 5
-        if next_run_minute >= 60:
-            next_run = now.replace(hour=(now.hour + 1) % 24, minute=0, second=1, microsecond=0)
-        else:
-            next_run = now.replace(minute=next_run_minute, second=1, microsecond=0)
+        next_run = now + timedelta(minutes=5)  # Always schedule 5 minutes ahead
+        next_run = next_run.replace(second=1, microsecond=0)
 
         delay = (next_run - now).total_seconds()
         delay = max(delay, 0)
 
         logging.info(f"🕰️ Next check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-        sleep_interval = 60
-        while delay > 0:
-            await asyncio.sleep(min(delay, sleep_interval))
-            delay -= sleep_interval
+        await asyncio.sleep(delay)
 
         try:
             check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
@@ -658,7 +650,7 @@ async def release_check_scheduler(bot):
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
-
+            
 # --- EVENT HANDLERS ---
 
 @bot.event
