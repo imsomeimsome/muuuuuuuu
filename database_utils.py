@@ -517,3 +517,13 @@ def update_last_playlist_date(artist_id, guild_id, new_date):
             WHERE artist_id = ? AND guild_id = ?
         """, (new_date, now, artist_id, guild_id))
         conn.commit()
+
+def is_already_posted_playlist(artist_id, guild_id, playlist_id):
+    """Check if a playlist has already been posted."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM posted_content
+            WHERE artist_id = ? AND guild_id = ? AND content_type = 'playlist' AND content_id = ?
+        """, (artist_id, guild_id, playlist_id))
+        return cursor.fetchone() is not None
