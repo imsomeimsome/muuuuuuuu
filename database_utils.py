@@ -505,3 +505,15 @@ def get_downtime_duration():
             if shutdown_time and startup_time:
                 return startup_time - shutdown_time
         return None
+    
+def update_last_playlist_date(artist_id, guild_id, new_date):
+    """Update the last playlist date for an artist."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE artists
+            SET last_playlist_date = ?, updated_at = ?
+            WHERE artist_id = ? AND guild_id = ?
+        """, (new_date, now, artist_id, guild_id))
+        conn.commit()
