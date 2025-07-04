@@ -101,6 +101,19 @@ def create_all_tables():
         ''')
         print("✅ Created table: posted_content")
         
+        # Playlist states tracking
+        cursor.execute('''
+            CREATE TABLE playlist_states (
+                artist_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                playlist_id TEXT NOT NULL,
+                tracks TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (artist_id, guild_id, playlist_id)
+            )
+        ''')
+        print("✅ Created table: playlist_states")
+
         # Release tracking
         cursor.execute('''
             CREATE TABLE releases (

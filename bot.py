@@ -21,7 +21,7 @@ from database_utils import (
     log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier,
     update_last_repost_date, update_last_playlist_date, is_already_posted_playlist, mark_posted_playlist,
-    record_bot_startup, record_bot_shutdown, get_downtime_duration
+    record_bot_startup, record_bot_shutdown, get_downtime_duration, get_playlist_state, store_playlist_state
 )
 from embed_utils import create_music_embed, create_repost_embed, create_like_embed
 from spotify_utils import (
@@ -220,6 +220,53 @@ async def handle_release(bot, artist, release_info, release_type):
 
     await channel.send(embed=embed)
     logging.info(f"✅ Posted new {release_type} for {artist['artist_name']}")
+# --- Playlist changes here ---
+
+async def check_for_playlist_changes(bot, artist, playlist_info):
+    artist_id = artist["artist_id"]
+    guild_id = artist["guild_id"]
+    playlist_id = playlist_info["url"]
+
+    # Get stored playlist state
+    stored_tracks = get_playlist_state(artist_id, guild_id, playlist_id)
+    current_tracks = playlist_info["tracks"]
+
+    if not stored_tracks:
+        # First time tracking this playlist
+        store_playlist_state(artist_id, guild_id, playlist_id, current_tracks)
+        logging.info(f"✅ Stored initial state for playlist: {playlist_info['title']}")
+        return
+
+    # Detect changes
+    added_tracks = [track for track in current_tracks if track not in stored_tracks]
+    removed_tracks = [track for track in stored_tracks if track not in current_tracks]
+    order_changed = any(
+        track["order"] != stored_tracks[index]["order"]
+        for index, track in enumerate(current_tracks)
+        if index < len(stored_tracks)
+    )
+
+    if added_tracks or removed_tracks or order_changed:
+        logging.info(f"✨ Playlist changes detected for {playlist_info['title']}")
+        embed = discord.Embed(
+            title=f"Playlist Updated: {playlist_info['title']}",
+            url=playlist_info["url"],
+            description="Changes detected in playlist:",
+            color=discord.Color.orange()
+        )
+        if added_tracks:
+            embed.add_field(name="Added Tracks", value="\n".join([track["title"] for track in added_tracks]), inline=False)
+        if removed_tracks:
+            embed.add_field(name="Removed Tracks", value="\n".join([track["title"] for track in removed_tracks]), inline=False)
+        if order_changed:
+            embed.add_field(name="Order Changed", value="Track order has been updated.", inline=False)
+
+        channel = await get_release_channel(guild_id, "soundcloud")
+        if channel:
+            await channel.send(embed=embed)
+
+        # Update stored state
+        store_playlist_state(artist_id, guild_id, playlist_id, current_tracks)
 
 # --- MAIN RELEASE CHECK FUNCTION WITH CATCH-UP ---
 
@@ -402,12 +449,14 @@ async def check_for_new_releases(bot, is_catchup=False):
             else:
                 logging.info(f"     ✅ No new playlists")
 
+            # === Add Playlist Change Detection Here ===
+            await check_for_playlist_changes(bot, artist, info)
+
         except Exception as e:
-            logging.error(f"     ❌ Error: {e}")
+            logging.error(f"❌ Error checking playlists for {artist['artist_name']}: {e}")
 
     logging.info("=" * 50)
     logging.info(f"✅ Found {playlist_count} {'catch-up ' if is_catchup else ''}playlists")
-
     # === REPOSTS ===
     logging.info(f"\n🔄 CHECKING REPOSTS{'(CATCH-UP)' if is_catchup else ''}...")
     logging.info("=" * 50)
@@ -650,7 +699,7 @@ async def release_check_scheduler(bot):
             logging.info("✅ Completed release check cycle")
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
-            
+
 # --- EVENT HANDLERS ---
 
 @bot.event

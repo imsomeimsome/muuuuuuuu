@@ -283,17 +283,24 @@ def get_soundcloud_playlist_info(artist_url):
             
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
         
+        tracks = [
+            {
+                "id": track.get("id"),
+                "title": track.get("title"),
+                "duration": track.get("duration"),
+                "order": index
+            }
+            for index, track in enumerate(latest_playlist.get("tracks", []))
+        ]
+
         result = {
             "title": latest_playlist.get("title"),
             "artist_name": latest_playlist.get("user", {}).get("username"),
             "url": latest_playlist.get("permalink_url"),
             "release_date": latest_playlist.get("created_at"),
             "cover_url": latest_playlist.get("artwork_url"),
-            "features": None,
-            "track_count": latest_playlist.get("track_count", 1),
-            "duration": None,
-            "genres": [latest_playlist.get("genre")] if latest_playlist.get("genre") else [],
-            "playlist": True
+            "track_count": len(tracks),
+            "tracks": tracks,  # Include detailed track info
         }
 
         cache.set(cache_key, result, ttl=300)

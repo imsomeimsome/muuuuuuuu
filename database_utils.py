@@ -4,6 +4,7 @@ from dateutil.parser import parse as parse_datetime
 from dateutil.parser import isoparse
 from tables import get_connection, DB_PATH
 import os
+import json
 
 # Ensure all dates stored with timezone info
 def normalize_date_str(date_str: str) -> str:
@@ -539,3 +540,26 @@ def mark_posted_playlist(artist_id, guild_id, playlist_id):
             VALUES (?, ?, 'soundcloud', 'playlist', ?, ?)
         """, (artist_id, guild_id, playlist_id, now))
         conn.commit()
+
+def store_playlist_state(artist_id, guild_id, playlist_id, tracks):
+    """Store the current state of a playlist."""
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO playlist_states 
+            (artist_id, guild_id, playlist_id, tracks, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (artist_id, guild_id, playlist_id, json.dumps(tracks), now))
+        conn.commit()
+
+def get_playlist_state(artist_id, guild_id, playlist_id):
+    """Retrieve the stored state of a playlist."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT tracks FROM playlist_states 
+            WHERE artist_id = ? AND guild_id = ? AND playlist_id = ?
+        """, (artist_id, guild_id, playlist_id))
+        row = cursor.fetchone()
+        return json.loads(row[0]) if row else None
