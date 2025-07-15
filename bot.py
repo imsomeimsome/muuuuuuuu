@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("DISCORD_GUILD_ID"))  # Add your Discord server ID to .env
+GUILD_ID = int(os.getenv("DISCORD_TOKEN"))  # Add your Discord server ID to .env
 
 # Initialize bot
 intents = discord.Intents.default()
