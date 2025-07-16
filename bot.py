@@ -10,6 +10,7 @@ from soundcloud_utils import track_soundcloud_artist, get_artist_tracks
 from database_utils import add_artist, initialize_database
 from embed_utils import create_embed
 import logging
+import re  # Import the regex module for URL validation
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -36,17 +37,28 @@ async def on_ready():
     check_for_updates.start()  # Start periodic checks for updates
 
 @tree.command(name="track", description="Track an artist's activities on Spotify or SoundCloud", guild=discord.Object(id=GUILD_ID))
-async def track_command(interaction: discord.Interaction, platform: str, artist_id: str):
+async def track_command(interaction: discord.Interaction, platform: str, artist_url: str):
     """
-    Track an artist's activities.
-    Usage: /track <platform> <artist_id>
+    Track an artist's activities using a URL.
+    Usage: /track <platform> <artist_url>
     """
-    if platform.lower() == "spotify":
+    # Validate the artist URL
+    url_pattern = re.compile(r"https?://(?:www\.)?(spotify\.com|soundcloud\.com)/.+")
+    if not url_pattern.match(artist_url):
+        await interaction.response.send_message("Invalid URL. Please provide a valid Spotify or SoundCloud link.", ephemeral=True)
+        return
+
+    # Extract the artist ID from the URL
+    if "spotify.com" in artist_url:
+        artist_id = artist_url.split("/")[-1]  # Extract the last part of the URL as the artist ID
         success = track_spotify_artist(artist_id)
-    elif platform.lower() == "soundcloud":
+        platform = "spotify"
+    elif "soundcloud.com" in artist_url:
+        artist_id = artist_url.split("/")[-1]  # Extract the last part of the URL as the artist ID
         success = track_soundcloud_artist(artist_id)
+        platform = "soundcloud"
     else:
-        await interaction.response.send_message("Unsupported platform. Use 'spotify' or 'soundcloud'.", ephemeral=True)
+        await interaction.response.send_message("Unsupported platform. Use a Spotify or SoundCloud link.", ephemeral=True)
         return
 
     if success:
@@ -54,13 +66,13 @@ async def track_command(interaction: discord.Interaction, platform: str, artist_
         if db_success:
             embed = create_embed(
                 title="Artist Added",
-                description=f"Successfully added artist {artist_id} on {platform}.",
+                description=f"Successfully added artist from {artist_url} on {platform}.",
             )
             await interaction.response.send_message(embed=embed)
         else:
-            await interaction.response.send_message(f"Artist {artist_id} is already being tracked.", ephemeral=True)
+            await interaction.response.send_message(f"Artist from {artist_url} is already being tracked.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"Failed to add artist {artist_id} on {platform}.", ephemeral=True)
+        await interaction.response.send_message(f"Failed to add artist from {artist_url} on {platform}.", ephemeral=True)
 
 # Periodic task to check for new releases
 @tasks.loop(minutes=5)  # Runs every 5 minutes
