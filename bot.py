@@ -112,6 +112,12 @@ async def check_for_updates():
 @bot.event
 async def on_ready():
     print(f"Bot is online as {bot.user}")
+    try:
+        # Force sync commands to the guild
+        await tree.sync(guild=discord.Object(id=GUILD_ID))
+        print(f"Slash commands synced to guild ID {GUILD_ID}.")
+    except Exception as e:
+        print(f"Failed to sync commands: {e}")
     check_for_updates.start()  # Start periodic checks for updates
     
 # Keep the bot alive
