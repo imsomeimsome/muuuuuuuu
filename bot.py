@@ -5,10 +5,11 @@ from dotenv import load_dotenv
 import sqlite3  # Import sqlite3
 import os
 from keep_alive import keep_alive
-from spotify_utils import track_spotify_artist, get_artist_releases
-from soundcloud_utils import track_soundcloud_artist, get_artist_tracks
-from database_utils import add_artist, initialize_database
+from spotify_utils import track_spotify_artist, get_artist_releases, get_artist_name as get_spotify_artist_name
+from soundcloud_utils import track_soundcloud_artist, get_artist_tracks, get_artist_name_by_url as get_soundcloud_artist_name
+from database_utils import add_artist, initialize_database, artist_exists
 from embed_utils import create_embed
+from utils import run_blocking  # Import run_blocking from utils.py
 import logging
 import re  # Import the regex module for URL validation
 
@@ -36,43 +37,57 @@ async def on_ready():
     await tree.sync(guild=discord.Object(id=GUILD_ID))  # Sync slash commands to the guild
     check_for_updates.start()  # Start periodic checks for updates
 
-@tree.command(name="track", description="Track an artist's activities on Spotify or SoundCloud", guild=discord.Object(id=GUILD_ID))
-async def track_command(interaction: discord.Interaction, platform: str, artist_url: str):
+@bot.tree.command(name="track", description="Track a new artist from Spotify or SoundCloud")
+@app_commands.describe(link="A Spotify or SoundCloud artist URL")
+async def track_command(interaction: discord.Interaction, link: str):
     """
     Track an artist's activities using a URL.
-    Usage: /track <platform> <artist_url>
+    Usage: /track <link>
     """
+    await interaction.response.defer(ephemeral=True)
+
     # Validate the artist URL
     url_pattern = re.compile(r"https?://(?:www\.)?(spotify\.com|soundcloud\.com)/.+")
-    if not url_pattern.match(artist_url):
-        await interaction.response.send_message("Invalid URL. Please provide a valid Spotify or SoundCloud link.", ephemeral=True)
+    if not url_pattern.match(link):
+        await interaction.followup.send("❌ Invalid URL. Please provide a valid Spotify or SoundCloud link.")
         return
 
-    # Extract the artist ID from the URL
-    if "spotify.com" in artist_url:
-        artist_id = artist_url.split("/")[-1]  # Extract the last part of the URL as the artist ID
-        success = track_spotify_artist(artist_id)
+    # Detect platform and extract artist ID
+    if "spotify.com" in link:
         platform = "spotify"
-    elif "soundcloud.com" in artist_url:
-        artist_id = artist_url.split("/")[-1]  # Extract the last part of the URL as the artist ID
-        success = track_soundcloud_artist(artist_id)
+        artist_id = link.split("/")[-1]  # Extract the last part of the URL as the artist ID
+        artist_name = await run_blocking(get_spotify_artist_name, artist_id)
+        artist_url = f"https://open.spotify.com/artist/{artist_id}"
+    elif "soundcloud.com" in link:
         platform = "soundcloud"
+        artist_id = link.split("/")[-1]  # Extract the last part of the URL as the artist ID
+        artist_name = await run_blocking(get_soundcloud_artist_name, link)
+        artist_url = f"https://soundcloud.com/{artist_id}"
     else:
-        await interaction.response.send_message("Unsupported platform. Use a Spotify or SoundCloud link.", ephemeral=True)
+        await interaction.followup.send("❌ Unsupported platform. Use a Spotify or SoundCloud link.")
         return
 
-    if success:
-        db_success = add_artist(platform.lower(), artist_id)
-        if db_success:
-            embed = create_embed(
-                title="Artist Added",
-                description=f"Successfully added artist from {artist_url} on {platform}.",
-            )
-            await interaction.response.send_message(embed=embed)
-        else:
-            await interaction.response.send_message(f"Artist from {artist_url} is already being tracked.", ephemeral=True)
-    else:
-        await interaction.response.send_message(f"Failed to add artist from {artist_url} on {platform}.", ephemeral=True)
+    # Check if the artist is already tracked
+    user_id = interaction.user.id
+    guild_id = str(interaction.guild.id) if interaction.guild else None
+    if artist_exists(platform, artist_id, user_id):
+        await interaction.followup.send("⚠️ You're already tracking this artist.")
+        return
+
+    # Add the artist to the database
+    from datetime import datetime, timezone
+    current_time = datetime.now(timezone.utc).isoformat()
+    add_artist(
+        platform=platform,
+        artist_id=artist_id,
+        artist_name=artist_name,
+        artist_url=artist_url,
+        owner_id=user_id,
+        guild_id=guild_id,
+        last_release_date=current_time  # Store the current time to prevent false first posts
+    )
+
+    await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.capitalize()}.")
 
 # Periodic task to check for new releases
 @tasks.loop(minutes=5)  # Runs every 5 minutes

@@ -50,3 +50,20 @@ def get_artist_likes(artist_id):
     except requests.exceptions.RequestException as e:
         print(f"Error fetching likes: {e}")
         return []
+
+def get_artist_name_by_url(artist_url):
+    """
+    Get the name of a SoundCloud artist using their URL.
+    :param artist_url: SoundCloud artist URL.
+    :return: Artist name.
+    """
+    try:
+        artist_id = artist_url.split("/")[-1]  # Extract artist ID from URL
+        url = f"https://api.soundcloud.com/users/{artist_id}?client_id={SOUNDCLOUD_CLIENT_ID}"
+        response = requests.get(url)
+        response.raise_for_status()
+        artist = response.json()
+        return artist['username']
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching artist name: {e}")
+        return None

@@ -47,3 +47,16 @@ def get_artist_playlists(user_id):
     except spotipy.exceptions.SpotifyException as e:
         print(f"Error fetching playlists: {e}")
         return []
+
+def get_artist_name(artist_id):
+    """
+    Get the name of a Spotify artist.
+    :param artist_id: Spotify artist ID.
+    :return: Artist name.
+    """
+    try:
+        artist = spotify.artist(artist_id)
+        return artist['name']
+    except spotipy.exceptions.SpotifyException as e:
+        print(f"Error fetching artist name: {e}")
+        return None
