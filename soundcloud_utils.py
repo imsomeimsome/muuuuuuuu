@@ -4,7 +4,7 @@ import os
 # Initialize SoundCloud API client
 SOUNDCLOUD_CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 SOUNDCLOUD_CLIENT_SECRET = os.getenv("SOUNDCLOUD_CLIENT_SECRET")
-REDIRECT_URI = "https://your-redirect-uri.com"  # Replace with your app's redirect URI
+REDIRECT_URI = "https://yourdomain.railway.app/callback"  # Replace with your app's redirect URI
 SOUNDCLOUD_ACCESS_TOKEN = os.getenv("SOUNDCLOUD_ACCESS_TOKEN")  # Store the access token in your .env file
 
 
