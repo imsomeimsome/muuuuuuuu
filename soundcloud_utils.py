@@ -3,6 +3,10 @@ import os
 
 # Initialize SoundCloud API client
 SOUNDCLOUD_CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+SOUNDCLOUD_CLIENT_SECRET = os.getenv("SOUNDCLOUD_CLIENT_SECRET")
+REDIRECT_URI = "https://your-redirect-uri.com"  # Replace with your app's redirect URI
+SOUNDCLOUD_ACCESS_TOKEN = os.getenv("SOUNDCLOUD_ACCESS_TOKEN")  # Store the access token in your .env file
+
 
 def track_soundcloud_artist(artist_id):
     """
@@ -59,11 +63,38 @@ def get_artist_name_by_url(artist_url):
     """
     try:
         artist_id = artist_url.split("/")[-1]  # Extract artist ID from URL
-        url = f"https://api.soundcloud.com/users/{artist_id}?client_id={SOUNDCLOUD_CLIENT_ID}"
-        response = requests.get(url)
+        url = f"https://api.soundcloud.com/users/{artist_id}"
+        headers = {"Authorization": f"OAuth {SOUNDCLOUD_ACCESS_TOKEN}"}
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         artist = response.json()
         return artist['username']
     except requests.exceptions.RequestException as e:
         print(f"Error fetching artist name: {e}")
         return None
+
+def get_access_token():
+    """
+    Obtain an access token from SoundCloud using OAuth2.
+    """
+    auth_url = "https://soundcloud.com/connect"
+    token_url = "https://api.soundcloud.com/oauth2/token"
+
+    # Step 1: Direct the user to the authorization URL
+    print(f"Go to the following URL to authorize the app:\n{auth_url}?client_id={SOUNDCLOUD_CLIENT_ID}&redirect_uri={REDIRECT_URI}&response_type=code")
+
+    # Step 2: User provides the authorization code
+    authorization_code = input("Enter the authorization code: ")
+
+    # Step 3: Exchange the authorization code for an access token
+    data = {
+        "client_id": SOUNDCLOUD_CLIENT_ID,
+        "client_secret": SOUNDCLOUD_CLIENT_SECRET,
+        "redirect_uri": REDIRECT_URI,
+        "grant_type": "authorization_code",
+        "code": authorization_code,
+    }
+    response = requests.post(token_url, data=data)
+    response.raise_for_status()
+    token_data = response.json()
+    return token_data["access_token"]
