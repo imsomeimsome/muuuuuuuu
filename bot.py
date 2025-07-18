@@ -6,13 +6,14 @@ import sqlite3  # Import sqlite3
 import os
 from keep_alive import keep_alive
 from spotify_utils import track_spotify_artist, get_artist_releases, get_artist_name as get_spotify_artist_name
-from soundcloud_utils import track_soundcloud_artist, get_artist_tracks, get_artist_name_by_url as get_soundcloud_artist_name
+from soundcloud_utils import track_soundcloud_artist, get_artist_tracks, get_artist_name_by_url as get_soundcloud_artist_name, get_access_token
 from database_utils import add_artist, initialize_database, artist_exists
 from embed_utils import create_embed
 from utils import run_blocking  # Import run_blocking from utils.py
 import logging
 import re  # Import the regex module for URL validation
 
+get_access_token()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
