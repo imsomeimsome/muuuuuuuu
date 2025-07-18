@@ -79,23 +79,28 @@ def get_access_token():
     """
     token_url = "https://api.soundcloud.com/oauth2/token"
 
-    # Step 1: Get the authorization code from the environment variable
     authorization_code = os.getenv("SOUNDCLOUD_AUTHORIZATION_CODE")
-    if not authorization_code:
-        raise ValueError("Authorization code not found. Set SOUNDCLOUD_AUTHORIZATION_CODE in your environment variables.")
+    client_id = os.getenv("SOUNDCLOUD_CLIENT_ID")
+    client_secret = os.getenv("SOUNDCLOUD_CLIENT_SECRET")
+    redirect_uri = os.getenv("REDIRECT_URI")
 
-    # Step 2: Exchange the authorization code for an access token
+    if not authorization_code:
+        raise ValueError("Missing SOUNDCLOUD_AUTHORIZATION_CODE")
+    if not all([client_id, client_secret, redirect_uri]):
+        raise ValueError("One or more OAuth env vars are missing.")
+
     data = {
-        "client_id": SOUNDCLOUD_CLIENT_ID,
-        "client_secret": SOUNDCLOUD_CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
         "code": authorization_code,
     }
+
     response = requests.post(token_url, data=data)
     response.raise_for_status()
     token_data = response.json()
 
-    # Step 3: Save the access token to the environment or database
-    print(f"Access Token: {token_data['access_token']}")
-    return token_data["access_token"]
+    access_token = token_data["access_token"]
+    print("✅ Access token obtained.")
+    return access_token
