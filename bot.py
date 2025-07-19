@@ -13,7 +13,7 @@ from utils import run_blocking  # Import run_blocking from utils.py
 import logging
 import re  # Import the regex module for URL validation
 
-get_access_token() # Use again if I need it
+# get_access_token() # Use again if I need it
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
