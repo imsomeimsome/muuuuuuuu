@@ -54,22 +54,20 @@ def refresh_client_id():
         match = re.search(r"client_id\s*:\s*\"([a-zA-Z0-9_-]{32})\"", html)
         if match:
             CLIENT_ID = match.group(1)
+            logging.info(f"✅ Refreshed SoundCloud client ID: {CLIENT_ID}")
             return CLIENT_ID
+        else:
+            logging.error("❌ Failed to find a new SoundCloud client ID.")
     except Exception as e:
-        logging.error(f"Failed to refresh SoundCloud client ID: {e}")
+        logging.error(f"❌ Error refreshing SoundCloud client ID: {e}")
     return None
 
 # Quick helper to verify the configured client ID works
-def verify_client_id(client_id: str | None = None) -> bool:
-    """Verify client_id using a safe, public, rate-tolerant endpoint."""
-    cid = client_id or CLIENT_ID
-    if not cid:
-        return False
-
-    test_url = f"https://api-v2.soundcloud.com/search/tracks?q=test&client_id={cid}&limit=1"
-
+def verify_client_id():
+    """Verify if the SoundCloud CLIENT_ID is valid."""
+    test_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com&client_id={CLIENT_ID}"
     response = safe_request(test_url)
-    return bool(response and response.status_code == 200 and "collection" in response.json())
+    return response and response.status_code == 200
 
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
@@ -178,26 +176,26 @@ def get_artist_info(url_or_username):
 
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
         response = safe_request(resolve_url, headers=HEADERS)
-        if not response:
-            raise ValueError("Request failed")
+        if not response or response.status_code != 200:
+            raise ValueError(f"Failed to resolve SoundCloud user: {url_or_username}")
 
         data = response.json()
-        if data.get('kind') != 'user':
-            raise ValueError("Not an artist profile")
+        if not data or data.get('kind') != 'user':
+            raise ValueError(f"Invalid artist data for: {url_or_username}")
 
         info = {
-            'id': data['id'],
-            'name': data['username'],  # Use username as fallback
-            'url': data['permalink_url'],
-            'track_count': data['track_count'],
+            'id': data.get('id', username),
+            'name': data.get('username', 'Unknown Artist'),
+            'url': data.get('permalink_url', f"https://soundcloud.com/{username}"),
+            'track_count': data.get('track_count', 0),
             'avatar_url': data.get('avatar_url', ''),
             'followers': data.get('followers_count', 0)
         }
         cache.set(cache_key, info, ttl=CACHE_TTL)
         return info
     except Exception as e:
-        logging.error(f"Artist info fetch failed: {e}")
-        return {'id': url_or_username, 'name': url_or_username}  # Fallback to ID or username
+        logging.error(f"Error fetching artist info for {url_or_username}: {e}")
+        return {'id': url_or_username, 'name': 'Unknown Artist', 'url': f"https://soundcloud.com/{url_or_username}"}
 
 # --- Release Data Fetching ---
 
@@ -264,26 +262,23 @@ def get_soundcloud_playlist_info(artist_url):
         if cached:
             return cached
 
-        resolved = resolve_url(artist_url)
-        if not resolved or "id" not in resolved:
-            logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
-            return None
+        resolved = get_artist_info(artist_url)
+        user_id = resolved.get("id")
+        if not user_id:
+            raise ValueError(f"Could not resolve user ID for {artist_url}")
 
-        user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
-        if not response:
-            logging.warning(f"No playlists found for {artist_url}")
-            return None
+        if not response or response.status_code != 200:
+            raise ValueError(f"Failed to fetch playlists for {artist_url}")
 
         data = response.json()
         playlists = data.get("collection", [])
-        
         if not playlists:
+            logging.warning(f"No playlists found for {artist_url}")
             return None
-            
+
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
-        
         tracks = [
             {
                 "id": track.get("id"),
@@ -301,12 +296,11 @@ def get_soundcloud_playlist_info(artist_url):
             "release_date": latest_playlist.get("created_at"),
             "cover_url": latest_playlist.get("artwork_url"),
             "track_count": len(tracks),
-            "tracks": tracks,  # Include detailed track info
+            "tracks": tracks
         }
 
         cache.set(cache_key, result, ttl=300)
         return result
-
     except Exception as e:
         logging.error(f"Error fetching playlists for {artist_url}: {e}")
         return None

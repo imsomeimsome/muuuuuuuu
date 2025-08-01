@@ -44,7 +44,8 @@ from soundcloud_utils import (
     get_soundcloud_likes_info,
     get_soundcloud_reposts,
     get_soundcloud_likes,
-    get_soundcloud_reposts_info
+    get_soundcloud_reposts_info,
+    get_artist_info
 )
 from utils import run_blocking, log_release, parse_datetime
 from reset_artists import reset_tables
@@ -914,8 +915,9 @@ async def track_command(interaction: discord.Interaction, link: str):
     elif "soundcloud.com" in link:
         platform = "soundcloud"
         artist_id = extract_soundcloud_id(link)
-        artist_name = await run_blocking(get_soundcloud_artist_name, link)
-        artist_url = f"https://soundcloud.com/{artist_id}"
+        artist_info = await run_blocking(get_artist_info, link)
+        artist_name = artist_info.get("name", artist_id)  # Fallback to artist_id if name is unavailable
+        artist_url = artist_info.get("url", f"https://soundcloud.com/{artist_id}")
         genres = []  # Optional
 
     else:
@@ -1212,12 +1214,16 @@ async def debug_soundcloud(interaction: discord.Interaction, url: str):
 @bot.tree.command(name="checkscid", description="Verify SoundCloud client ID is valid")
 @require_registration
 async def check_scid_command(interaction: discord.Interaction):
-    from soundcloud_utils import verify_client_id
+    from soundcloud_utils import verify_client_id, refresh_client_id
     await interaction.response.defer(ephemeral=True)
     if verify_client_id():
         await interaction.followup.send("✅ SoundCloud client ID appears valid.")
     else:
-        await interaction.followup.send("❌ SoundCloud client ID check failed. Verify the ID.")
+        new_client_id = refresh_client_id()
+        if new_client_id:
+            await interaction.followup.send(f"✅ Refreshed SoundCloud client ID: `{new_client_id}`")
+        else:
+            await interaction.followup.send("❌ Failed to refresh SoundCloud client ID. Verify the ID manually.")
 
 @bot.tree.command(name="import", description="Import previously exported tracked artists")
 @app_commands.describe(file="Upload a previously exported JSON file")
