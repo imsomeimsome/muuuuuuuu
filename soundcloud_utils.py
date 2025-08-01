@@ -168,21 +168,29 @@ def get_artist_info(url_or_username):
     cached = cache.get(cache_key)
     if cached:
         return cached
+
     try:
+        # Extract username from URL if necessary
         if url_or_username.startswith("http"):
             username = extract_soundcloud_username(url_or_username)
         else:
             username = url_or_username
 
+        # Build the resolve URL
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
         response = safe_request(resolve_url, headers=HEADERS)
+
+        # Handle invalid responses
         if not response or response.status_code != 200:
             raise ValueError(f"Failed to resolve SoundCloud user: {url_or_username}")
 
         data = response.json()
+
+        # Ensure the response contains valid artist data
         if not data or data.get('kind') != 'user':
             raise ValueError(f"Invalid artist data for: {url_or_username}")
 
+        # Extract artist information
         info = {
             'id': data.get('id', username),
             'name': data.get('username', 'Unknown Artist'),
@@ -191,8 +199,11 @@ def get_artist_info(url_or_username):
             'avatar_url': data.get('avatar_url', ''),
             'followers': data.get('followers_count', 0)
         }
+
+        # Cache the result
         cache.set(cache_key, info, ttl=CACHE_TTL)
         return info
+
     except Exception as e:
         logging.error(f"Error fetching artist info for {url_or_username}: {e}")
         return {'id': url_or_username, 'name': 'Unknown Artist', 'url': f"https://soundcloud.com/{url_or_username}"}
