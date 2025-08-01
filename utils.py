@@ -2,6 +2,9 @@ import os
 import redis
 import asyncio
 
+redis_client = None  # Initialize global Redis client
+cache = None  # Initialize global cache object
+
 def run_blocking(func, *args, **kwargs):
     """
     Run a blocking function in an asynchronous context.
@@ -17,9 +20,10 @@ def init_redis():
     """
     Initialize the Redis connection pool.
     """
-    global redis_client
+    global redis_client, cache
     redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
     redis_client = redis.Redis.from_url(redis_url)
+    cache = redis_client  # Assign Redis client to cache for compatibility
 
 def close_redis():
     """
