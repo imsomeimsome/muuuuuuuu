@@ -1,6 +1,6 @@
-# filepath: /workspaces/muuuuuuuu/utils.py
+import os
+import aioredis
 import asyncio
-import redis.asyncio as aioredis  # Updated import for redis.asyncio
 
 def run_blocking(func, *args, **kwargs):
     """
@@ -13,15 +13,13 @@ def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(None, func, *args, **kwargs)
 
-# Create a Redis connection pool
-redis = None
-
 async def init_redis():
     """
     Initialize the Redis connection pool.
     """
     global redis
-    redis = aioredis.from_url("redis://localhost")  # Updated method
+    redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
+    redis = aioredis.from_url(redis_url)
 
 async def close_redis():
     """
