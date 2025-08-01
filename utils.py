@@ -1,5 +1,5 @@
 import os
-import aioredis
+import redis
 import asyncio
 
 def run_blocking(func, *args, **kwargs):
@@ -13,30 +13,30 @@ def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(None, func, *args, **kwargs)
 
-async def init_redis():
+def init_redis():
     """
     Initialize the Redis connection pool.
     """
-    global redis
+    global redis_client
     redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
-    redis = aioredis.from_url(redis_url)
+    redis_client = redis.Redis.from_url(redis_url)
 
-async def close_redis():
+def close_redis():
     """
     Close the Redis connection pool.
     """
-    global redis
-    if redis:
-        await redis.close()
+    global redis_client
+    if redis_client:
+        redis_client.close()
 
-async def get_cache(key):
+def get_cache(key):
     """Get a value from Redis."""
-    return await redis.get(key)
+    return redis_client.get(key)
 
-async def set_cache(key, value, ttl=None):
+def set_cache(key, value, ttl=None):
     """Set a value in Redis with an optional TTL."""
-    await redis.set(key, value, ex=ttl)
+    redis_client.set(key, value, ex=ttl)
 
-async def delete_cache(key):
+def delete_cache(key):
     """Delete a value from Redis."""
-    await redis.delete(key)
+    redis_client.delete(key)
