@@ -58,16 +58,26 @@ def refresh_client_id():
             return CLIENT_ID
         else:
             logging.error("❌ Failed to find a new SoundCloud client ID.")
-    except Exception as e:
+            raise ValueError("Failed to refresh SoundCloud client ID.")
+    except requests.exceptions.RequestException as e:
         logging.error(f"❌ Error refreshing SoundCloud client ID: {e}")
-    return None
+        raise ValueError("Error during client ID refresh.")
 
 # Quick helper to verify the configured client ID works
 def verify_client_id():
     """Verify if the SoundCloud CLIENT_ID is valid."""
     test_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com&client_id={CLIENT_ID}"
-    response = safe_request(test_url)
-    return response and response.status_code == 200
+    try:
+        response = safe_request(test_url)
+        if response and response.status_code == 200:
+            logging.info("✅ SoundCloud CLIENT_ID is valid.")
+            return True
+        else:
+            logging.error("❌ SoundCloud CLIENT_ID verification failed.")
+            return False
+    except Exception as e:
+        logging.error(f"❌ Error verifying SoundCloud CLIENT_ID: {e}")
+        return False
 
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
