@@ -1,6 +1,7 @@
 import os
 import redis
 import asyncio
+import logging
 
 redis_client = None  # Initialize global Redis client
 cache = None  # Initialize global cache object
@@ -44,3 +45,18 @@ def set_cache(key, value, ttl=None):
 def delete_cache(key):
     """Delete a value from Redis."""
     redis_client.delete(key)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+def log_release(artist_name, release_title, platform):
+    """
+    Log a release event.
+    :param artist_name: Name of the artist.
+    :param release_title: Title of the release.
+    :param platform: Platform of the release (e.g., Spotify, SoundCloud).
+    """
+    logging.info(f"🎵 New release by {artist_name}: '{release_title}' on {platform}")
