@@ -2,6 +2,7 @@ import os
 import redis
 import asyncio
 import logging
+from dateutil.parser import isoparse
 
 redis_client = None  # Initialize global Redis client
 cache = None  # Initialize global cache object
@@ -60,3 +61,15 @@ def log_release(artist_name, release_title, platform):
     :param platform: Platform of the release (e.g., Spotify, SoundCloud).
     """
     logging.info(f"🎵 New release by {artist_name}: '{release_title}' on {platform}")
+
+def parse_datetime(date_str):
+    """
+    Parse an ISO 8601 date string into a timezone-aware datetime object.
+    :param date_str: ISO 8601 date string.
+    :return: A timezone-aware datetime object.
+    """
+    try:
+        return isoparse(date_str)
+    except Exception as e:
+        logging.error(f"Failed to parse datetime: {e}")
+        return None
