@@ -187,7 +187,7 @@ def get_artist_info(url_or_username):
 
         info = {
             'id': data['id'],
-            'name': data['username'],
+            'name': data['username'],  # Use username as fallback
             'url': data['permalink_url'],
             'track_count': data['track_count'],
             'avatar_url': data.get('avatar_url', ''),
@@ -196,7 +196,8 @@ def get_artist_info(url_or_username):
         cache.set(cache_key, info, ttl=CACHE_TTL)
         return info
     except Exception as e:
-        raise ValueError(f"Artist info fetch failed: {e}")
+        logging.error(f"Artist info fetch failed: {e}")
+        return {'id': url_or_username, 'name': url_or_username}  # Fallback to ID or username
 
 # --- Release Data Fetching ---
 
