@@ -59,12 +59,29 @@ import sys
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
 
-# Configure logging
+# Configure logging with color-coded levels
+class CustomFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[90m",  # Gray
+        "INFO": "\033[94m",  # Blue
+        "WARNING": "\033[93m",  # Orange
+        "ERROR": "\033[91m",  # Red
+        "CRITICAL": "\033[91m",  # Red
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, self.RESET)
+        record.msg = f"{color}{record.msg}{self.RESET}"
+        return super().format(record)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+logging.getLogger().handlers[0].setFormatter(CustomFormatter())
+
 logger = logging.getLogger("release_checker")
 
 # Helper to parse dates consistently

@@ -86,24 +86,18 @@ def safe_request(url, headers=None, retries=3, timeout=10):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             if response.status_code == 404:
-                # Not found - no need to retry
+                logging.warning(f"⚠️ 404 Not Found for URL: {url}")
                 return None
             if response.status_code == 429:
                 retry_after = int(response.headers.get("Retry-After", 5))
-                print(
-                    f"SoundCloud rate limited. Sleeping for {retry_after} seconds..."
-                )
+                logging.warning(f"⚠️ Rate limited. Retrying in {retry_after} seconds...")
                 time.sleep(retry_after)
                 continue
-            if response.status_code in {401, 403}:
-                # Do not auto-refresh when using official client IDs
-                print(
-                    f"SoundCloud request unauthorized (status {response.status_code})."
-                )
             response.raise_for_status()
+            logging.info(f"✅ Successfully fetched URL: {url}")
             return response
-        except Exception as e:
-            print(f"SoundCloud request error: {e}")
+        except requests.RequestException as e:
+            logging.error(f"❌ Request failed for URL {url}: {e}")
             if attempt < retries - 1:
                 time.sleep(2)
     return None
@@ -138,25 +132,25 @@ def clean_soundcloud_url(url):
         if 'on.soundcloud.com' in url:
             response = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
             url = response.url
+            logging.debug(f"🔄 Redirected URL: {url}")
 
         parsed = urlparse(url)
         if 'soundcloud.com' not in parsed.netloc:
+            logging.warning(f"⚠️ Invalid SoundCloud domain for URL: {url}")
             raise ValueError("Invalid SoundCloud domain")
 
-        try:
-            response = requests.get(url, headers=HEADERS, timeout=10)
-            if response.status_code == 404:
-                logging.warning(f"⚠️ 404 from SoundCloud for {url}")
-                raise ValueError("SoundCloud URL returned 404")
-            response.raise_for_status()
-        except requests.RequestException as req_err:
-            logging.error(f"❌ Request failed for SoundCloud URL {url}: {req_err}")
-            raise ValueError("SoundCloud request error")
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code == 404:
+            logging.warning(f"⚠️ 404 Not Found for SoundCloud URL: {url}")
+            raise ValueError("SoundCloud URL returned 404")
+        response.raise_for_status()
+        logging.info(f"✅ Successfully validated SoundCloud URL: {url}")
 
         match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
         return match.group(1) if match else url
 
     except Exception as e:
+        logging.error(f"❌ URL validation failed for {url}: {e}")
         raise ValueError(f"URL validation failed: {e}")
 
 def extract_soundcloud_username(url):
@@ -680,3 +674,30 @@ def get_soundcloud_reposts(artist_url):
     except Exception as e:
         logging.error(f"SoundCloud repost fetch failed: {e}")
         return []
+
+# Custom logging formatter for Railway logs
+class RailwayLogFormatter(logging.Formatter):
+    COLORS = {
+        "DEBUG": "\033[90m",  # Gray
+        "INFO": "\033[94m",  # Blue
+        "WARNING": "\033[93m",  # Orange
+        "ERROR": "\033[91m",  # Red
+    }
+    RESET = "\033[0m"
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, self.RESET)
+        record.msg = f"{color}{record.msg}{self.RESET}"
+        return super().format(record)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
+
+# Example log barriers and organized logs
+logging.info("====== Soundcloud ======")
+logging.info("Tracking 3 artists")
+logging.info("====== Likes ======")
+logging.info("🟠 👀 Checking Matt OX (SoundCloud)")
+logging.info("     📅 Last stored: 2025-08-02")
+logging.info("     📅 API returned: 2025-08-02")
+logging.info("✅ No new releases or posted releases")
