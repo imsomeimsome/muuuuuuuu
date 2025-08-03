@@ -261,15 +261,3 @@ class RailwayLogFormatter(logging.Formatter):
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
-
-# Example log barriers and organized logs
-logging.info("====== Spotify ======")
-logging.info("Tracking 5 artists")
-logging.info("==== Releases ====")
-logging.info("🟢 👀 Checking Matt OX (Spotify)")
-logging.info("     📅 Last stored: 2025-08-02T05:43:24.174509+00:00")
-logging.info("     📅 API returned: 2025-08-02")
-logging.info("✅ No new releases or whatever")
-
-
-

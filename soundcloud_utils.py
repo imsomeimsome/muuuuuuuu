@@ -693,11 +693,3 @@ class RailwayLogFormatter(logging.Formatter):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
 
-# Example log barriers and organized logs
-logging.info("====== Soundcloud ======")
-logging.info("Tracking 3 artists")
-logging.info("====== Likes ======")
-logging.info("🟠 👀 Checking Matt OX (SoundCloud)")
-logging.info("     📅 Last stored: 2025-08-02")
-logging.info("     📅 API returned: 2025-08-02")
-logging.info("✅ No new releases or posted releases")

@@ -180,9 +180,14 @@ def should_catch_up_content(content_date, last_check_date, bot_shutdown_time):
     """Determine if content should be posted during catch-up."""
     if not content_date or not bot_shutdown_time:
         return False
-    
+
+    # Normalize all dates to be offset-aware
+    content_date = parse_date(content_date)
+    last_check_date = parse_date(last_check_date) if last_check_date else None
+    bot_shutdown_time = parse_date(bot_shutdown_time)
+
     # Only catch up on content that happened while bot was down
-    return parse_datetime(content_date) > parse_datetime(bot_shutdown_time)
+    return content_date > bot_shutdown_time
 
 def get_platform_emoji(platform):
     """Get emoji for platform."""
@@ -711,16 +716,20 @@ async def release_check_scheduler(bot):
     logging.info("⏳ Release checker initializing...")
 
     # Run catch-up check immediately after bot starts
-    try:
-        logging.info("🔄 Running catch-up check...")
-        is_catchup = await handle_bot_startup_catchup()
-        if is_catchup:
-            await check_for_new_releases(bot, is_catchup=True)
-            logging.info("✅ Catch-up check complete")
-        else:
-            logging.info("⏭️ No catch-up needed")
-    except Exception as e:
-        logging.error(f"❌ Error during catch-up check: {e}")
+    if not hasattr(bot, 'catchup_done') or not bot.catchup_done:
+        try:
+            logging.info("🔄 Running catch-up check...")
+            is_catchup = await handle_bot_startup_catchup()
+            if is_catchup:
+                await check_for_new_releases(bot, is_catchup=True)
+                logging.info("✅ Catch-up check complete")
+            else:
+                logging.info("⏭️ No catch-up needed")
+        except Exception as e:
+            logging.error(f"❌ Error during catch-up check: {e}")
+
+        # Mark catch-up as done
+        bot.catchup_done = True
 
     # Schedule normal checks independently
     while not bot.is_closed():
@@ -757,14 +766,18 @@ async def on_ready():
         logging.error(f"❌ Failed to sync slash commands: {e}")
 
     # ✅ Handle startup catch-up
-    should_catchup = await handle_bot_startup_catchup()
+    if not hasattr(bot, 'catchup_done') or not bot.catchup_done:
+        should_catchup = await handle_bot_startup_catchup()
 
-    # ✅ Run catch-up check if needed
-    if should_catchup:
-        try:
-            await check_for_new_releases(bot, is_catchup=True)
-        except Exception as e:
-            logging.error(f"❌ Catch-up failed: {e}")
+        # ✅ Run catch-up check if needed
+        if should_catchup:
+            try:
+                await check_for_new_releases(bot, is_catchup=True)
+            except Exception as e:
+                logging.error(f"❌ Catch-up failed: {e}")
+
+        # Mark catch-up as done
+        bot.catchup_done = True
 
     # ✅ Start regular scheduler
     if not hasattr(bot, 'release_checker_started'):
