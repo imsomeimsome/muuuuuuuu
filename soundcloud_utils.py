@@ -34,7 +34,8 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             if response.status_code == 403:
                 logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Attempting to refresh client ID...")
-                refresh_client_id()
+                if not verify_client_id():
+                    refresh_client_id()
                 continue
             if response.status_code == 404:
                 logging.warning(f"⚠️ 404 Not Found for URL: {url}")
@@ -59,7 +60,10 @@ CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Connection": "keep-alive",
 }
 
 # Try to refresh client_id automatically when unauthorized
@@ -67,15 +71,18 @@ def refresh_client_id():
     """Attempt to fetch a working SoundCloud client ID."""
     global CLIENT_ID
     try:
-        html = requests.get("https://soundcloud.com", headers=HEADERS, timeout=10).text
-        match = re.search(r"client_id\s*:\s*\"([a-zA-Z0-9_-]{32})\"", html)
-        if match:
-            CLIENT_ID = match.group(1)
-            logging.info(f"✅ Refreshed SoundCloud client ID: {CLIENT_ID}")
-            return CLIENT_ID
-        else:
-            logging.error("❌ Failed to find a new SoundCloud client ID.")
-            raise ValueError("Failed to refresh SoundCloud client ID.")
+        for attempt in range(3):  # Retry up to 3 times
+            logging.info(f"🔄 Attempting to refresh SoundCloud client ID (Attempt {attempt + 1})...")
+            html = requests.get("https://soundcloud.com", headers=HEADERS, timeout=10).text
+            match = re.search(r"client_id\s*:\s*\"([a-zA-Z0-9_-]{32})\"", html)
+            if match:
+                CLIENT_ID = match.group(1)
+                logging.info(f"✅ Refreshed SoundCloud client ID: {CLIENT_ID}")
+                return CLIENT_ID
+            logging.warning(f"⚠️ Attempt {attempt + 1}: Failed to find a new SoundCloud client ID.")
+            time.sleep(2)  # Wait before retrying
+        logging.error("❌ Failed to find a new SoundCloud client ID after multiple attempts.")
+        raise ValueError("Failed to refresh SoundCloud client ID.")
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ Error refreshing SoundCloud client ID: {e}")
         raise ValueError("Error during client ID refresh.")
@@ -85,14 +92,17 @@ def verify_client_id():
     """Verify if the SoundCloud CLIENT_ID is valid."""
     test_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com&client_id={CLIENT_ID}"
     try:
-        response = safe_request(test_url)
-        if response and response.status_code == 200:
+        response = requests.get(test_url, headers=HEADERS, timeout=10)
+        if response.status_code == 200:
             logging.info("✅ SoundCloud CLIENT_ID is valid.")
             return True
-        else:
-            logging.error("❌ SoundCloud CLIENT_ID verification failed.")
+        elif response.status_code == 403:
+            logging.warning("⚠️ SoundCloud CLIENT_ID is forbidden (403).")
             return False
-    except Exception as e:
+        else:
+            logging.error(f"❌ SoundCloud CLIENT_ID verification failed with status code {response.status_code}.")
+            return False
+    except requests.RequestException as e:
         logging.error(f"❌ Error verifying SoundCloud CLIENT_ID: {e}")
         return False
 
