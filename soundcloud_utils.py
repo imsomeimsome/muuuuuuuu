@@ -83,9 +83,14 @@ def verify_client_id():
 # === PATCHED: Enhanced exception handling and rate limiting ===
 
 def safe_request(url, headers=None, retries=3, timeout=10):
+    global CLIENT_ID
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            if response.status_code == 403:
+                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Attempting to refresh client ID...")
+                refresh_client_id()
+                continue
             if response.status_code == 404:
                 logging.warning(f"⚠️ 404 Not Found for URL: {url}")
                 return None
@@ -131,6 +136,10 @@ def extract_soundcloud_user_id(artist_url):
 def clean_soundcloud_url(url):
     """Normalize and verify SoundCloud URLs."""
     try:
+        # Remove duplicate prefixes
+        if url.startswith("https://soundcloud.com/https://soundcloud.com/"):
+            url = url.replace("https://soundcloud.com/https://soundcloud.com/", "https://soundcloud.com/")
+
         if 'on.soundcloud.com' in url:
             response = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
             url = response.url
