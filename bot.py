@@ -402,6 +402,11 @@ async def check_for_new_releases(bot, is_catchup=False):
                     update_last_release_date(artist_id, owner_id, guild_id, current_date)
                     await handle_release(bot, artist, release_info, "release")
                     new_release_count += 1
+                elif release_info.get("added_at") and parse_date(release_info["added_at"]) > parse_date(last_date):
+                    logging.info(f"     ✨ BACKDATED RELEASE DETECTED!")
+                    update_last_release_date(artist_id, owner_id, guild_id, current_date)
+                    await handle_release(bot, artist, release_info, "release")
+                    new_release_count += 1
                 else:
                     logging.info(f"     ✅ No new releases")
             # Catch-up check: only content from downtime period

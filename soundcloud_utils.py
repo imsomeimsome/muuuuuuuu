@@ -339,17 +339,19 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
         url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=10"
         response = safe_request(url)
         if not response:
-            logging.warning(f"No likes found for {artist_url}")
+            logging.warning(f"⚠️ No response received for likes: {artist_url}")
             return []
 
-        data = response.json().get("collection", [])
-        likes = []
+        data = response.json()
+        if not data or "collection" not in data:
+            logging.warning(f"⚠️ Invalid or empty data received for likes: {artist_url}")
+            return []
 
-        for item in data:
+        likes = []
+        for item in data.get("collection", []):
             original = item.get("track") or item.get("playlist")
             if not original:
                 continue
-
             like_date = item.get("created_at")
             track_release_date = original.get("created_at")
 
