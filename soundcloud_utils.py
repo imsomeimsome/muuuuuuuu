@@ -11,7 +11,9 @@ import json
 
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
-
+# Load environment variables
+load_dotenv()
+CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 
 def resolve_url(url):
     cache_key = f"resolve:{url}"
@@ -54,9 +56,7 @@ def safe_request(url, headers=None, retries=3, timeout=10):
                 time.sleep(2)
     return None
 
-# Load environment variables
-load_dotenv()
-CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+
 
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
