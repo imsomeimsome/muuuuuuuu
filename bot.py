@@ -47,7 +47,7 @@ from soundcloud_utils import (
     get_soundcloud_reposts_info,
     get_artist_info
 )
-from utils import run_blocking, log_release, parse_datetime
+from utils import run_blocking, log_release, parse_datetime, init_redis, close_redis
 from reset_artists import reset_tables
 from tables import initialize_fresh_database
 import sqlite3
@@ -1295,5 +1295,12 @@ async def import_command(interaction: discord.Interaction, file: discord.Attachm
 
 
 if __name__ == "__main__":
-    keep_alive()  # Start the web server for UptimeRobot
-    bot.run(TOKEN)
+    # Initialize Redis
+    init_redis()
+
+    try:
+        keep_alive()  # Start the web server for UptimeRobot
+        bot.run(TOKEN)
+    finally:
+        # Ensure Redis connection is closed on shutdown
+        close_redis()
