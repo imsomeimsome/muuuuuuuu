@@ -23,9 +23,15 @@ def init_redis():
     Initialize the Redis connection pool.
     """
     global redis_client, cache
-    redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
-    redis_client = redis.Redis.from_url(redis_url)
-    cache = redis_client  # Assign Redis client to cache for compatibility
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
+        redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+        cache = redis_client  # Assign Redis client to cache for compatibility
+        logging.info("✅ Redis initialized successfully.")
+    except Exception as e:
+        logging.error(f"❌ Failed to initialize Redis: {e}")
+        redis_client = None
+        cache = None
 
 def close_redis():
     """
@@ -33,19 +39,42 @@ def close_redis():
     """
     global redis_client
     if redis_client:
-        redis_client.close()
+        try:
+            redis_client.close()
+            logging.info("✅ Redis connection closed.")
+        except Exception as e:
+            logging.error(f"❌ Failed to close Redis connection: {e}")
 
 def get_cache(key):
     """Get a value from Redis."""
-    return redis_client.get(key)
+    if cache is None:
+        logging.warning("⚠️ Redis cache is not initialized.")
+        return None
+    try:
+        return cache.get(key)
+    except Exception as e:
+        logging.error(f"❌ Failed to get cache key '{key}': {e}")
+        return None
 
 def set_cache(key, value, ttl=None):
     """Set a value in Redis with an optional TTL."""
-    redis_client.set(key, value, ex=ttl)
+    if cache is None:
+        logging.warning("⚠️ Redis cache is not initialized.")
+        return
+    try:
+        cache.set(key, value, ex=ttl)
+    except Exception as e:
+        logging.error(f"❌ Failed to set cache key '{key}': {e}")
 
 def delete_cache(key):
     """Delete a value from Redis."""
-    redis_client.delete(key)
+    if cache is None:
+        logging.warning("⚠️ Redis cache is not initialized.")
+        return
+    try:
+        cache.delete(key)
+    except Exception as e:
+        logging.error(f"❌ Failed to delete cache key '{key}': {e}")
 
 # Configure logging with color-coded levels
 class CustomFormatter(logging.Formatter):

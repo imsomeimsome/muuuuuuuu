@@ -14,15 +14,17 @@ CACHE_TTL = 300  # 5 minutes
 
 def resolve_url(url):
     cache_key = f"resolve:{url}"
-    cached = cache.get(cache_key)
-    if cached:
-        return cached
+    if cache:
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
 
     resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
     response = safe_request(resolve_endpoint)
     if response and response.status_code == 200:
         data = response.json()
-        cache.set(cache_key, data, ttl=3600)
+        if cache:
+            cache.set(cache_key, data, ttl=3600)
         return data
     return None
 
