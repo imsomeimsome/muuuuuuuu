@@ -731,25 +731,23 @@ async def release_check_scheduler(bot):
         # Mark catch-up as done
         bot.catchup_done = True
 
-    # Schedule normal checks independently
+    # Schedule normal checks at fixed intervals
     while not bot.is_closed():
         now = datetime.now(timezone.utc)
-        next_run = now + timedelta(minutes=5)  # Always schedule 5 minutes ahead
-        next_run = next_run.replace(second=1, microsecond=0)
+        # Calculate the next run time (round to the nearest 5-minute mark)
+        next_run = now.replace(second=1, microsecond=0) + timedelta(minutes=5 - (now.minute % 5))
 
         delay = (next_run - now).total_seconds()
-        delay = max(delay, 0)
-
-        logging.info(f"🕰️ Next normal check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
+        logging.info(f"🕰️ Next release check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
         await asyncio.sleep(delay)
 
         try:
             check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
-            logging.info(f"🔍 Starting normal release check at {check_time} UTC...")
+            logging.info(f"🔍 Starting release check at {check_time} UTC...")
             await check_for_new_releases(bot, is_catchup=False)
-            logging.info("✅ Normal release check complete")
+            logging.info("✅ Release check complete")
         except Exception as e:
-            logging.error(f"❌ Error during normal release check: {e}")
+            logging.error(f"❌ Error during release check: {e}")
 
 # --- EVENT HANDLERS ---
 
