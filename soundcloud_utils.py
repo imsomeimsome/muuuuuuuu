@@ -27,15 +27,31 @@ def resolve_url(url):
         return data
     return None
 
-def safe_request(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response
-    except Exception as e:
-        logging.error(f"Request failed: {e}")
-        return None
-
+def safe_request(url, headers=None, retries=3, timeout=10):
+    global CLIENT_ID
+    for attempt in range(retries):
+        try:
+            response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            if response.status_code == 403:
+                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Attempting to refresh client ID...")
+                refresh_client_id()
+                continue
+            if response.status_code == 404:
+                logging.warning(f"⚠️ 404 Not Found for URL: {url}")
+                return None
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 5))
+                logging.warning(f"⚠️ Rate limited. Retrying in {retry_after} seconds...")
+                time.sleep(retry_after)
+                continue
+            response.raise_for_status()
+            logging.info(f"✅ Successfully fetched URL: {url}")
+            return response
+        except requests.RequestException as e:
+            logging.error(f"❌ Request failed for URL {url}: {e}")
+            if attempt < retries - 1:
+                time.sleep(2)
+    return None
 
 # Load environment variables
 load_dotenv()
@@ -79,34 +95,6 @@ def verify_client_id():
     except Exception as e:
         logging.error(f"❌ Error verifying SoundCloud CLIENT_ID: {e}")
         return False
-
-# === PATCHED: Enhanced exception handling and rate limiting ===
-
-def safe_request(url, headers=None, retries=3, timeout=10):
-    global CLIENT_ID
-    for attempt in range(retries):
-        try:
-            response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
-            if response.status_code == 403:
-                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Attempting to refresh client ID...")
-                refresh_client_id()
-                continue
-            if response.status_code == 404:
-                logging.warning(f"⚠️ 404 Not Found for URL: {url}")
-                return None
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 5))
-                logging.warning(f"⚠️ Rate limited. Retrying in {retry_after} seconds...")
-                time.sleep(retry_after)
-                continue
-            response.raise_for_status()
-            logging.info(f"✅ Successfully fetched URL: {url}")
-            return response
-        except requests.RequestException as e:
-            logging.error(f"❌ Request failed for URL {url}: {e}")
-            if attempt < retries - 1:
-                time.sleep(2)
-    return None
 
 # --- Core URL Handling ---
 
