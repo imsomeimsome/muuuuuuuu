@@ -1,11 +1,11 @@
 import os
-import redis
+import sqlite3
+from datetime import datetime, timedelta
 import asyncio
 import logging
 from dateutil.parser import isoparse
 
-redis_client = None  # Initialize global Redis client
-cache = None  # Initialize global cache object
+DB_PATH = "/data/artists.db"
 
 def run_blocking(func, *args, **kwargs):
     """
@@ -18,63 +18,45 @@ def run_blocking(func, *args, **kwargs):
     loop = asyncio.get_event_loop()
     return loop.run_in_executor(None, func, *args, **kwargs)
 
-def init_redis():
-    """
-    Initialize the Redis connection pool.
-    """
-    global redis_client, cache
-    try:
-        redis_url = os.getenv("REDIS_URL", "redis://localhost")  # Use Railway's REDIS_URL environment variable
-        redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
-        cache = redis_client  # Assign Redis client to cache for compatibility
-        logging.info("✅ Redis initialized successfully.")
-    except Exception as e:
-        logging.error(f"❌ Failed to initialize Redis: {e}")
-        redis_client = None
-        cache = None
-
-def close_redis():
-    """
-    Close the Redis connection pool.
-    """
-    global redis_client
-    if redis_client:
-        try:
-            redis_client.close()
-            logging.info("✅ Redis connection closed.")
-        except Exception as e:
-            logging.error(f"❌ Failed to close Redis connection: {e}")
 
 def get_cache(key):
-    """Get a value from Redis."""
-    if cache is None:
-        logging.warning("⚠️ Redis cache is not initialized.")
-        return None
-    try:
-        return cache.get(key)
-    except Exception as e:
-        logging.error(f"❌ Failed to get cache key '{key}': {e}")
-        return None
+    """Get a value from SQLite cache."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT value, expires_at FROM cache WHERE key = ?
+    """, (key,))
+    result = cursor.fetchone()
+    conn.close()
+    if result:
+        value, expires_at = result
+        if expires_at and datetime.fromisoformat(expires_at) < datetime.now():
+            delete_cache(key)  # Expired, delete the key
+            return None
+        return value
+    return None
 
 def set_cache(key, value, ttl=None):
-    """Set a value in Redis with an optional TTL."""
-    if cache is None:
-        logging.warning("⚠️ Redis cache is not initialized.")
-        return
-    try:
-        cache.set(key, value, ex=ttl)
-    except Exception as e:
-        logging.error(f"❌ Failed to set cache key '{key}': {e}")
+    """Set a value in SQLite cache with an optional TTL."""
+    expires_at = (datetime.now() + timedelta(seconds=ttl)).isoformat() if ttl else None
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        REPLACE INTO cache (key, value, expires_at)
+        VALUES (?, ?, ?)
+    """, (key, value, expires_at))
+    conn.commit()
+    conn.close()
 
 def delete_cache(key):
-    """Delete a value from Redis."""
-    if cache is None:
-        logging.warning("⚠️ Redis cache is not initialized.")
-        return
-    try:
-        cache.delete(key)
-    except Exception as e:
-        logging.error(f"❌ Failed to delete cache key '{key}': {e}")
+    """Delete a value from SQLite cache."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM cache WHERE key = ?
+    """, (key,))
+    conn.commit()
+    conn.close()
 
 # Configure logging with color-coded levels
 class CustomFormatter(logging.Formatter):

@@ -289,6 +289,20 @@ def reset_like_tracking():
     from database_utils import reset_like_tracking_for_all
     reset_like_tracking_for_all()
 
+def initialize_cache_table():
+    """Create the cache table if it doesn't exist."""
+    conn = sqlite3.connect("/data/artists.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS cache (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            expires_at DATETIME
+        )
+    """)
+    conn.commit()
+    conn.close()
+
 if __name__ == "__main__":
     # Run this to initialize a fresh database
     initialize_fresh_database()

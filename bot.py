@@ -47,9 +47,9 @@ from soundcloud_utils import (
     get_soundcloud_reposts_info,
     get_artist_info
 )
-from utils import run_blocking, log_release, parse_datetime, init_redis, close_redis, cache
+from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache
 from reset_artists import reset_tables
-from tables import initialize_fresh_database
+from tables import initialize_fresh_database, initialize_cache_table
 import sqlite3
 import signal
 import sys
@@ -1293,30 +1293,21 @@ async def import_command(interaction: discord.Interaction, file: discord.Attachm
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to import: {e}")
 
-@bot.tree.command(name="testredis", description="Test Redis connection.")
-async def test_redis_command(interaction: discord.Interaction):
-    if cache is None:
-        await interaction.response.send_message("❌ Redis is not initialized.")
-    else:
-        try:
-            cache.set("test_key", "test_value")
-            value = cache.get("test_key")
-            await interaction.response.send_message(f"✅ Redis is working. Test value: {value}")
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Redis error: {e}")
+@bot.tree.command(name="testcache", description="Test SQLite cache.")
+async def test_cache_command(interaction: discord.Interaction):
+    try:
+        set_cache("test_key", "test_value", ttl=60)
+        value = get_cache("test_key")
+        await interaction.response.send_message(f"✅ Cache is working. Test value: {value}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Cache error: {e}")
 
 if __name__ == "__main__":
-    # Initialize Redis
-    init_redis()
-
-    # Test Redis connection
-    if cache is None:
-        logging.error("❌ Redis initialization failed. Exiting...")
-        sys.exit(1)
+    # Initialize SQLite cache table
+    initialize_cache_table()
 
     try:
         keep_alive()  # Start the web server for UptimeRobot
         bot.run(TOKEN)
     finally:
-        # Ensure Redis connection is closed on shutdown
-        close_redis()
+        logging.info("✅ Bot shutdown complete.")
