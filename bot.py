@@ -82,6 +82,21 @@ logging.basicConfig(
 )
 logging.getLogger().handlers[0].setFormatter(CustomFormatter())
 
+# Helper function to summarize errors
+def summarize_errors(errors):
+    if not errors:
+        return "No errors encountered."
+    summary = "\n".join([f"{error['type']}: {error['message']}" for error in errors])
+    return f"Errors:\n{summary}"
+
+# Update logging logic in the bot
+async def log_summary(total_checked, new_releases, errors):
+    logging.info("==================================================")
+    logging.info(f"✅ Checked {total_checked} artists, found {new_releases} new releases")
+    logging.info(summarize_errors(errors))
+    logging.info("==================================================")
+
+
 logger = logging.getLogger("release_checker")
 
 # Helper to parse dates consistently
@@ -290,8 +305,9 @@ async def check_for_playlist_changes(bot, artist, playlist_info):
 
 async def check_for_new_releases(bot, is_catchup=False):
     """Complete release checking with optional catch-up logic."""
-    import logging
-    from datetime import datetime, timedelta, timezone
+    errors = []
+    total_checked = 0
+    new_release_count = 0
 
     logging.info(f"🔍 Starting {'catch-up ' if is_catchup else ''}release check cycle...")
     now = datetime.now(timezone.utc)
@@ -316,9 +332,6 @@ async def check_for_new_releases(bot, is_catchup=False):
             result = cursor.fetchone()
             shutdown_time = result[0] if result else None
 
-    total_checked = 0
-    new_release_count = 0
-    
     # === RELEASES ===
     logging.info(f"🎵 CHECKING RELEASES{'(CATCH-UP)' if is_catchup else ''}...")
     logging.info("=" * 50)
@@ -398,10 +411,10 @@ async def check_for_new_releases(bot, is_catchup=False):
                     logging.info(f"     ⏩ No catch-up releases")
 
         except Exception as e:
+            errors.append({"type": "Release Check", "message": str(e)})
             logging.error(f"     ❌ Error: {e}")
 
-    logging.info("=" * 50)
-    logging.info(f"✅ Checked {total_checked} artists, found {new_release_count} {'catch-up ' if is_catchup else ''}releases")
+    await log_summary(total_checked, new_release_count, errors)
 
     if soundcloud_retry_after and now < soundcloud_retry_after:
         logging.warning("⏭️ Skipping SoundCloud content checks due to cooldown.")
