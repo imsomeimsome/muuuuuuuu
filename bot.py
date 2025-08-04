@@ -54,7 +54,8 @@ import sqlite3
 import signal
 import sys
 
-initialize_fresh_database()
+# ===== Below are the 2 commands to delete all saved data, use top one for a full wipe
+# initialize_fresh_database()
 # reset_tables()
 
 # Ensure the /data directory exists
@@ -1315,6 +1316,7 @@ async def reset_bot_command(interaction: discord.Interaction):
     try:
         # Clear cache
         clear_all_cache()
+        initialize_fresh_database()
 
         # Reset database tables
         from reset_artists import reset_tables

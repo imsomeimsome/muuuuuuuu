@@ -136,7 +136,7 @@ def clean_soundcloud_url(url):
     """Normalize and verify SoundCloud URLs."""
     try:
         # Remove duplicate prefixes
-        if url.startswith("https://soundcloud.com/https://soundcloud.com/"):
+        while "https://soundcloud.com/https://soundcloud.com/" in url:
             url = url.replace("https://soundcloud.com/https://soundcloud.com/", "https://soundcloud.com/")
 
         # Ensure the URL starts with the correct base
@@ -186,6 +186,7 @@ def extract_soundcloud_username(url):
 
 def get_artist_info(url_or_username):
     """Resolve a SoundCloud user from a full profile URL or username."""
+    url_or_username = clean_soundcloud_url(url_or_username)  # Normalize the URL
     cache_key = f"sc_artist_info:{url_or_username}"
     cached = get_cache(cache_key)  # Use get_cache
     if cached:
@@ -229,7 +230,7 @@ def get_artist_info(url_or_username):
     except Exception as e:
         logging.error(f"Error fetching artist info for {url_or_username}: {e}")
         return {'id': url_or_username, 'name': 'Unknown Artist', 'url': f"https://soundcloud.com/{url_or_username}"}
-    
+       
 # --- Release Data Fetching ---
 
 def get_last_release_date(artist_url):
