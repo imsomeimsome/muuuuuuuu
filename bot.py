@@ -55,6 +55,7 @@ import signal
 import sys
 
 # initialize_fresh_database()
+reset_tables()
 
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
