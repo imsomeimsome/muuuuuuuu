@@ -55,7 +55,7 @@ import signal
 import sys
 
 # ===== Below are the 2 commands to delete all saved data, use top one for a full wipe
-# initialize_fresh_database()
+initialize_fresh_database()
 # reset_tables()
 
 # Ensure the /data directory exists
@@ -1317,10 +1317,6 @@ async def reset_bot_command(interaction: discord.Interaction):
         # Clear cache
         clear_all_cache()
         initialize_fresh_database()
-
-        # Reset database tables
-        from reset_artists import reset_tables
-        reset_tables()
 
         # Reset activity tracking
         from database_utils import reset_activity_tracking
