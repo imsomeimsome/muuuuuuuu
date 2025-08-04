@@ -136,16 +136,23 @@ def clean_soundcloud_url(url):
         if url.startswith("https://soundcloud.com/https://soundcloud.com/"):
             url = url.replace("https://soundcloud.com/https://soundcloud.com/", "https://soundcloud.com/")
 
+        # Ensure the URL starts with the correct base
+        if not url.startswith("https://soundcloud.com/"):
+            raise ValueError(f"Invalid SoundCloud URL: {url}")
+
+        # Handle shortened URLs (e.g., on.soundcloud.com)
         if 'on.soundcloud.com' in url:
             response = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
             url = response.url
             logging.debug(f"🔄 Redirected URL: {url}")
 
+        # Validate domain
         parsed = urlparse(url)
         if 'soundcloud.com' not in parsed.netloc:
             logging.warning(f"⚠️ Invalid SoundCloud domain for URL: {url}")
             raise ValueError("Invalid SoundCloud domain")
 
+        # Validate URL existence
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code == 404:
             logging.warning(f"⚠️ 404 Not Found for SoundCloud URL: {url}")
@@ -153,6 +160,7 @@ def clean_soundcloud_url(url):
         response.raise_for_status()
         logging.info(f"✅ Successfully validated SoundCloud URL: {url}")
 
+        # Extract canonical URL
         match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
         return match.group(1) if match else url
 
@@ -218,8 +226,7 @@ def get_artist_info(url_or_username):
     except Exception as e:
         logging.error(f"Error fetching artist info for {url_or_username}: {e}")
         return {'id': url_or_username, 'name': 'Unknown Artist', 'url': f"https://soundcloud.com/{url_or_username}"}
-
-
+    
 # --- Release Data Fetching ---
 
 def get_last_release_date(artist_url):
@@ -707,7 +714,10 @@ class RailwayLogFormatter(logging.Formatter):
         color = self.COLORS.get(record.levelname, self.RESET)
         record.msg = f"{color}{record.msg}{self.RESET}"
         return super().format(record)
+def clear_cache(key):
+    """Clear a specific cache key."""
+    delete_cache(key)
+    logging.info(f"✅ Cleared cache for key: {key}")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
-
