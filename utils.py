@@ -86,7 +86,7 @@ def log_release(artist_name, release_title, platform):
     Log a release event.
     :param artist_name: Name of the artist.
     :param release_title: Title of the release.
-    :param platform: Platform of the release (e.g., Spotify, SoundCloud).
+    :param platform: Platform o f the release (e.g., Spotify, SoundCloud).
     """
     logging.info(f"🎵 New release by {artist_name}: '{release_title}' on {platform}")
 
@@ -101,3 +101,12 @@ def parse_datetime(date_str):
     except Exception as e:
         logging.error(f"Failed to parse datetime: {e}")
         return None
+
+def clear_all_cache():
+    """Clear all entries in the SQLite cache."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM cache")  # Delete all rows in the cache table
+    conn.commit()
+    conn.close()
+    logging.info("✅ Cleared all cache entries.")
