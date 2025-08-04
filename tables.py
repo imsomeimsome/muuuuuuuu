@@ -16,6 +16,7 @@ def drop_all_tables():
         'artists', 'users', 'channels', 'releases', 'posted_content',
         'release_preferences', 'activity_logs', 'platform_configs',
         'posted_likes', 'reposts', 'release_prefs', 'untrack_logs'
+        'cache', 'playlist_states'
     ]
     
     with get_connection() as conn:
@@ -84,6 +85,19 @@ def create_all_tables():
         ''')
         print("✅ Created table: channels")
         
+        # Playlist states table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS playlist_states (
+                artist_id TEXT NOT NULL,
+                guild_id TEXT NOT NULL,
+                playlist_id TEXT NOT NULL,
+                tracks TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (artist_id, guild_id, playlist_id)
+            )
+        ''')
+        print("✅ Created table: playlist_states")
+
         # ===== TRACKING TABLES =====
         
         # Posted content tracking (prevents duplicates)
