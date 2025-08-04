@@ -2,12 +2,14 @@ import os
 import requests
 import re
 import time
+import sqlite3
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime
 import logging
 from utils import get_cache, set_cache, delete_cache  # Import SQLite cache functions
 import json
+from database_utils import DB_PATH
 
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
@@ -16,6 +18,7 @@ load_dotenv()
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 
 def resolve_url(url):
+    url = clean_soundcloud_url(url)  # Normalize the URL
     cache_key = f"resolve:{url}"
     cached = get_cache(cache_key)  # Use get_cache
     if cached:
@@ -167,7 +170,7 @@ def clean_soundcloud_url(url):
     except Exception as e:
         logging.error(f"❌ URL validation failed for {url}: {e}")
         raise ValueError(f"URL validation failed: {e}")
-
+    
 def extract_soundcloud_username(url):
     """Extract the username from a SoundCloud URL."""
     clean_url = clean_soundcloud_url(url)
@@ -714,10 +717,29 @@ class RailwayLogFormatter(logging.Formatter):
         color = self.COLORS.get(record.levelname, self.RESET)
         record.msg = f"{color}{record.msg}{self.RESET}"
         return super().format(record)
+    
 def clear_cache(key):
     """Clear a specific cache key."""
     delete_cache(key)
     logging.info(f"✅ Cleared cache for key: {key}")
 
+def clear_malformed_cache():
+    """Clear cache entries with malformed URLs."""
+    for key in get_all_cache_keys():  # Retrieve all cache keys
+        if "https://soundcloud.com/https://soundcloud.com/" in key:
+            delete_cache(key)
+            logging.info(f"✅ Cleared malformed cache key: {key}")
+
+def get_all_cache_keys():
+    """Retrieve all cache keys from SQLite."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key FROM cache")
+            return [row[0] for row in cursor.fetchall()]
+    except Exception as e:
+        logging.error(f"❌ Error retrieving cache keys: {e}")
+        return []
+    
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
