@@ -47,7 +47,7 @@ from soundcloud_utils import (
     get_soundcloud_reposts_info,
     get_artist_info
 )
-from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache
+from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache
 from reset_artists import reset_tables
 from tables import initialize_fresh_database, initialize_cache_table
 import sqlite3
@@ -176,6 +176,12 @@ async def handle_bot_startup_catchup():
     logging.info(f"🔄 Starting catch-up for {downtime} of missed activity...")
     return True
 
+async def reset_bot_state():
+    """Reset bot state for a fresh start."""
+    bot.catchup_done = False
+    bot.release_checker_started = False
+    logging.info("✅ Bot state reset.")
+    
 def should_catch_up_content(content_date, last_check_date, bot_shutdown_time):
     """Determine if content should be posted during catch-up."""
     if not content_date or not bot_shutdown_time:
@@ -1301,6 +1307,28 @@ async def test_cache_command(interaction: discord.Interaction):
         await interaction.response.send_message(f"✅ Cache is working. Test value: {value}")
     except Exception as e:
         await interaction.response.send_message(f"❌ Cache error: {e}")
+
+@bot.tree.command(name="resetbot", description="Reset all bot data and state.")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_bot_command(interaction: discord.Interaction):
+    try:
+        # Clear cache
+        clear_all_cache()
+
+        # Reset database tables
+        from reset_artists import reset_tables
+        reset_tables()
+
+        # Reset activity tracking
+        from database_utils import reset_activity_tracking
+        reset_activity_tracking()
+
+        # Reset bot state
+        await reset_bot_state()
+
+        await interaction.response.send_message("✅ Bot data and state reset successfully.")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to reset bot: {e}")
 
 if __name__ == "__main__":
     # Initialize SQLite cache table
