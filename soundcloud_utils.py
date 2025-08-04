@@ -35,10 +35,8 @@ def safe_request(url, headers=None, retries=3, timeout=10):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             if response.status_code == 403:
-                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Attempting to refresh client ID...")
-                if not verify_client_id():
-                    refresh_client_id()
-                continue
+                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Check rate limits or headers.")
+                return None
             if response.status_code == 404:
                 logging.warning(f"⚠️ 404 Not Found for URL: {url}")
                 return None
@@ -688,6 +686,12 @@ def get_soundcloud_reposts(artist_url):
     except Exception as e:
         logging.error(f"SoundCloud repost fetch failed: {e}")
         return []
+    
+RATE_LIMIT_DELAY = 5  # Delay in seconds between requests
+
+def rate_limited_request(url, headers=None):
+    time.sleep(RATE_LIMIT_DELAY)  # Enforce delay between requests
+    return safe_request(url, headers=headers)
 
 # Custom logging formatter for Railway logs
 class RailwayLogFormatter(logging.Formatter):
