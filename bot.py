@@ -1,3 +1,5 @@
+# REMEMBER, TO ADD CHANNELS LINE 75 and 189 IN TABLES.PY
+
 import os
 import typing
 from typing import Optional, Literal
@@ -670,45 +672,42 @@ async def check_for_new_releases(bot, is_catchup=False):
                     
                     # Regular check: check if like activity is newer than last check
                     if not is_catchup:
-                        if like_activity_date and last_like_date and like_activity_date > last_like_date:
+                        if like_activity_date > last_like_date:
+                            logging.info(f"          ✨ NEW LIKE DETECTED!")
                             should_post = True
                     # Catch-up check: only content from downtime period
                     else:
                         if should_catch_up_content(like.get("release_date"), last_like_date_str, shutdown_time):
+                            logging.info(f"          ✨ [CATCH-UP] NEW LIKE DETECTED!")
                             should_post = True
 
                     if should_post:
-                        logging.info(f"          ✨ {'[CATCH-UP] ' if is_catchup else ''}NEW LIKE! Posting to Discord...")
-
-                        # Create embed
+                        logging.info(f"          🎵 Posting like: {like_title}")
                         embed = create_like_embed(
-                            platform=artist.get("platform"),
-                            artist_name=artist_name,
-                            title=like.get("title"),
-                            url=like.get("url"),
-                            release_date=like.get("track_release_date"),  # Show track creation date in embed
-                            cover_url=like.get("cover_url"),
-                            duration=like.get("duration"),
-                            genres=like.get("genres"),
-                            features=like.get("features"),
+                            platform=artist["platform"],
+                            liked_by=artist["artist_name"],
+                            title=like["title"],
+                            artist_name=like["artist_name"],
+                            url=like["url"],
+                            release_date=like["track_release_date"],
+                            cover_url=like["cover_url"],
+                            features=like["features"],
+                            track_count=like["track_count"],
+                            duration=like["duration"],
+                            genres=like["genres"]
                         )
 
-                        # Send to channel
                         channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                         if channel:
                             await channel.send(embed=embed)
-                            logging.info(f"          ✅ Posted to #{channel.name}")
-                            
-                            # Mark as posted and update last like check date
                             mark_posted_like(artist["artist_id"], artist["guild_id"], like_id)
-                            update_last_like_date(artist["artist_id"], artist["guild_id"], like.get("release_date"))  # Store like activity date
+                            update_last_like_date(artist["artist_id"], artist["guild_id"], like.get("release_date"))
                             like_count += 1
-                            
                             if is_catchup:
                                 catch_up_posted += 1
                                 await asyncio.sleep(2)  # Rate limit catch-up posts
                         else:
-                            logging.warning(f"          ⚠️ No SoundCloud channel configured")
+                            logging.warning(f"          ⚠️ No channel configured for {artist['platform']}")
                     else:
                         logging.info(f"          ⏩ Too old like activity, skipping")
                         
