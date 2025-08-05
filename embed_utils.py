@@ -120,10 +120,12 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     
     # Convert timestamps
     try:
-        release_timestamp = int(datetime.datetime.strptime(
-            release_date.replace('Z', '+0000'), 
-            '%Y-%m-%dT%H:%M:%S%z'
-        ).timestamp())
+        release_timestamp = None
+        if release_date:
+            release_timestamp = int(datetime.datetime.strptime(
+                release_date.replace('Z', '+0000'), 
+                '%Y-%m-%dT%H:%M:%S%z'
+            ).timestamp())
     except Exception as e:
         print(f"Error parsing release date: {e}")
         release_timestamp = None

@@ -381,12 +381,16 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not like_date:
                 continue
 
+            # Use like_date as fallback for track_release_date
+            if not track_release_date:
+                track_release_date = like_date
+
             likes.append({
                 "track_id": original.get("id"),
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": track_release_date or like_date,  # Fallback to like date if no release date
+                "release_date": track_release_date,  # Now always has a value
                 "liked_date": like_date,
                 "cover_url": original.get("artwork_url"),
                 "features": None,
