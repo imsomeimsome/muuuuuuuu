@@ -89,19 +89,28 @@ def create_repost_embed(platform, reposted_by, original_artist, title, url,
 
 import discord
 
-def create_like_embed(platform, artist_name, title, url, release_date, cover_url=None, duration=None, genres=None, features=None):
+def create_like_embed(platform, liked_by, title, artist_name, url, release_date, cover_url=None, features=None, track_count=None, duration=None, genres=None):
+    """Create an embed for a liked track."""
     embed = discord.Embed(
-        title=f"❤️ {artist_name} liked a track!",
+        title=f"❤️ {liked_by} liked a track!",
         description=f"[{title}]({url})",
         color=0xff5c5c
     )
 
+    if artist_name:
+        embed.add_field(name="Artist", value=artist_name, inline=True)
     if release_date:
         embed.add_field(name="Release Date", value=release_date, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
+    if track_count:
+        embed.add_field(name="Tracks", value=track_count, inline=True)
     if genres:
-        embed.add_field(name="Genres", value=", ".join(genres), inline=True)
+        if isinstance(genres, list):
+            genre_text = ", ".join(genres)
+        else:
+            genre_text = str(genres)
+        embed.add_field(name="Genres", value=genre_text, inline=True)
     if features:
         embed.add_field(name="Features", value=features, inline=True)
     if cover_url:

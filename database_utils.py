@@ -92,10 +92,10 @@ def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=
         cursor.execute('''
             INSERT OR REPLACE INTO artists
             (platform, artist_id, artist_name, artist_url, owner_id, guild_id, 
-             genres, last_release_date, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             genres, last_release_date, last_like_date, last_repost_date, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (platform, artist_id, artist_name, artist_url, owner_id, guild_id, 
-              genres, last_release_date, now, now))
+              genres, last_release_date, now, now, now, now))
         conn.commit()
         
         log_activity(owner_id, 'track', f'Added {artist_name} ({platform})', guild_id)

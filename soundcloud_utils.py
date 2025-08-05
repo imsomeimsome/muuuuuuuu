@@ -382,7 +382,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": like_date,
+                "release_date": like_date,  # Use like date as release date
                 "track_release_date": track_release_date,
                 "cover_url": original.get("artwork_url"),
                 "features": None,
@@ -392,7 +392,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "liked": True
             })
 
-        set_cache(cache_key, json.dumps(likes), ttl=CACHE_TTL)  # Use set_cache
+        set_cache(cache_key, json.dumps(likes), ttl=60)  # Reduced cache TTL to 60 seconds for likes
         return likes
 
     except Exception as e:

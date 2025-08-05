@@ -57,7 +57,7 @@ import signal
 import sys
 
 # ===== Below are the 2 commands to delete all saved data, use top one for a full wipe
-initialize_fresh_database()
+# initialize_fresh_database()
 # reset_tables()
 
 # Ensure the /data directory exists
