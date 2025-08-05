@@ -96,9 +96,24 @@ import discord
 def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None):
     """Create an embed for a liked track."""
     
-    # Convert release_date to Unix timestamp for Discord formatting
+    # Determine release type based on track count
+    release_type = "track"
+    if track_count:
+        if track_count >= 7:
+            release_type = "deluxe" if "deluxe" in title.lower() else "album"
+        elif track_count >= 2:
+            release_type = "EP"
+
+    # Format duration to include hours if needed
+    if duration and ":" in duration:
+        minutes, seconds = map(int, duration.split(":"))
+        if minutes >= 60:
+            hours = minutes // 60
+            minutes = minutes % 60
+            duration = f"{hours}:{minutes:02d}:{seconds:02d}"
+    
+    # Convert timestamps
     try:
-        # Use datetime.strptime instead of fromisoformat
         release_timestamp = int(datetime.datetime.strptime(
             release_date.replace('Z', '+0000'), 
             '%Y-%m-%dT%H:%M:%S%z'
@@ -107,7 +122,6 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         print(f"Error parsing release date: {e}")
         release_timestamp = None
         
-    # Convert liked_date to Unix timestamp for Discord formatting
     try:
         like_timestamp = None
         if liked_date:
@@ -119,25 +133,27 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         print(f"Error parsing like date: {e}")
         like_timestamp = None
 
-    # Create base embed with valid color value (remove opacity)
+    # Create base embed
     embed = discord.Embed(
-        title=f"❤️ {liked_by} liked a track!",
+        title=f"❤️ {liked_by} liked a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
         description=f"[{title}]({url})",
-        color=0xfa5a02  # SoundCloud orange without opacity
+        color=0xfa5a02
     )
 
-    # Rest of the function remains the same
+    # Add fields
     embed.add_field(name="Artist", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
+    # Dates in their own row
     if release_timestamp:
         embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if like_timestamp:
-        embed.add_field(name="Like Date", value=f"<t:{like_timestamp}:R>", inline=True)
+        embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
+    # Genres in their own row
     if genres:
         if isinstance(genres, list):
             genre_text = ", ".join(genres)
@@ -147,7 +163,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
             genre_name = "Genre"
         embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    # Set high-res thumbnail
+    # High-res thumbnail
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)
