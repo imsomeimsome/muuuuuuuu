@@ -99,66 +99,38 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     # Convert release_date to Unix timestamp for Discord formatting
     try:
         release_timestamp = int(datetime.fromisoformat(release_date.replace('Z', '+00:00')).timestamp())
-    except:
+    except Exception as e:
+        print(f"Error parsing release date: {e}")
         release_timestamp = None
         
     # Convert liked_date to Unix timestamp for Discord formatting
     try:
         like_timestamp = int(datetime.fromisoformat(liked_date.replace('Z', '+00:00')).timestamp()) if liked_date else None
-    except:
+    except Exception as e:
+        print(f"Error parsing like date: {e}")
         like_timestamp = None
-    
-    # Extract features from title if not provided
-    if not features and "FT." in title.upper():
-        try:
-            # Extract featured artists from title
-            ft_part = title.upper().split("FT.")[1].split("-")[0].strip()
-            features = [artist.strip() for artist in ft_part.split(",")]
-        except:
-            features = None
 
-    # Determine if it's multiple artists
-    artists = []
-    if artist_name:
-        artists.append(artist_name)
-    if features:
-        if isinstance(features, str):
-            features = [f.strip() for f in features.split(",")]
-        artists.extend(features)
-    artists = list(dict.fromkeys(artists))  # Remove duplicates while preserving order
-
+    # Create base embed
     embed = discord.Embed(
         title=f"❤️ {liked_by} liked a track!",
         description=f"[{title}]({url})",
-        color=0xfa5a02  # SoundCloud orange
+        color=0xfa5a02f8  # Updated SoundCloud orange with opacity
     )
 
-    # First row of fields
-    embed.add_field(
-        name="Artist" + ("s" if len(artists) > 1 else ""),
-        value=", ".join(artists),
-        inline=True
-    )
+    # First row: Artist, Tracks, Duration
+    embed.add_field(name="Artist", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Second row of fields (dates)
+    # Second row: Release Date, Like Date
     if release_timestamp:
-        embed.add_field(
-            name="Release Date",
-            value=f"<t:{release_timestamp}:R>",
-            inline=True
-        )
+        embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if like_timestamp:
-        embed.add_field(
-            name="Like Date",
-            value=f"<t:{like_timestamp}:R>",
-            inline=True
-        )
+        embed.add_field(name="Like Date", value=f"<t:{like_timestamp}:R>", inline=True)
 
-    # Genre field
+    # Third row: Genre(s)
     if genres:
         if isinstance(genres, list):
             genre_text = ", ".join(genres)
