@@ -372,18 +372,17 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             original = item.get("track") or item.get("playlist")
             if not original:
                 continue
-            like_date = item.get("created_at")
-            track_release_date = original.get("created_at")
 
-            logging.info(f"✅ Found like: {original.get('title')} (Liked at {like_date})")
+            like_date = item.get("created_at")  # When the like happened
+            track_release_date = original.get("created_at")  # Original track date
 
             likes.append({
                 "track_id": original.get("id"),
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": like_date,  # Use like date as release date
-                "track_release_date": track_release_date,
+                "release_date": track_release_date,  # Original track date
+                "liked_date": like_date,  # When it was liked - THIS IS NEW
                 "cover_url": original.get("artwork_url"),
                 "features": None,
                 "track_count": original.get("track_count", 1),

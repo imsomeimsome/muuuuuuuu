@@ -106,11 +106,17 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
 
     # Format duration to include hours if needed
     if duration and ":" in duration:
-        minutes, seconds = map(int, duration.split(":"))
-        if minutes >= 60:
-            hours = minutes // 60
-            minutes = minutes % 60
-            duration = f"{hours}:{minutes:02d}:{seconds:02d}"
+        try:
+            minutes, seconds = map(int, duration.split(":"))
+            if minutes >= 60:
+                hours = minutes // 60
+                minutes = minutes % 60
+                duration = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration = f"{minutes}:{seconds:02d}"
+        except ValueError:
+            # Keep original duration if parsing fails
+            pass
     
     # Convert timestamps
     try:
