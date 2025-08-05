@@ -110,3 +110,43 @@ def clear_all_cache():
     conn.commit()
     conn.close()
     logging.info("✅ Cleared all cache entries.")
+
+def get_highest_quality_artwork(url: str) -> str:
+    """Get highest quality version of artwork URL with fallbacks."""
+    if not url:
+        return None
+        
+    # For SoundCloud URLs
+    if "sndcdn.com" in url:
+        # Try upgrading in order: original > t500x500 > large > t300x300
+        variants = [
+            url.replace("-large.", "-original."),
+            url.replace("-large.", "-t500x500."),
+            url,  # Original URL as fallback
+            url.replace("-t500x500.", "-t300x300.")
+        ]
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        variants = [x for x in variants if not (x in seen or seen.add(x))]
+        
+        return variants[0]  # Return highest quality version
+        
+    # For Spotify URLs
+    elif "i.scdn.co" in url:
+        # Try to get the highest resolution by modifying image dimensions
+        try:
+            # Extract base URL without dimensions
+            base_url = url.split('/image/')[0] + '/image/'
+            spotify_id = url.split('/')[-1]
+            
+            # Try different sizes (1000px, 640px, 300px)
+            sizes = ['1000x1000', '640x640', '300x300']
+            for size in sizes:
+                high_res = f"{base_url}{size}/{spotify_id}"
+                return high_res
+                
+        except Exception:
+            return url  # Fallback to original URL
+            
+    return url  # Return original if no upgrades possible

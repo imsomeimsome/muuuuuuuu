@@ -1,4 +1,6 @@
 import discord
+from utils import get_highest_quality_artwork
+import datetime
 
 def create_music_embed(
     platform,
@@ -62,7 +64,9 @@ def create_music_embed(
         description=description,
         color=embed_color
     )
-    embed.set_thumbnail(url=cover_url)
+
+    high_res_cover = get_highest_quality_artwork(cover_url) if cover_url else None
+    embed.set_thumbnail(url=high_res_cover or cover_url or discord.Embed.Empty)
 
     return embed
 
@@ -89,34 +93,86 @@ def create_repost_embed(platform, reposted_by, original_artist, title, url,
 
 import discord
 
-def create_like_embed(platform, liked_by, title, artist_name, url, release_date, cover_url=None, features=None, track_count=None, duration=None, genres=None):
+def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None):
     """Create an embed for a liked track."""
+    
+    # Convert release_date to Unix timestamp for Discord formatting
+    try:
+        release_timestamp = int(datetime.fromisoformat(release_date.replace('Z', '+00:00')).timestamp())
+    except:
+        release_timestamp = None
+        
+    # Convert liked_date to Unix timestamp for Discord formatting
+    try:
+        like_timestamp = int(datetime.fromisoformat(liked_date.replace('Z', '+00:00')).timestamp()) if liked_date else None
+    except:
+        like_timestamp = None
+    
+    # Extract features from title if not provided
+    if not features and "FT." in title.upper():
+        try:
+            # Extract featured artists from title
+            ft_part = title.upper().split("FT.")[1].split("-")[0].strip()
+            features = [artist.strip() for artist in ft_part.split(",")]
+        except:
+            features = None
+
+    # Determine if it's multiple artists
+    artists = []
+    if artist_name:
+        artists.append(artist_name)
+    if features:
+        if isinstance(features, str):
+            features = [f.strip() for f in features.split(",")]
+        artists.extend(features)
+    artists = list(dict.fromkeys(artists))  # Remove duplicates while preserving order
+
     embed = discord.Embed(
         title=f"❤️ {liked_by} liked a track!",
         description=f"[{title}]({url})",
-        color=0xff5c5c
+        color=0xfa5a02  # SoundCloud orange
     )
 
-    if artist_name:
-        embed.add_field(name="Artist", value=artist_name, inline=True)
-    if release_date:
-        embed.add_field(name="Release Date", value=release_date, inline=True)
-    if duration:
-        embed.add_field(name="Duration", value=duration, inline=True)
+    # First row of fields
+    embed.add_field(
+        name="Artist" + ("s" if len(artists) > 1 else ""),
+        value=", ".join(artists),
+        inline=True
+    )
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
+    if duration:
+        embed.add_field(name="Duration", value=duration, inline=True)
+
+    # Second row of fields (dates)
+    if release_timestamp:
+        embed.add_field(
+            name="Release Date",
+            value=f"<t:{release_timestamp}:R>",
+            inline=True
+        )
+    if like_timestamp:
+        embed.add_field(
+            name="Like Date",
+            value=f"<t:{like_timestamp}:R>",
+            inline=True
+        )
+
+    # Genre field
     if genres:
         if isinstance(genres, list):
             genre_text = ", ".join(genres)
+            genre_name = "Genres" if len(genres) > 1 else "Genre"
         else:
             genre_text = str(genres)
-        embed.add_field(name="Genres", value=genre_text, inline=True)
-    if features:
-        embed.add_field(name="Features", value=features, inline=True)
-    if cover_url:
-        embed.set_thumbnail(url=cover_url)
+            genre_name = "Genre"
+        embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    embed.set_footer(text=f"Platform: {platform.title()}")
+    # Set high-res thumbnail
+    if cover_url:
+        high_res_cover = get_highest_quality_artwork(cover_url)
+        embed.set_thumbnail(url=high_res_cover or cover_url)
+
     return embed
 
 #
