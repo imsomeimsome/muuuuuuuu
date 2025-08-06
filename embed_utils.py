@@ -160,15 +160,18 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
     
-    # Add genres in same row as dates
+    # Always add genres field, even if empty
+    genre_text = "Unknown"
+    genre_name = "Genre"
+    
     if genres:
-        if isinstance(genres, list):
-            genre_text = ", ".join(genres)
+        if isinstance(genres, list) and genres:
+            genre_text = ", ".join(filter(None, genres))  # Filter out None/empty values
             genre_name = "Genres" if len(genres) > 1 else "Genre"
-        else:
-            genre_text = str(genres)
-            genre_name = "Genre"
-        embed.add_field(name=genre_name, value=genre_text, inline=True)
+        elif isinstance(genres, str):
+            genre_text = genres
+    
+    embed.add_field(name=genre_name, value=genre_text, inline=True)
 
     # High-res thumbnail
     if cover_url:
