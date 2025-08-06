@@ -141,27 +141,26 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         print(f"Error parsing like date: {e}")
         like_timestamp = None
 
-    # Create base embed
     embed = discord.Embed(
         title=f"❤️ {liked_by} liked a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
         description=f"[{title}]({url})",
         color=0xfa5a02
     )
 
-    # Add fields
+    # First row: Artist, Tracks, Duration
     embed.add_field(name="Artist", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Dates in their own row
+    # Second row: Release Date, Like Date
     if release_timestamp:
         embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
-
-    # Genres in their own row
+    
+    # Add genres in same row as dates
     if genres:
         if isinstance(genres, list):
             genre_text = ", ".join(genres)
