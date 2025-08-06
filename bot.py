@@ -644,10 +644,6 @@ async def check_for_new_releases(bot, is_catchup=False):
 
             catch_up_posted = 0
             for like in likes:
-                if is_catchup and catch_up_posted >= MAX_CATCH_UP_ITEMS:
-                    logging.info(f"     ⏭️ Catch-up limit reached ({MAX_CATCH_UP_ITEMS})")
-                    break
-                    
                 try:
                     track_id = like.get("track_id")
                     if not track_id:
@@ -655,13 +651,19 @@ async def check_for_new_releases(bot, is_catchup=False):
                         continue
                     
                     like_id = str(track_id)
-                    like_activity_date = parse_datetime(like.get("release_date"))  # This is now the like date
-                    track_creation_date = parse_datetime(like.get("track_release_date"))  # Original track date
                     like_title = like.get("title", "Unknown")
                     
+                    # Get dates, using like_date as fallback for missing release date
+                    like_activity_date = parse_datetime(like.get("liked_date"))
+                    track_creation_date = parse_datetime(like.get("release_date")) or like_activity_date
+                    
+                    if not like_activity_date:
+                        logging.warning(f"     ⚠️ No like date for: {like_title}")
+                        continue
+
                     logging.info(f"     ❤️ Processing like: {like_title} (ID: {like_id})")
                     logging.info(f"          📅 Like activity date: {like_activity_date}")
-                    logging.info(f"          📅 Track creation date: {track_creation_date}")
+                    logging.info(f"          📅 Track creation date: {track_creation_date or 'Same as like date'}")
                     
                     # Check if already posted
                     if is_already_posted_like(artist["artist_id"], artist["guild_id"], like_id):

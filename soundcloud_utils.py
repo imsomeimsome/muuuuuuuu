@@ -373,17 +373,13 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not original:
                 continue
 
-            # Get timestamps and handle None values
             like_date = item.get("created_at")
-            track_release_date = original.get("created_at")
+            # Use like_date as fallback for track creation date
+            track_release_date = original.get("created_at") or like_date
 
-            # Skip if we can't determine when it was liked
+            # Skip if we don't have either date
             if not like_date:
                 continue
-
-            # Use like_date as fallback for track_release_date
-            if not track_release_date:
-                track_release_date = like_date
 
             likes.append({
                 "track_id": original.get("id"),
