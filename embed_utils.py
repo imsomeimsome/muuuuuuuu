@@ -42,17 +42,13 @@ def create_music_embed(
         description += f"**Release Type**\n{release_type}\n"
 
     # ✅ FIXED GENRES SECTION
+    genre_text = "Unknown"
     if genres:
-        if isinstance(genres, list):
-            genre_text = ", ".join(genres)
-        else:
-            genre_text = str(genres)
-        description += f"**Genres**\n{genre_text}\n"
-    else:
-        description += f"**Genres**\nNone\n"
-
-    if duration:
-        description += f"**Duration**\n{duration}\n"
+        if isinstance(genres, list) and genres:
+            genre_text = ", ".join(filter(None, genres))  # Filter out None/empty values
+        elif isinstance(genres, str):
+            genre_text = genres
+    description += f"**Genres**\n{genre_text}\n"
 
     description += f"**Tracks**\n{track_count}\n"
     description += f"**Features**\n{features or 'None'}\n"

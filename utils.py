@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 from dateutil.parser import isoparse
+import requests
 
 DB_PATH = "/data/artists.db"
 
@@ -130,23 +131,38 @@ def get_highest_quality_artwork(url: str) -> str:
         seen = set()
         variants = [x for x in variants if not (x in seen or seen.add(x))]
         
-        return variants[0]  # Return highest quality version
+        # Verify URL exists before returning
+        for variant in variants:
+            try:
+                response = requests.head(variant)
+                if response.status_code == 200:
+                    return variant
+            except:
+                continue
+                
+        return url  # Return original if no variants work
         
     # For Spotify URLs
     elif "i.scdn.co" in url:
-        # Try to get the highest resolution by modifying image dimensions
+        # Handle both old and new Spotify URL formats
         try:
-            # Extract base URL without dimensions
-            base_url = url.split('/image/')[0] + '/image/'
-            spotify_id = url.split('/')[-1]
+            if '/image/' in url:
+                base_url = url.split('/image/')[0] + '/image/'
+                spotify_id = url.split('/')[-1]
+            else:
+                base_url = url.rsplit('/', 1)[0] + '/'
+                spotify_id = url.split('/')[-1]
             
-            # Try different sizes (1000px, 640px, 300px)
             sizes = ['1000x1000', '640x640', '300x300']
             for size in sizes:
                 high_res = f"{base_url}{size}/{spotify_id}"
-                return high_res
-                
-        except Exception:
-            return url  # Fallback to original URL
+                try:
+                    response = requests.head(high_res)
+                    if response.status_code == 200:
+                        return high_res
+                except:
+                    continue
+        except:
+            pass
             
     return url  # Return original if no upgrades possible

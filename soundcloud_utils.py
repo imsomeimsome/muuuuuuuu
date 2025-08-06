@@ -597,12 +597,49 @@ def get_soundcloud_artist_id(url):
         return None
 
 def get_soundcloud_release_info(url):
-    """Main function for release checking."""
     try:
-        return get_release_info(url)
+        cache_key = f"sc_release:{url}"
+        cached = get_cache(cache_key)  # Use get_cache
+        if cached:
+            return json.loads(cached)
+
+        clean_url = clean_soundcloud_url(url)
+        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
+        response = safe_request(resolve_url, headers=HEADERS)
+        if not response:
+            raise ValueError("Request failed")
+
+        data = response.json()
+        track = data  # Track data is in the root response
+
+        # Extract genres from both genre field and tags
+        genres = []
+        if track.get('genre'):
+            genres.append(track['genre'])
+        # Add any additional genre tags
+        if track.get('tags'):
+            genres.extend([tag for tag in track['tags'].split() if 'genre:' in tag])
+
+        # Process the track data
+        info = {
+            'type': 'track',
+            'artist_name': track['user']['username'],
+            'title': track['title'],
+            'url': track['permalink_url'],
+            'release_date': track.get('created_at', ''),
+            'cover_url': track.get('artwork_url') or track['user'].get('avatar_url', ''),
+            'duration': format_duration(track.get('duration', 0)),
+            'features': extract_features(track['title']),
+            'genres': list(filter(None, genres)),  # Remove empty values
+            'repost': track.get('repost', False),
+            'track_count': 1
+        }
+
+        set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)  # Use set_cache
+        return info
+
     except Exception as e:
-        print(f"SoundCloud release info fetch failed: {e}")
-        return None
+        raise ValueError(f"Release info fetch failed: {e}")
 
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
