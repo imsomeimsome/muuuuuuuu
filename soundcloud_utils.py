@@ -509,7 +509,7 @@ def process_playlist(playlist_data):
 
     # Also check playlist-level genres/tags
     if playlist_data.get('genre'):
-        genres.add(playlist_data['genre'])
+        genres.add(playlist_data.get('genre'))
     if playlist_data.get('tags'):
         genres.update([
             tag.strip() for tag in playlist_data.get('tags', '').split() 
@@ -527,11 +527,11 @@ def process_playlist(playlist_data):
         'artist_name': playlist_data['user']['username'],
         'title': playlist_data['title'],
         'url': playlist_data['permalink_url'],
-        'release_date': playlist_data.get('created_at', '')[:10],
+        'release_date': playlist_data.get('created_at', ''),
         'cover_url': playlist_data.get('artwork_url') or playlist_data['user'].get('avatar_url', ''),
         'duration': format_duration(total_duration),
         'features': ', '.join(sorted(features)) if features else None,
-        'genres': sorted(list(genres)) if genres else None,  # Convert set to sorted list
+        'genres': sorted(list(genres)) if genres else ['Unknown'],  # Return list of genres or ['Unknown']
         'repost': False,
         'track_count': len(playlist_data['tracks'])
     }
