@@ -490,12 +490,37 @@ def process_playlist(playlist_data):
     features = set()
     genres = set()
 
+    # Process each track's genres and tags
     for track in playlist_data['tracks']:
+        # Add features from track titles
         features.update(extract_features(track['title']).split(', '))
+        
+        # Add direct genre
         if track.get('genre'):
             genres.add(track.get('genre'))
+            
+        # Add genre tags
+        if track.get('tags'):
+            genres.update([
+                tag.strip() for tag in track.get('tags', '').split() 
+                if 'genre:' in tag.lower() or 
+                any(g in tag.lower() for g in ['rap', 'hip-hop', 'trap', 'edm', 'electronic', 'rock'])
+            ])
 
+    # Also check playlist-level genres/tags
+    if playlist_data.get('genre'):
+        genres.add(playlist_data['genre'])
+    if playlist_data.get('tags'):
+        genres.update([
+            tag.strip() for tag in playlist_data.get('tags', '').split() 
+            if 'genre:' in tag.lower() or 
+            any(g in tag.lower() for g in ['rap', 'hip-hop', 'trap', 'edm', 'electronic', 'rock'])
+        ])
+
+    # Clean up sets
     features.discard('None')
+    genres.discard('None')
+    genres.discard('')
 
     return {
         'type': 'playlist',
@@ -505,8 +530,8 @@ def process_playlist(playlist_data):
         'release_date': playlist_data.get('created_at', '')[:10],
         'cover_url': playlist_data.get('artwork_url') or playlist_data['user'].get('avatar_url', ''),
         'duration': format_duration(total_duration),
-        'features': ', '.join(sorted(features)) if features else 'None',
-        'genres': sorted(genres),
+        'features': ', '.join(sorted(features)) if features else None,
+        'genres': sorted(list(genres)) if genres else None,  # Convert set to sorted list
         'repost': False,
         'track_count': len(playlist_data['tracks'])
     }
