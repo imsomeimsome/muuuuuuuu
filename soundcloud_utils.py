@@ -384,30 +384,33 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             # Handle genres for playlists/albums
             genres = []
             if original.get('track_count', 1) > 1:
-                # For playlists/albums, we need to fetch the full playlist data
                 try:
                     playlist_url = original.get('permalink_url')
                     if playlist_url:
-                        # Changed variable name to avoid conflict
                         playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
                             playlist_data = playlist_response.json()
-                            genre_counts = {}
-                            # Count genres from each track
-                            for track in playlist_data.get('tracks', []):
+                            
+                            # Get all tracks (not just the first few)
+                            all_tracks = playlist_data.get('tracks', [])
+                            if playlist_data.get('track_count', 0) > len(all_tracks):
+                                # Fetch remaining tracks if needed
+                                tracks_url = f"https://api-v2.soundcloud.com/playlists/{playlist_data['id']}/tracks?client_id={CLIENT_ID}"
+                                tracks_response = safe_request(tracks_url, headers=HEADERS)
+                                if tracks_response:
+                                    all_tracks = tracks_response.json()
+                            
+                            # Collect unique genres without counts
+                            unique_genres = set()
+                            for track in all_tracks:
                                 if track.get('genre'):
                                     genre = track['genre'].strip()
                                     if genre:
-                                        genre_counts[genre] = genre_counts.get(genre, 0) + 1
+                                        unique_genres.add(genre)
                             
-                            # Format genres with counts
-                            for genre, count in genre_counts.items():
-                                total_tracks = len(playlist_data.get('tracks', []))
-                                if count == total_tracks:
-                                    genres.append(genre)  # All tracks have this genre
-                                else:
-                                    genres.append(f"{genre} ({count} tracks)")
+                            genres = sorted(list(unique_genres))
+
                 except Exception as e:
                     logging.warning(f"Error fetching playlist genres: {e}")
                     if original.get('genre'):
