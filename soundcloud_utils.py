@@ -388,8 +388,9 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 try:
                     playlist_url = original.get('permalink_url')
                     if playlist_url:
-                        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
-                        playlist_response = safe_request(resolve_url, headers=HEADERS)
+                        # Changed variable name to avoid conflict
+                        playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
+                        playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
                             playlist_data = playlist_response.json()
                             genre_counts = {}
@@ -402,7 +403,8 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                             
                             # Format genres with counts
                             for genre, count in genre_counts.items():
-                                if count == len(playlist_data.get('tracks', [])):
+                                total_tracks = len(playlist_data.get('tracks', []))
+                                if count == total_tracks:
                                     genres.append(genre)  # All tracks have this genre
                                 else:
                                     genres.append(f"{genre} ({count} tracks)")
