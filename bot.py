@@ -691,13 +691,14 @@ async def check_for_new_releases(bot, is_catchup=False):
                             title=like["title"],
                             artist_name=like["artist_name"],
                             url=like["url"],
-                            release_date=like["release_date"],  # Original track date
-                            liked_date=like["liked_date"],      # When it was liked
+                            release_date=like["release_date"],
+                            liked_date=like["liked_date"],
                             cover_url=like["cover_url"],
                             features=like["features"],
                             track_count=like["track_count"],
                             duration=like["duration"],
-                            genres=like["genres"]
+                            genres=like["genres"],
+                            content_type=like.get("content_type") or "like"
 )
 
                         channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")

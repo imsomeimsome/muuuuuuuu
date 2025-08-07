@@ -374,6 +374,9 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not original:
                 continue
 
+            # Determine if it's a playlist or track
+            content_type = "playlist" if original.get('kind') == 'playlist' else "track"
+
             # Get timestamps with fallbacks
             like_date = item.get("created_at")
             if not like_date:
@@ -383,7 +386,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
 
             # Handle genres for playlists/albums
             genres = []
-            if original.get('track_count', 1) > 1:
+            if content_type == "playlist":
                 try:
                     playlist_url = original.get('permalink_url')
                     if playlist_url:
@@ -392,16 +395,10 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                         if playlist_response:
                             playlist_data = playlist_response.json()
                             
-                            # Get all tracks (not just the first few)
+                            # Get all tracks
                             all_tracks = playlist_data.get('tracks', [])
-                            if playlist_data.get('track_count', 0) > len(all_tracks):
-                                # Fetch remaining tracks if needed
-                                tracks_url = f"https://api-v2.soundcloud.com/playlists/{playlist_data['id']}/tracks?client_id={CLIENT_ID}"
-                                tracks_response = safe_request(tracks_url, headers=HEADERS)
-                                if tracks_response:
-                                    all_tracks = tracks_response.json()
                             
-                            # Collect unique genres without counts
+                            # Collect unique genres
                             unique_genres = set()
                             for track in all_tracks:
                                 if track.get('genre'):
@@ -409,12 +406,10 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                                     if genre:
                                         unique_genres.add(genre)
                             
-                            genres = sorted(list(unique_genres))
-
+                            genres = sorted(list(unique_genres)) if unique_genres else ["N/A"]
                 except Exception as e:
                     logging.warning(f"Error fetching playlist genres: {e}")
-                    if original.get('genre'):
-                        genres = [original['genre']]
+                    genres = ["N/A"]
             else:
                 # Single track genre handling
                 if original.get('genre'):
@@ -446,6 +441,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "track_count": original.get("track_count", 1),
                 "duration": duration,
                 "genres": genres,
+                "content_type": content_type,
                 "liked": True
             })
 

@@ -93,12 +93,15 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     """Create an embed for a liked track."""
     
     # Determine release type based on track count
-    release_type = "track"
-    if track_count:
-        if track_count >= 7:
-            release_type = "deluxe" if "deluxe" in title.lower() else "album"
-        elif track_count >= 2:
-            release_type = "EP"
+    if release_type == "playlist":
+        release_type = "playlist"
+    else:
+        release_type = "track"
+        if track_count:
+            if track_count >= 7:
+                release_type = "deluxe" if "deluxe" in title.lower() else "album"
+            elif track_count >= 2:
+                release_type = "EP"
 
     # Format duration to include hours if needed
     if duration and ":" in duration:
