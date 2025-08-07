@@ -341,10 +341,11 @@ def get_soundcloud_playlist_info(artist_url):
 
 
 def get_soundcloud_likes_info(artist_url, force_refresh=False):
+    """Fetch and process liked tracks/playlists from a SoundCloud user."""
     try:
         cache_key = f"likes:{artist_url}"
         if not force_refresh:
-            cached = get_cache(cache_key)  # Use get_cache
+            cached = get_cache(cache_key)
             if cached:
                 logging.info(f"✅ Cache hit for likes: {artist_url}")
                 return json.loads(cached)
@@ -373,30 +374,64 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not original:
                 continue
 
+            # Get timestamps with fallbacks
             like_date = item.get("created_at")
-            # Use like_date as fallback for track creation date
-            track_release_date = original.get("created_at") or like_date
-
-            # Skip if we don't have either date
             if not like_date:
                 continue
+            
+            track_release_date = original.get("created_at") or like_date
+
+            # Count genres from tracks if it's a playlist/album
+            genres = []
+            if original.get('track_count', 1) > 1 and original.get('tracks'):
+                genre_counts = {}
+                for track in original['tracks']:
+                    if track.get('genre'):
+                        genre = track['genre'].strip()
+                        if genre:
+                            genre_counts[genre] = genre_counts.get(genre, 0) + 1
+                
+                # Format genres with counts
+                for genre, count in genre_counts.items():
+                    if count == len(original['tracks']):
+                        genres.append(genre)
+                    else:
+                        genres.append(f"{genre} ({count} tracks)")
+            else:
+                # Single track genre handling
+                if original.get('genre'):
+                    genres = [original['genre']]
+
+            # Handle duration formatting
+            duration = None
+            if original.get('duration'):
+                ms = original['duration']
+                seconds = ms // 1000
+                minutes = seconds // 60
+                remaining_seconds = seconds % 60
+                if minutes >= 60:
+                    hours = minutes // 60
+                    minutes = minutes % 60
+                    duration = f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
+                else:
+                    duration = f"{minutes}:{remaining_seconds:02d}"
 
             likes.append({
                 "track_id": original.get("id"),
                 "title": original.get("title"),
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
-                "release_date": track_release_date,  # Now always has a value
+                "release_date": track_release_date,
                 "liked_date": like_date,
                 "cover_url": original.get("artwork_url"),
-                "features": None,
+                "features": extract_features(original.get("title", "")),
                 "track_count": original.get("track_count", 1),
-                "duration": format_duration(original.get("duration", 0)) if original.get("duration") else None,
-                "genres": [original.get("genre")] if original.get("genre") else [],
+                "duration": duration,
+                "genres": genres,
                 "liked": True
             })
 
-        set_cache(cache_key, json.dumps(likes), ttl=60)  # Reduced cache TTL to 60 seconds for likes
+        set_cache(cache_key, json.dumps(likes), ttl=60)  # Short cache TTL for likes
         return likes
 
     except Exception as e:
