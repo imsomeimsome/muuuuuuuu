@@ -138,13 +138,13 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         like_timestamp = None
 
     embed = discord.Embed(
-        title=f"❤️ {liked_by} liked a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
+        title=f"❤️ __{liked_by}__ liked a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
         description=f"[{title}]({url})",
         color=0xfa5a02
     )
 
     # First row: Artist, Tracks, Duration
-    embed.add_field(name="Artist", value=artist_name, inline=True)
+    embed.add_field(name="By", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
