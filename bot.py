@@ -698,7 +698,7 @@ async def check_for_new_releases(bot, is_catchup=False):
                             track_count=like["track_count"],
                             duration=like["duration"],
                             genres=like["genres"],
-                            release_type=like.get("release_type") or "like"
+                            content_type=like.get("content_type") or "like"
 )
 
                         channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")

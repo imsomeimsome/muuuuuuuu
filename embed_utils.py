@@ -89,11 +89,11 @@ def create_repost_embed(platform, reposted_by, original_artist, title, url,
 
 import discord
 
-def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None):
+def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None):
     """Create an embed for a liked track."""
     
     # Determine release type based on track count
-    if release_type == "playlist":
+    if content_type == "playlist":
         release_type = "playlist"
     else:
         release_type = "track"
