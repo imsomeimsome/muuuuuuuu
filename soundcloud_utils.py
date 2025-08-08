@@ -435,23 +435,23 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 else:
                     duration = f"{minutes}:{remaining_seconds:02d}"
 
-        likes.append({
-            "track_id": original.get("id"),
-            "title": original.get("title"),
-            "artist_name": original.get("user", {}).get("username"),
-            "url": original.get("permalink_url"),
-            "upload_date": original.get("created_at"),
-            "release_date": original.get("display_date") or original.get("created_at"),
-            "liked_date": like_date,
-            "cover_url": original.get("artwork_url"),
-            "features": extract_features(original.get("title", "")),
-            "track_count": original.get("track_count", 1),
-            "duration": duration,
-            "genres": genres,
-            "content_type": content_type,
-            "tracks_data": tracks_data if 'tracks_data' in locals() else None,  # Include tracks data
-            "liked": True
-        })
+            likes.append({
+                "track_id": original.get("id"),
+                "title": original.get("title"),
+                "artist_name": original.get("user", {}).get("username"),
+                "url": original.get("permalink_url"),
+                "upload_date": original.get("created_at"),
+                "release_date": original.get("display_date") or original.get("created_at"),
+                "liked_date": like_date,
+                "cover_url": original.get("artwork_url"),
+                "features": extract_features(original.get("title", "")),
+                "track_count": original.get("track_count", 1),
+                "duration": duration,
+                "genres": genres,
+                "content_type": content_type,
+                "tracks_data": tracks_data if 'tracks_data' in locals() else None,  # Include tracks data
+                "liked": True
+            })
 
         set_cache(cache_key, json.dumps(likes), ttl=60)  # Short cache TTL for likes
         return likes
