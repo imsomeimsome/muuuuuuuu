@@ -101,9 +101,46 @@ def create_repost_embed(platform, reposted_by, original_artist, title, url,
 
 import discord
 
-def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None):
+def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None, upload_date=None):
     """Create an embed for a liked track."""
     
+    # Enhanced release type detection
+    def determine_release_type(content_type, title, track_count, tracks_data=None):
+        # 1. Check for playlist type from API
+        if content_type == "playlist":
+            # Common keywords indicating type in title
+            title_lower = title.lower()
+            type_keywords = {
+                "album": ["album", "lp", "record"],
+                "EP": ["ep", "extended play"],
+                "mixtape": ["mixtape", "mix tape"],
+                "compilation": ["compilation", "various artists", "various", "va"],
+                "playlist": ["playlist", "mix", "selection", "picks", "favorites"]
+            }
+            
+            # Check title for type indicators
+            for type_name, keywords in type_keywords.items():
+                if any(keyword in title_lower for keyword in keywords):
+                    return type_name.lower()
+            
+            # 2. Check for multiple artists if tracks data available
+            if tracks_data:
+                artists = set(track.get('artist_name') for track in tracks_data)
+                if len(artists) > 1:
+                    return "playlist"
+            
+            # 3. Fallback to track count logic
+            if track_count:
+                if track_count >= 7:
+                    return "deluxe" if "deluxe" in title_lower else "album"
+                elif track_count >= 2:
+                    return "EP"
+                
+        return "track"
+
+    # Get release type
+    release_type = determine_release_type(content_type, title, track_count)
+
     # Determine release type based on track count
     if content_type == "playlist":
         release_type = "playlist"
@@ -140,6 +177,17 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     except Exception as e:
         print(f"Error parsing release date: {e}")
         release_timestamp = None
+
+    try:
+        upload_timestamp = None
+        if upload_date:
+            upload_timestamp = int(datetime.datetime.strptime(
+                upload_date.replace('Z', '+0000'), 
+                '%Y-%m-%dT%H:%M:%S%z'
+            ).timestamp())
+    except Exception as e:
+        print(f"Error parsing upload date: {e}")
+        upload_timestamp = None
         
     try:
         like_timestamp = None
@@ -158,7 +206,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         color=0xfa5a02
     )
 
-    # First row: Artist, Tracks, Duration
+    # First row: By, Tracks, Duration
     embed.add_field(name="By", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
@@ -170,6 +218,10 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
+
+    # Third row: Upload Date (if different from release date)
+    if upload_timestamp and upload_timestamp != release_timestamp:
+        embed.add_field(name="Uploaded", value=f"<t:{upload_timestamp}:R>", inline=True)
     
     # Always add genres field, even if empty
     genre_text = "Unknown"

@@ -374,8 +374,9 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not original:
                 continue
 
-            # Determine if it's a playlist or track
+            # Determine if it's a playlist or track and get tracks data
             content_type = "playlist" if original.get('kind') == 'playlist' else "track"
+            tracks_data = None
 
             # Get timestamps with fallbacks
             like_date = item.get("created_at")
@@ -384,7 +385,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             
             track_release_date = original.get("created_at") or like_date
 
-            # Handle genres for playlists/albums
+            # Handle genres and content type for playlists/albums
             genres = []
             if content_type == "playlist":
                 try:
@@ -394,21 +395,26 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
                             playlist_data = playlist_response.json()
+                            tracks_data = playlist_data.get('tracks', [])
                             
-                            # Get all tracks
-                            all_tracks = playlist_data.get('tracks', [])
+                            # Determine the actual release type
+                            content_type = determine_release_type(playlist_data, tracks_data)
                             
-                            # Collect unique genres
+                            # Get genres from all tracks
                             unique_genres = set()
-                            for track in all_tracks:
+                            for track in tracks_data:
                                 if track.get('genre'):
                                     genre = track['genre'].strip()
                                     if genre:
                                         unique_genres.add(genre)
                             
+                            # Also check playlist-level genre
+                            if playlist_data.get('genre'):
+                                unique_genres.add(playlist_data['genre'].strip())
+                            
                             genres = sorted(list(unique_genres)) if unique_genres else ["N/A"]
                 except Exception as e:
-                    logging.warning(f"Error fetching playlist genres: {e}")
+                    logging.warning(f"Error fetching playlist data: {e}")
                     genres = ["N/A"]
             else:
                 # Single track genre handling
@@ -429,21 +435,23 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 else:
                     duration = f"{minutes}:{remaining_seconds:02d}"
 
-            likes.append({
-                "track_id": original.get("id"),
-                "title": original.get("title"),
-                "artist_name": original.get("user", {}).get("username"),
-                "url": original.get("permalink_url"),
-                "release_date": track_release_date,
-                "liked_date": like_date,
-                "cover_url": original.get("artwork_url"),
-                "features": extract_features(original.get("title", "")),
-                "track_count": original.get("track_count", 1),
-                "duration": duration,
-                "genres": genres,
-                "content_type": content_type,
-                "liked": True
-            })
+        likes.append({
+            "track_id": original.get("id"),
+            "title": original.get("title"),
+            "artist_name": original.get("user", {}).get("username"),
+            "url": original.get("permalink_url"),
+            "upload_date": original.get("created_at"),
+            "release_date": original.get("display_date") or original.get("created_at"),
+            "liked_date": like_date,
+            "cover_url": original.get("artwork_url"),
+            "features": extract_features(original.get("title", "")),
+            "track_count": original.get("track_count", 1),
+            "duration": duration,
+            "genres": genres,
+            "content_type": content_type,
+            "tracks_data": tracks_data if 'tracks_data' in locals() else None,  # Include tracks data
+            "liked": True
+        })
 
         set_cache(cache_key, json.dumps(likes), ttl=60)  # Short cache TTL for likes
         return likes
@@ -859,3 +867,52 @@ def get_all_cache_keys():
     
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
+
+def determine_release_type(playlist_data, tracks_data):
+    """Determine release type with priority system.
+    1. Check API playlist type
+    2. Check title keywords
+    3. Check multiple artists
+    4. Fall back to track count
+    """
+    title = playlist_data.get('title', '').lower()
+    track_count = len(tracks_data) if tracks_data else 0
+
+    # 1. Check for API playlist type (if available)
+    playlist_type = playlist_data.get('playlist_type')
+    if playlist_type:
+        type_mapping = {
+            'album': 'album',
+            'ep': 'EP',
+            'compilation': 'compilation',
+            'single': 'single'
+        }
+        if playlist_type in type_mapping:
+            return type_mapping[playlist_type]
+
+    # 2. Check title keywords
+    title_indicators = {
+        'album': ['album', 'lp', 'record'],
+        'EP': ['ep', 'extended play'],
+        'mixtape': ['mixtape', 'mix tape'],
+        'compilation': ['compilation', 'various artists', 'va'],
+        'playlist': ['playlist', 'mix', 'selection', 'picks', 'favorites']
+    }
+    
+    for release_type, keywords in title_indicators.items():
+        if any(keyword in title for keyword in keywords):
+            return release_type.lower()
+
+    # 3. Check for multiple artists
+    if tracks_data:
+        artists = set(track.get('user', {}).get('username') for track in tracks_data)
+        if len(artists) > 1:
+            return 'playlist'
+
+    # 4. Fall back to track count logic
+    if track_count >= 7:
+        return 'deluxe' if 'deluxe' in title else 'album'
+    elif track_count >= 2:
+        return 'EP'
+    else:
+        return 'track'
