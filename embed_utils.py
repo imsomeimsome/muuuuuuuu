@@ -220,11 +220,11 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
     # Third row: Upload Date (if different from release date)
-    if upload_timestamp and upload_timestamp != release_timestamp:
+    if upload_timestamp: # and upload_timestamp != release_timestamp:
         embed.add_field(name="Uploaded", value=f"<t:{upload_timestamp}:R>", inline=True)
     
     # Always add genres field, even if empty
-    genre_text = "Unknown"
+    genre_text = "None"
     genre_name = "Genre"
     
     if genres:
