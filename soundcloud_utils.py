@@ -5,17 +5,49 @@ import time
 import sqlite3
 from urllib.parse import urlparse
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import logging
-from utils import get_cache, set_cache, delete_cache  # Import SQLite cache functions
+from utils import get_cache, set_cache, delete_cache
 import json
 from database_utils import DB_PATH
 
+class SoundCloudKeyManager:
+    def __init__(self):
+        self.api_keys = [
+            os.getenv("SOUNDCLOUD_CLIENT_ID"),
+            os.getenv("SOUNDCLOUD_CLIENT_ID_2"),
+            os.getenv("SOUNDCLOUD_CLIENT_ID_3"),
+            os.getenv("SOUNDCLOUD_CLIENT_ID_4")
+        ]
+        self.current_key_index = 0
+        self.key_cooldowns = {}  # Track when each key hits rate limit
+
+    def get_current_key(self):
+        """Get current working API key."""
+        return self.api_keys[self.current_key_index]
+
+    def rotate_key(self):
+        """Switch to next available API key."""
+        self.key_cooldowns[self.current_key_index] = datetime.now(timezone.utc) + timedelta(hours=12)
+        
+        # Find next available key
+        for i in range(len(self.api_keys)):
+            next_index = (self.current_key_index + i + 1) % len(self.api_keys)
+            if self.api_keys[next_index] and (
+                next_index not in self.key_cooldowns or 
+                datetime.now(timezone.utc) > self.key_cooldowns[next_index]
+            ):
+                self.current_key_index = next_index
+                return self.get_current_key()
+        
+        raise ValueError("No API keys available - all on cooldown")
+    
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
 load_dotenv()
-CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+key_manager = SoundCloudKeyManager()
+CLIENT_ID = key_manager.get_current_key()
 
 def resolve_url(url):
     url = clean_soundcloud_url(url)  # Normalize the URL
@@ -33,28 +65,44 @@ def resolve_url(url):
     return None
 
 def safe_request(url, headers=None, retries=3, timeout=10):
+    """Make a request with automatic key rotation on rate limits."""
     global CLIENT_ID
+        
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            
+            if response.status_code == 429:  # Rate limit hit
+                try:
+                    # Try rotating to a new key
+                    new_key = key_manager.rotate_key()
+                    # Update URL with new key
+                    url = url.replace(f"client_id={CLIENT_ID}", f"client_id={new_key}")
+                    CLIENT_ID = new_key
+                    logging.info("🔄 Rotated to new SoundCloud API key")
+                    continue  # Retry with new key
+                except ValueError:
+                    # No more keys available
+                    logging.error("❌ All SoundCloud API keys exhausted")
+                    return None
+                        
             if response.status_code == 403:
-                logging.warning(f"⚠️ Forbidden (403) for URL: {url}. Check rate limits or headers.")
+                logging.warning(f"⚠️ Forbidden (403) for URL: {url}")
                 return None
+                    
             if response.status_code == 404:
                 logging.warning(f"⚠️ 404 Not Found for URL: {url}")
                 return None
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 5))
-                logging.warning(f"⚠️ Rate limited. Retrying in {retry_after} seconds...")
-                time.sleep(retry_after)
-                continue
+                    
             response.raise_for_status()
             logging.info(f"✅ Successfully fetched URL: {url}")
             return response
+                
         except requests.RequestException as e:
             logging.error(f"❌ Request failed for URL {url}: {e}")
             if attempt < retries - 1:
                 time.sleep(2)
+                    
     return None
 
 
