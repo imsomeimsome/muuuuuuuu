@@ -3,24 +3,68 @@ import requests
 import re
 import time
 import sqlite3
+import asyncio
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 import logging
 from utils import get_cache, set_cache, delete_cache
 import json
-from database_utils import DB_PATH
+from database_utils import DB_PATH, get_channel
 
 class SoundCloudKeyManager:
-    def __init__(self):
+    def __init__(self, bot=None):
+        self.bot = bot  # Store bot reference for logging
         self.api_keys = [
             os.getenv("SOUNDCLOUD_CLIENT_ID"),
             os.getenv("SOUNDCLOUD_CLIENT_ID_2"),
-            os.getenv("SOUNDCLOUD_CLIENT_ID_3"),
-            os.getenv("SOUNDCLOUD_CLIENT_ID_4")
+            os.getenv("SOUNDCLOUD_CLIENT_ID_3")
+#            os.getenv("SOUNDCLOUD_CLIENT_ID_4")
         ]
         self.current_key_index = 0
         self.key_cooldowns = {}  # Track when each key hits rate limit
+
+    async def log_key_rotation(self, old_index, new_index):
+        """Log key rotation to Discord logs channel with status of all keys."""
+        if self.bot:
+            try:
+                now = datetime.now(timezone.utc)
+                status_lines = []
+
+                # Build status for each key
+                for i, key in enumerate(self.api_keys):
+                    if not key:
+                        status = "Not configured"
+                    elif i == new_index:
+                        status = "Currently in use"
+                    elif i in self.key_cooldowns:
+                        cooldown_time = int(self.key_cooldowns[i].timestamp())
+                        status = f"Cooldown until <t:{cooldown_time}:R>"
+                    else:
+                        status = "Ready for use"
+                    
+                    status_lines.append(f"ID {i+1}: {status}")
+
+                message = (
+                    "🔄 **SoundCloud API Key Status Update**\n"
+                    f"Switched from Key {old_index + 1} to Key {new_index + 1}\n\n"
+                    "**Current Key Status:**\n" + 
+                    "\n".join(status_lines)
+                )
+
+                # Send to all configured log channels
+                for guild in self.bot.guilds:
+                    channel_id = get_channel(str(guild.id), "logs")
+                    if channel_id:
+                        try:
+                            channel = self.bot.get_channel(int(channel_id))
+                            if channel:
+                                await channel.send(message)
+                        except Exception as e:
+                            logging.error(f"Failed to send key rotation log to guild {guild.id}: {e}")
+
+            except Exception as e:
+                logging.error(f"Failed to log key rotation: {e}")
 
     def get_current_key(self):
         """Get current working API key."""
@@ -28,7 +72,23 @@ class SoundCloudKeyManager:
 
     def rotate_key(self):
         """Switch to next available API key."""
-        self.key_cooldowns[self.current_key_index] = datetime.now(timezone.utc) + timedelta(hours=12)
+        old_index = self.current_key_index
+        self.key_cooldowns[old_index] = datetime.now(timezone.utc) + timedelta(hours=12)
+        
+        # Find next available key
+        for i in range(len(self.api_keys)):
+            next_index = (old_index + i + 1) % len(self.api_keys)
+            if self.api_keys[next_index] and (
+                next_index not in self.key_cooldowns or 
+                datetime.now(timezone.utc) > self.key_cooldowns[next_index]
+            ):
+                self.current_key_index = next_index
+                # Schedule Discord logging
+                if self.bot:
+                    asyncio.create_task(self.log_key_rotation(old_index, next_index))
+                return self.get_current_key()
+        
+        raise ValueError("No API keys available - all on cooldown")
         
         # Find next available key
         for i in range(len(self.api_keys)):
