@@ -132,12 +132,16 @@ def safe_request(url, headers=None, retries=3, timeout=10):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             
-            if response.status_code == 429:  # Rate limit hit
+            # Change this block to handle the specific rate limit message
+            if response.status_code == 429 or (
+                response.status_code == 401 and 
+                "rate/request limit" in response.text.lower()
+            ):
                 try:
                     # Try rotating to a new key
                     new_key = key_manager.rotate_key()
                     # Update URL with new key
-                    url = url.replace(f"client_id={CLIENT_ID}", f"client_id={new_key}")
+                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
                     CLIENT_ID = new_key
                     logging.info("🔄 Rotated to new SoundCloud API key")
                     continue  # Retry with new key
