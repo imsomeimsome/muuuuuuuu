@@ -47,7 +47,9 @@ from soundcloud_utils import (
     get_soundcloud_reposts,
     get_soundcloud_likes,
     get_soundcloud_reposts_info,
-    get_artist_info
+    get_artist_info,
+    init_key_manager,
+    key_manager
 )
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache
 from reset_artists import reset_tables
@@ -55,6 +57,7 @@ from tables import initialize_fresh_database, initialize_cache_table
 import sqlite3
 import signal
 import sys
+
 
 # ===== Below are the 2 commands to delete all saved data, use top one for a full wipe
 # initialize_fresh_database()
@@ -143,6 +146,7 @@ class MusicBot(commands.Bot):
             )
 
 bot = MusicBot()
+CLIENT_ID = init_key_manager(bot)
 
 # --- Decorators ---
 def require_registration(func):

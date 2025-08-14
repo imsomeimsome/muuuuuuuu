@@ -70,6 +70,7 @@ class SoundCloudKeyManager:
         """Get current working API key."""
         return self.api_keys[self.current_key_index]
 
+
     def rotate_key(self):
         """Switch to next available API key."""
         old_index = self.current_key_index
@@ -101,7 +102,13 @@ class SoundCloudKeyManager:
                 return self.get_current_key()
         
         raise ValueError("No API keys available - all on cooldown")
-    
+
+def init_key_manager(bot):
+    """Initialize the key manager with bot reference."""
+    global key_manager
+    key_manager = SoundCloudKeyManager(bot)
+    return key_manager.get_current_key()
+
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
@@ -132,41 +139,36 @@ def safe_request(url, headers=None, retries=3, timeout=10):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             
-            # Change this block to handle the specific rate limit message
-            if response.status_code == 429 or (
-                response.status_code == 401 and 
-                "rate/request limit" in response.text.lower()
-            ):
+            # Check both response code and error message
+            if (response.status_code in [401, 429] or 
+                (response.status_code == 200 and "rate/request limit" in response.text.lower())):
+                
                 try:
                     # Try rotating to a new key
                     new_key = key_manager.rotate_key()
-                    # Update URL with new key
+                    # Update URL and global CLIENT_ID
                     url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
                     CLIENT_ID = new_key
-                    logging.info("🔄 Rotated to new SoundCloud API key")
+                    logging.info(f"🔄 Rotating to new SoundCloud API key: {new_key[:8]}...")
+                    time.sleep(1)  # Brief pause before retry
                     continue  # Retry with new key
-                except ValueError:
-                    # No more keys available
-                    logging.error("❌ All SoundCloud API keys exhausted")
+                except ValueError as e:
+                    logging.error(f"❌ Key rotation failed: {e}")
                     return None
-                        
-            if response.status_code == 403:
-                logging.warning(f"⚠️ Forbidden (403) for URL: {url}")
+
+            # Check for other error codes
+            if response.status_code in [403, 404]:
+                logging.warning(f"⚠️ {response.status_code} error for URL: {url}")
                 return None
-                    
-            if response.status_code == 404:
-                logging.warning(f"⚠️ 404 Not Found for URL: {url}")
-                return None
-                    
+
             response.raise_for_status()
-            logging.info(f"✅ Successfully fetched URL: {url}")
             return response
-                
+
         except requests.RequestException as e:
             logging.error(f"❌ Request failed for URL {url}: {e}")
             if attempt < retries - 1:
                 time.sleep(2)
-                    
+                
     return None
 
 
