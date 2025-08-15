@@ -12,6 +12,22 @@ from utils import get_cache, set_cache, delete_cache
 import json
 from database_utils import DB_PATH, get_channel
 
+
+# At the top after imports
+load_dotenv()
+
+# Initialize global variables
+CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+key_manager = None
+
+def init_key_manager(bot):
+    """Initialize the key manager with bot reference."""
+    global key_manager, CLIENT_ID
+    key_manager = SoundCloudKeyManager(bot)
+    CLIENT_ID = key_manager.get_current_key()
+    return CLIENT_ID
+
+
 class SoundCloudKeyManager:
     def __init__(self, bot=None):
         self.bot = bot  # Store bot reference for logging
@@ -108,16 +124,7 @@ class SoundCloudKeyManager:
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
-load_dotenv()
-CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
-key_manager = None
 
-def init_key_manager(bot):
-    """Initialize the key manager with bot reference."""
-    global key_manager, CLIENT_ID
-    key_manager = SoundCloudKeyManager(bot)
-    CLIENT_ID = key_manager.get_current_key()
-    return CLIENT_ID
 
 
 def resolve_url(url):
@@ -158,12 +165,15 @@ def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
     global CLIENT_ID, key_manager
     
+    if not CLIENT_ID:
+        raise ValueError("No SoundCloud CLIENT_ID available")
+    
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             response_text = response.text.lower()
             
-            # Check for any type of rate limit response
+            # Check for rate limits
             is_rate_limited = (
                 response.status_code in [401, 429] or 
                 "rate/request limit" in response_text or
@@ -171,29 +181,21 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             )
             
             if is_rate_limited:
-                try:
-                    # Rotate to new key and update global CLIENT_ID
-                    new_key = key_manager.rotate_key()
-                    if new_key:
+                if key_manager:
+                    try:
+                        new_key = key_manager.rotate_key()
                         CLIENT_ID = new_key
-                        # Update URL with new key
                         url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                        logging.info("🔄 Rotating to new SoundCloud API key")
-                        # Brief pause before retry
+                        logging.info("🔄 Rotated to new SoundCloud API key")
                         time.sleep(1)
-                        continue  # Retry request with new key
-                    else:
-                        raise ValueError("No API keys available")
-                        
-                except ValueError as e:
-                    logging.error(f"❌ No more API keys available: {e}")
-                    raise Exception("All SoundCloud API keys exhausted")
+                        continue
+                    except ValueError as e:
+                        logging.error(f"❌ No more API keys available: {e}")
+                        raise
 
-            # Check for success
             if response.status_code == 200:
                 return response
 
-            # Other errors
             response.raise_for_status()
             
         except requests.RequestException as e:
@@ -202,8 +204,6 @@ def safe_request(url, headers=None, retries=3, timeout=10):
                 time.sleep(2)
                 continue
             raise
-            
-    return None
 
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
