@@ -131,47 +131,54 @@ def resolve_url(url):
         return data
     return None
 
+# In soundcloud_utils.py
 def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
-    global CLIENT_ID
-        
+    global CLIENT_ID, key_manager
+    
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
+            response_text = response.text.lower()
             
-            # Check both response code and error message
-            if (response.status_code in [401, 429] or 
-                (response.status_code == 200 and "rate/request limit" in response.text.lower())):
-                
+            # Check for any type of rate limit response
+            is_rate_limited = (
+                response.status_code in [401, 429] or
+                "rate/request limit" in response_text or
+                "retry will occur after:" in response_text
+            )
+            
+            if is_rate_limited:
                 try:
-                    # Try rotating to a new key
+                    # Rotate to new key
                     new_key = key_manager.rotate_key()
-                    # Update URL and global CLIENT_ID
-                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
                     CLIENT_ID = new_key
-                    logging.info(f"🔄 Rotating to new SoundCloud API key: {new_key[:8]}...")
+                    
+                    # Update URL with new key
+                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
+                    logging.info("🔄 Rotated to new SoundCloud API key")
                     time.sleep(1)  # Brief pause before retry
-                    continue  # Retry with new key
+                    continue  # Retry request with new key
+                    
                 except ValueError as e:
-                    logging.error(f"❌ Key rotation failed: {e}")
-                    return None
+                    logging.error(f"❌ No more API keys available: {e}")
+                    raise Exception("All SoundCloud API keys exhausted")
 
-            # Check for other error codes
-            if response.status_code in [403, 404]:
-                logging.warning(f"⚠️ {response.status_code} error for URL: {url}")
-                return None
+            # Check for success
+            if response.status_code == 200:
+                return response
 
+            # Other errors
             response.raise_for_status()
-            return response
-
+            
         except requests.RequestException as e:
-            logging.error(f"❌ Request failed for URL {url}: {e}")
+            logging.error(f"Request failed: {e}")
             if attempt < retries - 1:
                 time.sleep(2)
-                
+                continue
+            raise
+            
     return None
-
-
 
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
@@ -793,9 +800,10 @@ def get_soundcloud_artist_id(url):
         return None
 
 def get_soundcloud_release_info(url):
+    """Universal release info fetcher for tracks/playlists/artists."""
     try:
         cache_key = f"sc_release:{url}"
-        cached = get_cache(cache_key)  # Use get_cache
+        cached = get_cache(cache_key)
         if cached:
             return json.loads(cached)
 
@@ -806,32 +814,54 @@ def get_soundcloud_release_info(url):
             raise ValueError("Request failed")
 
         data = response.json()
-        track = data  # Track data is in the root response
 
-        # Extract genres from both genre field and tags
-        genres = []
-        if track.get('genre'):
-            genres.append(track['genre'])
-        # Add any additional genre tags
-        if track.get('tags'):
-            genres.extend([tag for tag in track['tags'].split() if 'genre:' in tag])
+        # Handle user profile differently
+        if data.get('kind') == 'user':
+            # Get user's latest tracks
+            user_id = data.get('id')
+            tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
+            tracks_response = safe_request(tracks_url, headers=HEADERS)
+            
+            if not tracks_response:
+                raise ValueError("No tracks found")
+                
+            tracks = tracks_response.json().get('collection', [])
+            if not tracks:
+                raise ValueError("No tracks available")
+                
+            latest_track = tracks[0]  # Get most recent track
+            
+            # Process track info
+            info = {
+                'type': 'track',
+                'artist_name': data['username'],
+                'title': latest_track['title'],
+                'url': latest_track['permalink_url'],
+                'release_date': latest_track['created_at'],
+                'cover_url': latest_track.get('artwork_url') or data.get('avatar_url'),
+                'duration': format_duration(latest_track.get('duration', 0)),
+                'features': extract_features(latest_track['title']),
+                'genres': [latest_track.get('genre')] if latest_track.get('genre') else [],
+                'repost': False,
+                'track_count': 1
+            }
+        else:
+            # Handle direct track/playlist data
+            info = {
+                'type': data.get('kind', 'unknown'),
+                'artist_name': data.get('user', {}).get('username'),
+                'title': data.get('title'),
+                'url': data.get('permalink_url'),
+                'release_date': data.get('created_at'),
+                'cover_url': data.get('artwork_url'),
+                'duration': format_duration(data.get('duration', 0)),
+                'features': extract_features(data.get('title', '')),
+                'genres': [data.get('genre')] if data.get('genre') else [],
+                'repost': False,
+                'track_count': 1
+            }
 
-        # Process the track data
-        info = {
-            'type': 'track',
-            'artist_name': track['user']['username'],
-            'title': track['title'],
-            'url': track['permalink_url'],
-            'release_date': track.get('created_at', ''),
-            'cover_url': track.get('artwork_url') or track['user'].get('avatar_url', ''),
-            'duration': format_duration(track.get('duration', 0)),
-            'features': extract_features(track['title']),
-            'genres': list(filter(None, genres)),  # Remove empty values
-            'repost': track.get('repost', False),
-            'track_count': 1
-        }
-
-        set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)  # Use set_cache
+        set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
         return info
 
     except Exception as e:
