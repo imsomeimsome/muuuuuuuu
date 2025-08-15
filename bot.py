@@ -106,15 +106,21 @@ async def log_summary(total_checked, new_releases, errors):
 
 logger = logging.getLogger("release_checker")
 
-# Helper to parse dates consistently
 def parse_date(date_str: str) -> datetime:
     """Handle multiple date formats consistently."""
     try:
         # Try ISO format first
         return parse_datetime(date_str)
     except:
-        # Try plain date format
-        return datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        try:
+            # Try plain date format with timezone
+            return datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        except:
+            # Try other common formats
+            dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")

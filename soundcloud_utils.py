@@ -103,32 +103,55 @@ class SoundCloudKeyManager:
         
         raise ValueError("No API keys available - all on cooldown")
 
-def init_key_manager(bot):
-    """Initialize the key manager with bot reference."""
-    global key_manager
-    key_manager = SoundCloudKeyManager(bot)
-    return key_manager.get_current_key()
+
 
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
 load_dotenv()
-key_manager = SoundCloudKeyManager()
-CLIENT_ID = key_manager.get_current_key()
+CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
+key_manager = None
+
+def init_key_manager(bot):
+    """Initialize the key manager with bot reference."""
+    global key_manager, CLIENT_ID
+    key_manager = SoundCloudKeyManager(bot)
+    CLIENT_ID = key_manager.get_current_key()
+    return CLIENT_ID
+
 
 def resolve_url(url):
+    """Resolve a SoundCloud URL to its API data."""
     url = clean_soundcloud_url(url)  # Normalize the URL
     cache_key = f"resolve:{url}"
-    cached = get_cache(cache_key)  # Use get_cache
+    cached = get_cache(cache_key)
     if cached:
         return json.loads(cached)
 
     resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
-    response = safe_request(resolve_endpoint)
-    if response and response.status_code == 200:
-        data = response.json()
-        set_cache(cache_key, json.dumps(data), ttl=3600)  # Use set_cache
-        return data
+    
+    # Try multiple times with key rotation
+    for attempt in range(3):
+        try:
+            response = safe_request(resolve_endpoint)
+            if response and response.status_code == 200:
+                data = response.json()
+                set_cache(cache_key, json.dumps(data), ttl=3600)  # Cache for 1 hour
+                return data
+                
+            # Handle rate limits in safe_request
+            if not response:
+                logging.warning(f"Failed to resolve URL (attempt {attempt + 1})")
+                time.sleep(2)
+                continue
+
+        except Exception as e:
+            logging.error(f"Error resolving URL: {e}")
+            if attempt < 2:  # Try again if not last attempt
+                time.sleep(2)
+                continue
+            break
+
     return None
 
 def safe_request(url, headers=None, retries=3, timeout=10):
