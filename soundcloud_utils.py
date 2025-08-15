@@ -131,7 +131,6 @@ def resolve_url(url):
         return data
     return None
 
-# In soundcloud_utils.py
 def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
     global CLIENT_ID, key_manager
@@ -143,23 +142,26 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             
             # Check for any type of rate limit response
             is_rate_limited = (
-                response.status_code in [401, 429] or
+                response.status_code in [401, 429] or 
                 "rate/request limit" in response_text or
                 "retry will occur after:" in response_text
             )
             
             if is_rate_limited:
                 try:
-                    # Rotate to new key
+                    # Rotate to new key and update global CLIENT_ID
                     new_key = key_manager.rotate_key()
-                    CLIENT_ID = new_key
-                    
-                    # Update URL with new key
-                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                    logging.info("🔄 Rotated to new SoundCloud API key")
-                    time.sleep(1)  # Brief pause before retry
-                    continue  # Retry request with new key
-                    
+                    if new_key:
+                        CLIENT_ID = new_key
+                        # Update URL with new key
+                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
+                        logging.info("🔄 Rotating to new SoundCloud API key")
+                        # Brief pause before retry
+                        time.sleep(1)
+                        continue  # Retry request with new key
+                    else:
+                        raise ValueError("No API keys available")
+                        
                 except ValueError as e:
                     logging.error(f"❌ No more API keys available: {e}")
                     raise Exception("All SoundCloud API keys exhausted")
