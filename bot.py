@@ -49,7 +49,8 @@ from soundcloud_utils import (
     get_soundcloud_reposts_info,
     get_artist_info,
     init_key_manager,
-    key_manager
+    key_manager,
+    CLIENT_ID as SC_CLIENT_ID
 )
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache
 from reset_artists import reset_tables
@@ -162,6 +163,9 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 CLIENT_ID = init_key_manager(bot) 
+
+if not CLIENT_ID:
+    logging.error("❌ No valid SoundCloud CLIENT_ID available")
 
 # --- Decorators ---
 def require_registration(func):
@@ -494,6 +498,8 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False):
     """Handle all SoundCloud-related checks."""
+    global CLIENT_ID
+
     errors = []
     soundcloud_counts = {
         "releases": 0,

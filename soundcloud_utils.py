@@ -25,7 +25,7 @@ def init_key_manager(bot):
     global key_manager, CLIENT_ID
     key_manager = SoundCloudKeyManager(bot)
     CLIENT_ID = key_manager.get_current_key()
-    logging.info(f"🔑 Initialized SoundCloud key manager with key: {CLIENT_ID[:8]}...")
+    logging.info(f"🔑 Initialized SoundCloud key manager")
     return CLIENT_ID
 
 
