@@ -161,7 +161,7 @@ class MusicBot(commands.Bot):
             )
 
 bot = MusicBot()
-CLIENT_ID = init_key_manager(bot)
+CLIENT_ID = init_key_manager(bot) 
 
 # --- Decorators ---
 def require_registration(func):

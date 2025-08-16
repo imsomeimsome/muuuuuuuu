@@ -25,6 +25,7 @@ def init_key_manager(bot):
     global key_manager, CLIENT_ID
     key_manager = SoundCloudKeyManager(bot)
     CLIENT_ID = key_manager.get_current_key()
+    logging.info(f"🔑 Initialized SoundCloud key manager with key: {CLIENT_ID[:8]}...")
     return CLIENT_ID
 
 
@@ -163,7 +164,7 @@ def resolve_url(url):
 
 def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
-    global CLIENT_ID, key_manager
+    global CLIENT_ID
     
     if not CLIENT_ID:
         raise ValueError("No SoundCloud CLIENT_ID available")
@@ -180,22 +181,22 @@ def safe_request(url, headers=None, retries=3, timeout=10):
                 "retry will occur after:" in response_text
             )
             
-            if is_rate_limited:
-                if key_manager:
-                    try:
-                        new_key = key_manager.rotate_key()
-                        CLIENT_ID = new_key
-                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                        logging.info("🔄 Rotated to new SoundCloud API key")
-                        time.sleep(1)
-                        continue
-                    except ValueError as e:
-                        logging.error(f"❌ No more API keys available: {e}")
-                        raise
+            if is_rate_limited and key_manager:
+                try:
+                    new_key = key_manager.rotate_key()
+                    CLIENT_ID = new_key
+                    # Update URL with new key
+                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
+                    logging.info("🔄 Rotated to new SoundCloud API key")
+                    time.sleep(1)
+                    continue
+                except ValueError as e:
+                    logging.error(f"❌ No more API keys available: {e}")
+                    raise
 
             if response.status_code == 200:
                 return response
-
+                
             response.raise_for_status()
             
         except requests.RequestException as e:
