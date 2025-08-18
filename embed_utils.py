@@ -78,28 +78,37 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
 
     return embed
 
-# In embed_utils.py
-def create_repost_embed(platform, reposted_by, original_artist, title, url,
-                        release_date, cover_url, features, track_count,
-                        duration, genres) -> discord.Embed:
+def create_repost_embed(platform, reposted_by, title, artist_name, url, release_date, reposted_date, cover_url, features, track_count, duration, genres):
+    """Create an embed for a reposted track."""
     embed = discord.Embed(
-        title=title,
-        url=url,
-        description=f"📢 Reposted by **{reposted_by}**",
-        color=discord.Color.orange()
+        title=f"📢 {reposted_by} reposted a track!",
+        description=f"[{title}]({url})",
+        color=0xfa5a02
     )
-    embed.set_author(name=f"By {original_artist}")
-    embed.set_thumbnail(url=cover_url or discord.Embed.Empty)
-    embed.add_field(name="Release Date", value=release_date, inline=True)
+    
+    embed.set_author(name=f"By {artist_name}")
+    
+    if cover_url:
+        embed.set_thumbnail(url=cover_url)
+        
+    if release_date:
+        embed.add_field(name="Release Date", value=release_date[:10], inline=True)
+        
+    if reposted_date:
+        embed.add_field(name="Reposted Date", value=reposted_date[:10], inline=True)
+        
     embed.add_field(name="Tracks", value=track_count or 1, inline=True)
-    embed.add_field(name="Duration", value=duration or "Unknown", inline=True)
+    
+    if duration:
+        embed.add_field(name="Duration", value=duration, inline=True)
+        
     if features:
         embed.add_field(name="Features", value=features, inline=False)
-    if genres:
-        embed.add_field(name="Genres", value=', '.join(genres), inline=False)
-    return embed
+        
+    if genres and len(genres) > 0:
+        embed.add_field(name="Genres", value=", ".join(genres), inline=False)
 
-import discord
+    return embed 
 
 def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None, upload_date=None):
     """Create an embed for a liked track."""

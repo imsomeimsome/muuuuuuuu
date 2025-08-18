@@ -536,12 +536,21 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     current_date = release_info.get("release_date")
                     if current_date:
                         should_post = False
-                        if not is_catchup and parse_date(current_date) > parse_date(last_date):
+                        # Fix datetime comparison for new releases
+                        if not is_catchup:
+                            try:
+                                current_dt = parse_date(current_date)
+                                last_dt = parse_date(last_date) if last_date else None
+                                
+                                if not last_dt or current_dt > last_dt:
+                                    should_post = True
+                                    logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info.get('title')}")
+                            except Exception as e:
+                                logging.error(f"     ❌ Error comparing dates: {e}")
+                                continue
+                        elif should_catch_up_content(current_date, last_date, shutdown_time):
                             should_post = True
-                            logging.info(f"     ✨ NEW RELEASE DETECTED!")
-                        elif is_catchup and should_catch_up_content(current_date, last_date, shutdown_time):
-                            should_post = True
-                            logging.info(f"     ✨ [CATCH-UP] NEW RELEASE DETECTED!")
+                            logging.info(f"     ✨ [CATCH-UP] NEW RELEASE DETECTED: {release_info.get('title')}")
 
                         if should_post:
                             logging.info(f"     📝 Posting release: {release_info.get('title')}")
@@ -555,13 +564,20 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                                 features=release_info["features"],
                                 track_count=release_info["track_count"],
                                 duration=release_info["duration"],
-                                genres=release_info["genres"]
+                                genres=release_info["genres"],
+                                repost=False
                             )
 
                             channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                             if channel:
                                 await channel.send(embed=embed)
-                                update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
+                                # Fix: Update both owner_id and guild_id
+                                update_last_release_date(
+                                    artist_id=artist_id,
+                                    owner_id=artist["owner_id"],
+                                    guild_id=artist["guild_id"],
+                                    new_date=current_date
+                                )
                                 soundcloud_counts["releases"] += 1
                                 if is_catchup:
                                     await asyncio.sleep(2)
@@ -581,7 +597,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     except ValueError:
                         logging.error("❌ No more API keys available")
                         break
-                raise
+                logging.error(f"     ❌ Error checking releases: {e}")
 
             # Check playlists if not rate limited
             if not retry_after:
