@@ -164,7 +164,7 @@ def resolve_url(url):
 
 def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
-    global CLIENT_ID
+    global CLIENT_ID, key_manager
     
     if not CLIENT_ID:
         raise ValueError("No SoundCloud CLIENT_ID available")
@@ -174,18 +174,18 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             response_text = response.text.lower()
             
-            # Check for rate limits
+            # Check for rate limits 
             is_rate_limited = (
-                response.status_code in [401, 429] or 
+                response.status_code in [401, 429] or
                 "rate/request limit" in response_text or
                 "retry will occur after:" in response_text
             )
             
-            if is_rate_limited and key_manager:
+            if is_rate_limited:
+                logging.warning(f"⚠️ Rate limit hit. Attempting key rotation...")
                 try:
                     new_key = key_manager.rotate_key()
                     CLIENT_ID = new_key
-                    # Update URL with new key
                     url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
                     logging.info("🔄 Rotated to new SoundCloud API key")
                     time.sleep(1)
@@ -202,10 +202,10 @@ def safe_request(url, headers=None, retries=3, timeout=10):
         except requests.RequestException as e:
             logging.error(f"Request failed: {e}")
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(2)  
                 continue
             raise
-
+        
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
