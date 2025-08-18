@@ -20,15 +20,6 @@ load_dotenv()
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 key_manager = None
 
-def init_key_manager(bot):
-    """Initialize the key manager with bot reference."""
-    global key_manager, CLIENT_ID
-    key_manager = SoundCloudKeyManager(bot)
-    CLIENT_ID = key_manager.get_current_key()
-    logging.info(f"🔑 Initialized SoundCloud key manager")
-    return CLIENT_ID
-
-
 class SoundCloudKeyManager:
     def __init__(self, bot=None):
         self.bot = bot  # Store bot reference for logging
@@ -40,6 +31,14 @@ class SoundCloudKeyManager:
         ]
         self.current_key_index = 0
         self.key_cooldowns = {}  # Track when each key hits rate limit
+
+def init_key_manager(bot):
+    """Initialize the key manager with bot reference."""
+    global key_manager, CLIENT_ID
+    key_manager = SoundCloudKeyManager(bot)
+    CLIENT_ID = key_manager.get_current_key()
+    logging.info(f"🔑 Initialized SoundCloud key manager")
+    return CLIENT_ID
 
     async def log_key_rotation(self, old_index, new_index):
         """Log key rotation to Discord logs channel with status of all keys."""
