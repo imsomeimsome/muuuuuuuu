@@ -32,13 +32,6 @@ class SoundCloudKeyManager:
         self.current_key_index = 0
         self.key_cooldowns = {}  # Track when each key hits rate limit
 
-def init_key_manager(bot):
-    """Initialize the key manager with bot reference."""
-    global key_manager, CLIENT_ID
-    key_manager = SoundCloudKeyManager(bot)
-    CLIENT_ID = key_manager.get_current_key()
-    logging.info(f"🔑 Initialized SoundCloud key manager")
-    return CLIENT_ID
 
     async def log_key_rotation(self, old_index, new_index):
         """Log key rotation to Discord logs channel with status of all keys."""
@@ -119,7 +112,12 @@ def init_key_manager(bot):
         
         raise ValueError("No API keys available - all on cooldown")
 
-
+def init_key_manager(bot):
+    """Initialize the key manager with bot reference."""
+    global key_manager, CLIENT_ID
+    key_manager = SoundCloudKeyManager(bot)
+    CLIENT_ID = key_manager.get_current_key()
+    return CLIENT_ID
 
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
