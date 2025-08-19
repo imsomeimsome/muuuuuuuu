@@ -8,6 +8,7 @@ import functools
 import logging
 import json
 from dateutil.parser import isoparse
+from dateutil.parser import parse as isoparse
 from discord.ext import tasks
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -113,28 +114,26 @@ def parse_date(date_str: str) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
     
     try:
-        # Try parsing ISO format with timezone
-        return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S%z')
+        # Handle microseconds format
+        if '.' in date_str:
+            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f%z')
+            return dt
     except ValueError:
         try:
-            # Try parsing ISO format without timezone
-            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
-            return dt.replace(tzinfo=timezone.utc)
+            # Try standard ISO format
+            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S%z')
+            return dt
         except ValueError:
             try:
-                # Try parsing just date
+                # Try date-only format
                 dt = datetime.strptime(date_str, '%Y-%m-%d')
                 return dt.replace(tzinfo=timezone.utc)
             except ValueError:
-                # Try parsing with microseconds
-                try:
-                    dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f%z')
-                    return dt
-                except ValueError:
-                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    return dt
+                # Last resort - try parsing with dateutil
+                dt = isoparse(date_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")

@@ -11,6 +11,7 @@ import logging
 from utils import get_cache, set_cache, delete_cache
 import json
 from database_utils import DB_PATH, get_channel
+from dateutil.parser import parse as isoparse
 
 
 # At the top after imports
@@ -779,17 +780,18 @@ def get_artist_release(artist_data):
 # --- Utility Functions ---
 
 def format_duration(ms):
+    """Convert milliseconds to formatted duration string."""
     if not ms:
         return None
     seconds = ms // 1000
     minutes = seconds // 60
     seconds = seconds % 60
+    if minutes >= 60:
+        hours = minutes // 60
+        minutes = minutes % 60
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
-def format_duration(milliseconds):
-    """Convert ms to mm:ss format."""
-    seconds = int(milliseconds / 1000)
-    return f"{seconds // 60}:{seconds % 60:02d}"
 
 def extract_features(title):
     """Extract featured artists from track titles."""
@@ -851,38 +853,28 @@ def get_soundcloud_release_info(url):
             return None
 
         data = response.json()
+        if not data:
+            logging.warning(f"⚠️ Empty response for URL: {url}")
+            return None
 
-        # Handle user profile
-        if data.get('kind') == 'user':
+        # Handle different response types
+        kind = data.get('kind')
+        if not kind:
+            logging.warning(f"⚠️ No 'kind' field in response for: {url}")
+            return None
+
+        if kind == 'user':
             user_id = data.get('id')
-            # Try multiple endpoints for tracks
-            endpoints = [
-                f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1",
-                f"https://api-v2.soundcloud.com/users/{user_id}/tracks/all?client_id={CLIENT_ID}&limit=1",
-                f"https://api-v2.soundcloud.com/profile/soundcloud:users:{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
-            ]
+            tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
+            tracks_response = safe_request(tracks_url)
             
-            tracks_response = None
-            for endpoint in endpoints:
-                try:
-                    tracks_response = safe_request(endpoint, headers=HEADERS)
-                    if tracks_response and tracks_response.status_code == 200:
-                        break
-                except:
-                    continue
-
-            if not tracks_response:
-                logging.warning(f"⚠️ No tracks found for {url}")
-                return None
-                
-            tracks = tracks_response.json().get('collection', [])
-            if not tracks:
-                logging.info(f"ℹ️ No tracks available for {url}")
+            if not tracks_response or tracks_response.status_code != 200:
+                # Return placeholder for no tracks
                 return {
                     'type': 'profile',
-                    'artist_name': data['username'],
+                    'artist_name': data.get('username', 'Unknown Artist'),
                     'title': 'No tracks yet',
-                    'url': data['permalink_url'],
+                    'url': data.get('permalink_url', url),
                     'release_date': datetime.now(timezone.utc).isoformat(),
                     'cover_url': data.get('avatar_url'),
                     'duration': None,
@@ -892,28 +884,33 @@ def get_soundcloud_release_info(url):
                     'track_count': 0
                 }
 
-            latest_track = tracks[0]
-            info = {
+            tracks = tracks_response.json().get('collection', [])
+            if not tracks:
+                return None
+
+            track = tracks[0]
+            return {
                 'type': 'track',
-                'artist_name': data['username'],
-                'title': latest_track['title'],
-                'url': latest_track['permalink_url'],
-                'release_date': latest_track['created_at'],
-                'cover_url': latest_track.get('artwork_url') or data.get('avatar_url'),
-                'duration': format_duration(latest_track.get('duration', 0)),
-                'features': extract_features(latest_track['title']),
-                'genres': [latest_track.get('genre')] if latest_track.get('genre') else [],
+                'artist_name': data.get('username', 'Unknown Artist'),
+                'title': track.get('title', 'Unknown Title'),
+                'url': track.get('permalink_url', url),
+                'release_date': track.get('created_at'),
+                'cover_url': track.get('artwork_url') or data.get('avatar_url'),
+                'duration': format_duration(track.get('duration', 0)),
+                'features': extract_features(track.get('title', '')),
+                'genres': [track.get('genre')] if track.get('genre') else [],
                 'repost': False,
                 'track_count': 1
             }
 
-            set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
-            return info
+        # Cache the result
+        set_cache(cache_key, json.dumps(data), ttl=CACHE_TTL)
+        return data
 
     except Exception as e:
         logging.error(f"Error fetching release info for {url}: {e}")
-        return None
-
+        raise ValueError(f"Release info fetch failed: {e}")
+    
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
     return extract_soundcloud_username(url)

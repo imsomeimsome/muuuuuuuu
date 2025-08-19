@@ -1,6 +1,7 @@
 import discord
-from utils import get_highest_quality_artwork
 import datetime
+from datetime import datetime, timezone, timedelta
+from utils import get_highest_quality_artwork
 
 def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features, track_count, duration, repost, genres=None, release_type=None, custom_color=None):
     """Create an embed for a music release."""
