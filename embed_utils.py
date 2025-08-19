@@ -34,7 +34,7 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
 
     # Convert timestamps for Discord's relative time format
     try:
-        release_timestamp = int(datetime.datetime.strptime(
+        release_timestamp = int(datetime.strptime(
             release_date.replace('Z', '+0000'), 
             '%Y-%m-%dT%H:%M:%S%z'
         ).timestamp())

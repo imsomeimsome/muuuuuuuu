@@ -8,7 +8,7 @@ import functools
 import logging
 import json
 from dateutil.parser import isoparse
-from dateutil.parser import parse as isoparse
+from dateutil.parser import parse as parse_datetime
 from discord.ext import tasks
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -112,28 +112,18 @@ def parse_date(date_str: str) -> datetime:
     """Handle multiple date formats consistently."""
     if not date_str:
         return datetime.min.replace(tzinfo=timezone.utc)
-    
+
     try:
-        # Handle microseconds format
-        if '.' in date_str:
-            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f%z')
-            return dt
+        return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
     except ValueError:
         try:
-            # Try standard ISO format
-            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S%z')
-            return dt
+            # Try just date
+            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            return dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            try:
-                # Try date-only format
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
-                return dt.replace(tzinfo=timezone.utc)
-            except ValueError:
-                # Last resort - try parsing with dateutil
-                dt = isoparse(date_str)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
+            # Last resort - parse with dateutil
+            dt = isoparse(date_str)
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -448,15 +438,29 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
                 # Handle release posting logic
                 should_post = False
                 if not is_catchup:
-                    if not last_date or parse_date(current_date) > parse_date(last_date):
-                        should_post = True
-                        logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
+                    try:
+                        current_dt = parse_date(current_date) if current_date else None
+                        last_dt = parse_date(last_date) if last_date else None
+                        
+                        if current_dt and (not last_dt or current_dt > last_dt):
+                            should_post = True
+                            logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
+                    except Exception as e:
+                        logging.error(f"     ❌ Error comparing dates: {e}")
+                        continue
                 elif should_catch_up_content(current_date, last_date, shutdown_time):
                     should_post = True
                     logging.info(f"     ✨ [CATCH-UP] NEW RELEASE DETECTED: {release_info['title']}")
 
                 if should_post:
                     logging.info(f"     📝 Posting release: {release_info['title']}")
+                    
+                    # Check if this exact release was already posted recently (within 24h)
+                    cache_key = f"posted_spotify:{artist_id}:{release_info['url']}"
+                    if get_cache(cache_key):
+                        logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
+                        continue
+
                     embed = create_music_embed(
                         platform="spotify",
                         artist_name=artist_name,
@@ -474,6 +478,8 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
                     if channel:
                         await channel.send(embed=embed)
                         update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
+                        # Cache this release to prevent duplicate posts
+                        set_cache(cache_key, "posted", ttl=86400)  # 24 hour TTL
                         spotify_releases += 1
                         if is_catchup:
                             await asyncio.sleep(2)  # Rate limit catch-up posts
@@ -541,13 +547,13 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     current_date = release_info.get("release_date")
                     if current_date:
                         should_post = False
-                        # Fix datetime comparison for new releases
                         if not is_catchup:
                             try:
+                                # Ensure both dates are timezone-aware datetime objects
                                 current_dt = parse_date(current_date)
-                                last_dt = parse_date(last_date) if last_date else None
+                                last_dt = parse_date(last_date) if last_date else datetime.min.replace(tzinfo=timezone.utc)
                                 
-                                if not last_dt or current_dt > last_dt:
+                                if current_dt > last_dt:
                                     should_post = True
                                     logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info.get('title')}")
                             except Exception as e:
@@ -559,6 +565,12 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
 
                         if should_post:
                             logging.info(f"     📝 Posting release: {release_info.get('title')}")
+                        
+                            cache_key = f"posted_sc:{artist_id}:{release_info['url']}"
+                            if get_cache(cache_key):
+                                logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
+                                continue                       
+                            
                             embed = create_music_embed(
                                 platform="soundcloud",
                                 artist_name=artist_name,
@@ -576,14 +588,16 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                             channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
                             if channel:
                                 await channel.send(embed=embed)
-                                # Fix: Update both owner_id and guild_id
                                 update_last_release_date(
                                     artist_id=artist_id,
                                     owner_id=artist["owner_id"],
                                     guild_id=artist["guild_id"],
                                     new_date=current_date
                                 )
+                                # Cache to prevent duplicates
+                                set_cache(cache_key, "posted", ttl=86400)
                                 soundcloud_counts["releases"] += 1
+
                                 if is_catchup:
                                     await asyncio.sleep(2)
                             else:
