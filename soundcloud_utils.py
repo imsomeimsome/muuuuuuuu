@@ -857,25 +857,22 @@ def get_soundcloud_release_info(url):
             logging.warning(f"⚠️ Empty response for URL: {url}")
             return None
 
-        # Handle different response types
-        kind = data.get('kind')
-        if not kind:
-            logging.warning(f"⚠️ No 'kind' field in response for: {url}")
-            return None
-
-        if kind == 'user':
+        # Handle user profile
+        if data.get('kind') == 'user':
             user_id = data.get('id')
             tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
             tracks_response = safe_request(tracks_url)
             
+            # Set a default datetime for 'no tracks' case
+            default_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S%z')
+            
             if not tracks_response or tracks_response.status_code != 200:
-                # Return placeholder for no tracks
                 return {
                     'type': 'profile',
                     'artist_name': data.get('username', 'Unknown Artist'),
                     'title': 'No tracks yet',
                     'url': data.get('permalink_url', url),
-                    'release_date': datetime.now(timezone.utc).isoformat(),
+                    'release_date': default_date,  # Use formatted default date
                     'cover_url': data.get('avatar_url'),
                     'duration': None,
                     'features': None,
@@ -889,12 +886,12 @@ def get_soundcloud_release_info(url):
                 return None
 
             track = tracks[0]
-            return {
+            result = {
                 'type': 'track',
                 'artist_name': data.get('username', 'Unknown Artist'),
                 'title': track.get('title', 'Unknown Title'),
                 'url': track.get('permalink_url', url),
-                'release_date': track.get('created_at'),
+                'release_date': track.get('created_at', default_date),  # Provide default
                 'cover_url': track.get('artwork_url') or data.get('avatar_url'),
                 'duration': format_duration(track.get('duration', 0)),
                 'features': extract_features(track.get('title', '')),
@@ -902,15 +899,15 @@ def get_soundcloud_release_info(url):
                 'repost': False,
                 'track_count': 1
             }
-
-        # Cache the result
-        set_cache(cache_key, json.dumps(data), ttl=CACHE_TTL)
-        return data
+            
+            # Cache the result
+            set_cache(cache_key, json.dumps(result), ttl=CACHE_TTL)
+            return result
 
     except Exception as e:
         logging.error(f"Error fetching release info for {url}: {e}")
         raise ValueError(f"Release info fetch failed: {e}")
-    
+
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
     return extract_soundcloud_username(url)
