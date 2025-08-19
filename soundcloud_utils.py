@@ -837,6 +837,7 @@ def get_soundcloud_artist_id(url):
         print(f"Error getting artist ID: {e}")
         return None
 
+# In soundcloud_utils.py
 def get_soundcloud_release_info(url):
     """Universal release info fetcher for tracks/playlists/artists."""
     try:
@@ -864,7 +865,7 @@ def get_soundcloud_release_info(url):
             tracks_response = safe_request(tracks_url)
             
             # Set a default datetime for 'no tracks' case
-            default_date = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S%z')
+            default_date = datetime.now(timezone.utc).isoformat()
             
             if not tracks_response or tracks_response.status_code != 200:
                 return {
@@ -872,7 +873,7 @@ def get_soundcloud_release_info(url):
                     'artist_name': data.get('username', 'Unknown Artist'),
                     'title': 'No tracks yet',
                     'url': data.get('permalink_url', url),
-                    'release_date': default_date,  # Use formatted default date
+                    'release_date': default_date,
                     'cover_url': data.get('avatar_url'),
                     'duration': None,
                     'features': None,
@@ -883,15 +884,21 @@ def get_soundcloud_release_info(url):
 
             tracks = tracks_response.json().get('collection', [])
             if not tracks:
+                logging.info(f"ℹ️ No tracks available for {url}")
                 return None
 
             track = tracks[0]
+            # Ensure we have a valid release date
+            release_date = track.get('created_at')
+            if not release_date:
+                release_date = default_date
+
             result = {
                 'type': 'track',
                 'artist_name': data.get('username', 'Unknown Artist'),
                 'title': track.get('title', 'Unknown Title'),
                 'url': track.get('permalink_url', url),
-                'release_date': track.get('created_at', default_date),  # Provide default
+                'release_date': release_date,
                 'cover_url': track.get('artwork_url') or data.get('avatar_url'),
                 'duration': format_duration(track.get('duration', 0)),
                 'features': extract_features(track.get('title', '')),
@@ -900,7 +907,6 @@ def get_soundcloud_release_info(url):
                 'track_count': 1
             }
             
-            # Cache the result
             set_cache(cache_key, json.dumps(result), ttl=CACHE_TTL)
             return result
 
