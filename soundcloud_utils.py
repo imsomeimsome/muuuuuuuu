@@ -606,9 +606,10 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
 
     
 def get_soundcloud_reposts_info(artist_url):
+    """Fetch and process reposts from a SoundCloud user."""
     try:
         cache_key = f"reposts:{artist_url}"
-        cached = get_cache(cache_key)  # Use get_cache
+        cached = get_cache(cache_key)
         if cached:
             return json.loads(cached)
 
@@ -618,6 +619,7 @@ def get_soundcloud_reposts_info(artist_url):
             return []
 
         user_id = resolved["id"]
+        # Try multiple repost endpoints
         endpoints = [
             f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=10",
             f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=10",
@@ -626,47 +628,55 @@ def get_soundcloud_reposts_info(artist_url):
         
         response = None
         for endpoint in endpoints:
-            response = safe_request(endpoint)
-            if response and response.status_code == 200:
-                break
-        
+            try:
+                response = safe_request(endpoint)
+                if response and response.status_code == 200:
+                    break
+            except Exception as e:
+                logging.debug(f"Failed endpoint {endpoint}: {e}")
+                continue
+
         if not response:
-            logging.warning(f"No reposts found for {artist_url} (tried all endpoints)")
+            logging.warning(f"⚠️ Could not fetch reposts from any endpoint for {artist_url}")
             return []
 
         data = response.json()
         reposts = []
 
         for item in data.get("collection", []):
-            original = item.get("track") or item.get("playlist")
-            if not original:
+            try:
+                original = item.get("track") or item.get("playlist")
+                if not original:
+                    continue
+
+                repost_date = item.get("created_at")
+                if not repost_date:
+                    continue
+
+                reposts.append({
+                    "track_id": str(original.get("id")),
+                    "title": original.get("title"),
+                    "artist_name": original.get("user", {}).get("username"),
+                    "url": original.get("permalink_url"),
+                    "release_date": original.get("created_at"),
+                    "reposted_date": repost_date,
+                    "cover_url": original.get("artwork_url"),
+                    "features": extract_features(original.get("title", "")),
+                    "track_count": original.get("track_count", 1),
+                    "duration": format_duration(original.get("duration", 0)),
+                    "genres": [original.get("genre")] if original.get("genre") else []
+                })
+            except Exception as e:
+                logging.warning(f"Error processing repost: {e}")
                 continue
 
-            repost_date = item.get("created_at")  # When the repost happened
-            track_release_date = original.get("created_at")  # Original track date
-
-            reposts.append({
-                "track_id": original.get("id"),
-                "type": "track" if item.get("type") == "track-repost" else "playlist",
-                "title": original.get("title"),
-                "artist_name": original.get("user", {}).get("username"),
-                "url": original.get("permalink_url"),
-                "release_date": repost_date,  # Use repost date
-                "track_release_date": track_release_date,  # Original track date
-                "cover_url": original.get("artwork_url"),
-                "features": None,
-                "track_count": original.get("track_count", 1),
-                "duration": format_duration(original.get("duration", 0)) if original.get("duration") else None,
-                "genres": [original.get("genre")] if original.get("genre") else [],
-                "repost": True
-            })
-
-        set_cache(cache_key, json.dumps(reposts), ttl=300)  # Use set_cache
+        set_cache(cache_key, json.dumps(reposts), ttl=300)
         return reposts
 
     except Exception as e:
         logging.error(f"Error fetching reposts for {artist_url}: {e}")
         return []
+    
 # --- Data Processing ---
 
 def process_track(track_data):
@@ -834,27 +844,52 @@ def get_soundcloud_release_info(url):
         resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
         response = safe_request(resolve_url, headers=HEADERS)
         if not response:
-            raise ValueError("Request failed")
+            logging.warning(f"⚠️ Could not resolve URL: {url}")
+            return None
 
         data = response.json()
 
-        # Handle user profile differently
+        # Handle user profile
         if data.get('kind') == 'user':
-            # Get user's latest tracks
             user_id = data.get('id')
-            tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
-            tracks_response = safe_request(tracks_url, headers=HEADERS)
+            # Try multiple endpoints for tracks
+            endpoints = [
+                f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1",
+                f"https://api-v2.soundcloud.com/users/{user_id}/tracks/all?client_id={CLIENT_ID}&limit=1",
+                f"https://api-v2.soundcloud.com/profile/soundcloud:users:{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
+            ]
             
+            tracks_response = None
+            for endpoint in endpoints:
+                try:
+                    tracks_response = safe_request(endpoint, headers=HEADERS)
+                    if tracks_response and tracks_response.status_code == 200:
+                        break
+                except:
+                    continue
+
             if not tracks_response:
-                raise ValueError("No tracks found")
+                logging.warning(f"⚠️ No tracks found for {url}")
+                return None
                 
             tracks = tracks_response.json().get('collection', [])
             if not tracks:
-                raise ValueError("No tracks available")
-                
-            latest_track = tracks[0]  # Get most recent track
-            
-            # Process track info
+                logging.info(f"ℹ️ No tracks available for {url}")
+                return {
+                    'type': 'profile',
+                    'artist_name': data['username'],
+                    'title': 'No tracks yet',
+                    'url': data['permalink_url'],
+                    'release_date': datetime.now(timezone.utc).isoformat(),
+                    'cover_url': data.get('avatar_url'),
+                    'duration': None,
+                    'features': None,
+                    'genres': [],
+                    'repost': False,
+                    'track_count': 0
+                }
+
+            latest_track = tracks[0]
             info = {
                 'type': 'track',
                 'artist_name': data['username'],
@@ -868,27 +903,13 @@ def get_soundcloud_release_info(url):
                 'repost': False,
                 'track_count': 1
             }
-        else:
-            # Handle direct track/playlist data
-            info = {
-                'type': data.get('kind', 'unknown'),
-                'artist_name': data.get('user', {}).get('username'),
-                'title': data.get('title'),
-                'url': data.get('permalink_url'),
-                'release_date': data.get('created_at'),
-                'cover_url': data.get('artwork_url'),
-                'duration': format_duration(data.get('duration', 0)),
-                'features': extract_features(data.get('title', '')),
-                'genres': [data.get('genre')] if data.get('genre') else [],
-                'repost': False,
-                'track_count': 1
-            }
 
-        set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
-        return info
+            set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
+            return info
 
     except Exception as e:
-        raise ValueError(f"Release info fetch failed: {e}")
+        logging.error(f"Error fetching release info for {url}: {e}")
+        return None
 
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
