@@ -113,22 +113,28 @@ def parse_date(date_str: str) -> datetime:
         return datetime.min.replace(tzinfo=timezone.utc)
     
     try:
-        # Try parsing with timezone info
-        dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except:
+        # Try parsing ISO format with timezone
+        return datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S%z')
+    except ValueError:
         try:
-            # Handle plain date format
-            dt = datetime.strptime(date_str, '%Y-%m-%d')
+            # Try parsing ISO format without timezone
+            dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
             return dt.replace(tzinfo=timezone.utc)
-        except:
-            # Last resort - try parsing with dateutil
-            dt = parse_datetime(date_str)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
+        except ValueError:
+            try:
+                # Try parsing just date
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                return dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                # Try parsing with microseconds
+                try:
+                    dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f%z')
+                    return dt
+                except ValueError:
+                    dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")

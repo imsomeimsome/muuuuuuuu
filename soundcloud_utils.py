@@ -436,9 +436,9 @@ def get_release_info(url):
 def get_soundcloud_playlist_info(artist_url):
     try:
         cache_key = f"playlists:{artist_url}"
-        cached = get_cache(cache_key)  # Use get_cache
+        cached = get_cache(cache_key)
         if cached:
-            return cached
+            return json.loads(cached) if isinstance(cached, str) else cached
 
         resolved = get_artist_info(artist_url)
         user_id = resolved.get("id")
@@ -448,7 +448,8 @@ def get_soundcloud_playlist_info(artist_url):
         url = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response or response.status_code != 200:
-            raise ValueError(f"Failed to fetch playlists for {artist_url}")
+            logging.warning(f"No playlists found for {artist_url}")
+            return None
 
         data = response.json()
         playlists = data.get("collection", [])
@@ -457,15 +458,16 @@ def get_soundcloud_playlist_info(artist_url):
             return None
 
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
-        tracks = [
-            {
-                "id": track.get("id"),
-                "title": track.get("title"),
-                "duration": track.get("duration"),
-                "order": index
-            }
-            for index, track in enumerate(latest_playlist.get("tracks", []))
-        ]
+        tracks = []
+        
+        for index, track in enumerate(latest_playlist.get("tracks", [])):
+            if isinstance(track, dict):  # Ensure track is a dictionary
+                tracks.append({
+                    "id": str(track.get("id")),
+                    "title": str(track.get("title")),
+                    "duration": track.get("duration"),
+                    "order": index
+                })
 
         result = {
             "title": latest_playlist.get("title"),
@@ -477,10 +479,11 @@ def get_soundcloud_playlist_info(artist_url):
             "tracks": tracks
         }
 
-        set_cache(cache_key, json.dumps(result), ttl=300)  # Use set_cache
+        set_cache(cache_key, json.dumps(result), ttl=300)
         return result
+
     except Exception as e:
-        logging.error(f"Error fetching playlists for {artist_url}: {e}")
+        logging.error(f"Error checking playlists: {e}")
         return None
 
 
