@@ -80,25 +80,27 @@ class SoundCloudKeyManager:
         """Get current working API key."""
         return self.api_keys[self.current_key_index]
 
-
     def rotate_key(self):
         """Switch to next available API key."""
         old_index = self.current_key_index
         self.key_cooldowns[old_index] = datetime.now(timezone.utc) + timedelta(hours=12)
         
-        # Find next available key
-        for i in range(len(self.api_keys)):
-            next_index = (old_index + i + 1) % len(self.api_keys)
+        # Try each key in sequence
+        for _ in range(len(self.api_keys)):
+            next_index = (self.current_key_index + 1) % len(self.api_keys)
+            # Check if next key exists and isn't on cooldown
             if self.api_keys[next_index] and (
                 next_index not in self.key_cooldowns or 
                 datetime.now(timezone.utc) > self.key_cooldowns[next_index]
             ):
                 self.current_key_index = next_index
-                # Schedule Discord logging
+                new_key = self.get_current_key()
+                # Log the rotation
                 if self.bot:
                     asyncio.create_task(self.log_key_rotation(old_index, next_index))
-                return self.get_current_key()
-        
+                return new_key
+            self.current_key_index = next_index  # Move to next key even if it fails
+            
         raise ValueError("No API keys available - all on cooldown")
         
         # Find next available key
@@ -170,26 +172,27 @@ def safe_request(url, headers=None, retries=3, timeout=10):
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
-            response_text = response.text.lower()
             
             # Check for rate limits 
             is_rate_limited = (
                 response.status_code in [401, 429] or
-                "rate/request limit" in response_text or
-                "retry will occur after:" in response_text
+                "rate/request limit" in response.text.lower() or
+                "retry will occur after:" in response.text.lower()
             )
             
             if is_rate_limited:
-                logging.warning(f"⚠️ Rate limit hit. Attempting key rotation...")
+                logging.warning(f"⚠️ Rate limit hit for key {CLIENT_ID[:8]}...")
                 try:
                     new_key = key_manager.rotate_key()
-                    CLIENT_ID = new_key
-                    url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                    logging.info("🔄 Rotated to new SoundCloud API key")
-                    time.sleep(1)
-                    continue
+                    if new_key:
+                        CLIENT_ID = new_key
+                        logging.info(f"🔄 Rotated to new key: {new_key[:8]}...")
+                        # Update URL with new key
+                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
+                        time.sleep(1)
+                        continue
                 except ValueError as e:
-                    logging.error(f"❌ No more API keys available: {e}")
+                    logging.error(f"❌ Key rotation failed: {e}")
                     raise
 
             if response.status_code == 200:
@@ -198,9 +201,18 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             response.raise_for_status()
             
         except requests.RequestException as e:
+            if "rate" in str(e).lower():
+                try:
+                    new_key = key_manager.rotate_key()
+                    if new_key:
+                        CLIENT_ID = new_key
+                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
+                        continue
+                except ValueError:
+                    pass
             logging.error(f"Request failed: {e}")
             if attempt < retries - 1:
-                time.sleep(2)  
+                time.sleep(2)
                 continue
             raise
         
