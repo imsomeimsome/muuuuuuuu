@@ -112,18 +112,27 @@ def parse_date(date_str: str) -> datetime:
     """Handle multiple date formats consistently."""
     if not date_str:
         return datetime.min.replace(tzinfo=timezone.utc)
-
+    
     try:
-        return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+        # Try parsing with timezone
+        dt = datetime.strptime(date_str.replace('Z', '+0000'), '%Y-%m-%dT%H:%M:%S%z')
+        return dt
     except ValueError:
         try:
-            # Try just date
+            # Try parsing just the date
             dt = datetime.strptime(date_str, '%Y-%m-%d')
             return dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            # Last resort - parse with dateutil
-            dt = isoparse(date_str)
-            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+            try:
+                # Try parsing with microseconds
+                dt = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S.%f%z')
+                return dt
+            except ValueError:
+                # Last resort - parse with dateutil and ensure timezone
+                dt = isoparse(date_str)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")

@@ -180,7 +180,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     try:
         release_timestamp = None
         if release_date:
-            release_timestamp = int(datetime.datetime.strptime(
+            release_timestamp = int(datetime.strptime(
                 release_date.replace('Z', '+0000'), 
                 '%Y-%m-%dT%H:%M:%S%z'
             ).timestamp())
@@ -191,7 +191,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     try:
         upload_timestamp = None
         if upload_date:
-            upload_timestamp = int(datetime.datetime.strptime(
+            upload_timestamp = int(datetime.strptime(
                 upload_date.replace('Z', '+0000'), 
                 '%Y-%m-%dT%H:%M:%S%z'
             ).timestamp())
@@ -202,7 +202,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     try:
         like_timestamp = None
         if liked_date:
-            like_timestamp = int(datetime.datetime.strptime(
+            like_timestamp = int(datetime.strptime(
                 liked_date.replace('Z', '+0000'),
                 '%Y-%m-%dT%H:%M:%S%z'
             ).timestamp())
