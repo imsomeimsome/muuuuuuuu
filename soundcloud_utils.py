@@ -169,11 +169,12 @@ def safe_request(url, headers=None, retries=3, timeout=10):
     if not CLIENT_ID:
         raise ValueError("No SoundCloud CLIENT_ID available")
     
+    original_url = url
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
             
-            # Check for rate limits 
+            # Enhanced rate limit detection
             is_rate_limited = (
                 response.status_code in [401, 429] or
                 "rate/request limit" in response.text.lower() or
@@ -187,35 +188,27 @@ def safe_request(url, headers=None, retries=3, timeout=10):
                     if new_key:
                         CLIENT_ID = new_key
                         logging.info(f"🔄 Rotated to new key: {new_key[:8]}...")
-                        # Update URL with new key
-                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                        time.sleep(1)
+                        # Update URL with new key and retry
+                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', original_url)
+                        time.sleep(1)  # Small delay between retries
                         continue
                 except ValueError as e:
                     logging.error(f"❌ Key rotation failed: {e}")
-                    raise
+                    break  # All keys are on cooldown
 
             if response.status_code == 200:
                 return response
                 
             response.raise_for_status()
             
-        except requests.RequestException as e:
-            if "rate" in str(e).lower():
-                try:
-                    new_key = key_manager.rotate_key()
-                    if new_key:
-                        CLIENT_ID = new_key
-                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', url)
-                        continue
-                except ValueError:
-                    pass
-            logging.error(f"Request failed: {e}")
+        except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(2)  # Add delay between retries
                 continue
             raise
-        
+    
+    return None
+
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
