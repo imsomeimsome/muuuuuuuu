@@ -182,18 +182,24 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             )
             
             if is_rate_limited:
-                logging.warning(f"⚠️ Rate limit hit for key {CLIENT_ID[:8]}...")
+                # Detect platform from URL
+                platform = "Unknown"
+                if "api.spotify.com" in url:
+                    platform = "Spotify"
+                elif "api-v2.soundcloud.com" in url:
+                    platform = "SoundCloud"
+                
+                logging.warning(f"⚠️ {platform} Rate limit hit for key {CLIENT_ID[:8]}...")
                 try:
                     new_key = key_manager.rotate_key()
                     if new_key:
                         CLIENT_ID = new_key
-                        logging.info(f"🔄 Rotated to new key: {new_key[:8]}...")
-                        # Update URL with new key and retry
+                        logging.info(f"🔄 {platform}: Rotated to new key: {new_key[:8]}...")
                         url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', original_url)
-                        time.sleep(1)  # Small delay between retries
+                        time.sleep(1)
                         continue
                 except ValueError as e:
-                    logging.error(f"❌ Key rotation failed: {e}")
+                    logging.error(f"❌ {platform}: Key rotation failed: {e}")
                     break  # All keys are on cooldown
 
             if response.status_code == 200:
@@ -203,7 +209,7 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2)  # Add delay between retries
+                time.sleep(2)
                 continue
             raise
     
