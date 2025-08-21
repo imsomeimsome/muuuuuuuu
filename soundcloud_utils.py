@@ -1113,49 +1113,38 @@ logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
 
 def determine_release_type(playlist_data, tracks_data):
     """Determine release type with priority system.
-    1. Check API playlist type
+    1. Check native SoundCloud kind
     2. Check title keywords
-    3. Check multiple artists
-    4. Fall back to track count
+    3. Check track count as last resort
     """
-    title = playlist_data.get('title', '').lower()
-    track_count = len(tracks_data) if tracks_data else 0
-
-    # 1. Check for API playlist type (if available)
-    playlist_type = playlist_data.get('playlist_type')
-    if playlist_type:
-        type_mapping = {
-            'album': 'album',
-            'ep': 'EP',
-            'compilation': 'compilation',
-            'single': 'single'
-        }
-        if playlist_type in type_mapping:
-            return type_mapping[playlist_type]
+    # 1. First check SoundCloud's native kind
+    if playlist_data.get('kind') == 'playlist':
+        # Only override if explicit album/EP indicators exist
+        title = playlist_data.get('title', '').lower()
+        if any(kw in title for kw in ['album', 'lp', 'record']):
+            return 'album'
+        elif any(kw in title for kw in ['ep', 'extended play']):
+            return 'EP'
+        else:
+            return 'playlist'  # Default to playlist if that's what SoundCloud says it is
 
     # 2. Check title keywords
     title_indicators = {
         'album': ['album', 'lp', 'record'],
         'EP': ['ep', 'extended play'],
         'mixtape': ['mixtape', 'mix tape'],
-        'compilation': ['compilation', 'various artists', 'va'],
-        'playlist': ['playlist', 'mix', 'selection', 'picks', 'favorites']
+        'compilation': ['compilation', 'various artists', 'va']
     }
     
     for release_type, keywords in title_indicators.items():
         if any(keyword in title for keyword in keywords):
             return release_type.lower()
 
-    # 3. Check for multiple artists
-    if tracks_data:
-        artists = set(track.get('user', {}).get('username') for track in tracks_data)
-        if len(artists) > 1:
-            return 'playlist'
-
-    # 4. Fall back to track count logic
+    # 3. Only use track count as last resort if no other indicators exist
+    track_count = len(tracks_data) if tracks_data else 0
     if track_count >= 7:
         return 'deluxe' if 'deluxe' in title else 'album'
     elif track_count >= 2:
         return 'EP'
-    else:
-        return 'track'
+    
+    return 'track'
