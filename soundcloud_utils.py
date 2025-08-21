@@ -533,9 +533,50 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if not original:
                 continue
 
-            # Determine if it's a playlist or track and get tracks data
-            content_type = "playlist" if original.get('kind') == 'playlist' else "track"
+            # Determine if it's a playlist/album and get tracks data
+            content_type = "track"
             tracks_data = None
+            if original.get('kind') == 'playlist':
+                try:
+                    playlist_url = original.get('permalink_url')
+                    if playlist_url:
+                        playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
+                        playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
+                        if playlist_response:
+                            playlist_data = playlist_response.json()
+                            tracks_data = playlist_data.get('tracks', [])
+                            
+                            # More accurate release type detection
+                            title = original.get('title', '').lower()
+                            track_count = len(tracks_data) if tracks_data else 0
+                            
+                            # Check specific keywords first
+                            if any(kw in title for kw in ['album', 'lp', 'record']):
+                                content_type = "album"
+                            elif any(kw in title for kw in ['ep', 'extended play']):
+                                content_type = "EP"
+                            elif any(kw in title for kw in ['mixtape', 'mix tape']):
+                                content_type = "mixtape"
+                            # Check track count if no keywords found
+                            elif track_count >= 7:
+                                content_type = "album"
+                            elif track_count >= 2:
+                                content_type = "EP"
+                            # Finally check for playlist indicators
+                            elif any(kw in title for kw in ['playlist', 'mix', 'selection', 'picks']):
+                                content_type = "playlist"
+                            
+                            # Additional checks for compilation vs album
+                            if content_type in ["album", "EP"]:
+                                # Check for multiple artists
+                                artists = set(track.get('user', {}).get('username') for track in tracks_data)
+                                if len(artists) > 1:
+                                    content_type = "compilation"
+
+                except Exception as e:
+                    logging.warning(f"Error fetching playlist data: {e}")
+                    content_type = "playlist"  # Default to playlist if fetch fails
+
 
             # Get timestamps with fallbacks
             like_date = item.get("created_at")
