@@ -1359,6 +1359,53 @@ async def reset_bot_command(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Failed to reset bot: {e}")
 
+@bot.tree.command(name="forceremove", description="Admin: Force remove an artist from tracking using their URL")
+@app_commands.default_permissions(administrator=True)
+async def forceremove_command(interaction: discord.Interaction, url: str):
+    """Force remove an artist from tracking using their platform URL."""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # Determine platform and get ID from URL
+        if "spotify.com" in url:
+            artist_id = url.split("/")[-1].split("?")[0]
+            platform = "spotify"
+        elif "soundcloud.com" in url:
+            artist_id = url.split("/")[-1].split("?")[0]
+            platform = "soundcloud"
+        else:
+            await interaction.followup.send("❌ Invalid URL. Must be a Spotify or SoundCloud URL.")
+            return
+
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # Get artist info first for logging
+            cursor.execute(
+                "SELECT artist_name, platform FROM artists WHERE artist_id = ? AND platform = ?", 
+                (artist_id, platform)
+            )
+            result = cursor.fetchone()
+            
+            if result:
+                artist_name, platform = result
+                # Delete the artist
+                cursor.execute(
+                    "DELETE FROM artists WHERE artist_id = ? AND platform = ?", 
+                    (artist_id, platform)
+                )
+                conn.commit()
+                
+                await interaction.followup.send(
+                    f"✅ Force removed {artist_name} ({platform}) with URL: {url}"
+                )
+                await bot.log_event(
+                    f"🗑️ {interaction.user.name} force removed {artist_name} ({platform})"
+                )
+            else:
+                await interaction.followup.send(f"❌ No artist found with URL: {url}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+
 if __name__ == "__main__":
     # Initialize SQLite cache table
     initialize_cache_table()
