@@ -2,52 +2,36 @@ import discord
 import datetime
 from datetime import datetime, timezone, timedelta
 from utils import get_highest_quality_artwork
+import logging
 
-def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features, track_count, duration, repost, genres=None, release_type=None, custom_color=None):
+def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features, track_count, duration, repost, genres=None, content_type=None, custom_color=None):
     """Create an embed for a music release."""
-    # Platform color
-    platform_color = 0x1DB954 if platform == "spotify" else 0xfa5a02
-    embed_color = int(custom_color, 16) if custom_color else platform_color
-
-    # Determine release type
-    if release_type == "playlist":
-        release_type = "playlist"
+    
+    # Determine release type based on track count and title
+    release_type = "track"
+    if content_type:
+        release_type = content_type
     else:
-        release_type = "track"
         if track_count:
             if track_count >= 7:
                 release_type = "deluxe" if "deluxe" in title.lower() else "album"
             elif track_count >= 2:
                 release_type = "EP"
-
-    # Release type emoji
-    emoji = {
-        "album": "💿",
-        "deluxe": "💿",
-        "EP": "🎶",
-        "track": "🎵",
-        "playlist": "📑"
-    }.get(release_type.lower(), "🎵")
-
-    if repost:
-        emoji += " 📢"
-
-    # Convert timestamps for Discord's relative time format
-    try:
-        release_timestamp = int(datetime.strptime(
-            release_date.replace('Z', '+0000'), 
-            '%Y-%m-%dT%H:%M:%S%z'
-        ).timestamp())
-    except Exception as e:
-        print(f"Error parsing release date: {e}")
-        release_timestamp = None
-
-    # Create embed with consistent style
-    embed = discord.Embed(
-        title=f"{emoji} __{artist_name}__ released a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
-        description=f"[{title}]({url})",
-        color=embed_color
-    )
+    
+    # Create base embed
+    if platform.lower() == "spotify":
+        embed = discord.Embed(
+            title=f"🎵 {artist_name} released a {release_type}!",
+            description=f"[{title}]({url})",
+            color=0x1DB954  # Spotify green
+        )
+    else:
+        # Keep existing SoundCloud embed format
+        embed = discord.Embed(
+            title=f"🎵 {artist_name} released a {release_type}!",
+            description=f"[{title}]({url})",
+            color=0xfa5a02  # SoundCloud orange
+        )
 
     # Add fields in consistent order
     embed.add_field(name="By", value=artist_name, inline=True)
@@ -56,23 +40,27 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Release date with Discord timestamp
-    if release_timestamp:
-        embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+    # Add release date
+    try:
+        if release_date:
+            release_timestamp = int(datetime.strptime(
+                release_date.replace('Z', '+0000'), 
+                '%Y-%m-%dT%H:%M:%S%z'
+            ).timestamp())
+            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+    except Exception as e:
+        logging.error(f"Error parsing release date: {e}")
 
-    # Format genres with proper casing and quotes
+    # Add genre if available
     if genres:
-        genre_list = []
         if isinstance(genres, list):
-            genre_list = [f"'{g.title()}'" for g in genres if g]
-        elif isinstance(genres, str):
-            genre_list = [f"'{genres.title()}'"]
-        
-        genre_name = "Genres" if len(genre_list) > 1 else "Genre"
-        if genre_list:
-            embed.add_field(name=genre_name, value=", ".join(genre_list), inline=True)
+            genre_text = ', '.join(filter(None, genres))
+        else:
+            genre_text = str(genres)
+        if genre_text and genre_text.lower() != "none":
+            embed.add_field(name="Genre", value=genre_text, inline=True)
 
-    # High-res thumbnail
+    # Set thumbnail if available
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)

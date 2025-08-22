@@ -16,28 +16,32 @@ import time
 from spotipy.exceptions import SpotifyException
 
 def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
+    """Make a Spotify API call with error handling and retries."""
     for attempt in range(retries):
         try:
             return callable_fn(*args, **kwargs)
         except SpotifyException as e:
             if e.http_status == 429 and 'Retry-After' in e.headers:
                 wait = int(e.headers['Retry-After'])
-                print(f"Rate limited by Spotify. Retrying in {wait} seconds...")
+                logging.warning(f"Rate limited by Spotify. Retrying in {wait} seconds...")
                 time.sleep(wait)
                 continue
-            if e.http_status and 500 <= e.http_status < 600:
-                # server error, retry
-                print(f"Spotify temporary error: {e}")
+            elif "invalid_client" in str(e).lower():
+                logging.error("❌ Invalid Spotify client credentials")
+                raise ValueError("Invalid Spotify credentials - please check your .env file") 
+            elif e.http_status and 500 <= e.http_status < 600:
+                logging.warning(f"Spotify server error: {e}")
                 if attempt < retries - 1:
                     time.sleep(delay)
                     continue
-            print(f"Spotify API error: {e}")
+            logging.error(f"Spotify API error: {e}")
             break
         except Exception as e:
-            print(f"Unexpected Spotify error: {e}")
+            logging.error(f"Unexpected Spotify error: {e}")
             if attempt < retries - 1:
                 time.sleep(delay)
                 continue
+            break
     return None
 
 # Spotify API client setup

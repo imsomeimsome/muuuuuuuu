@@ -1113,34 +1113,25 @@ logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
 
 def determine_release_type(playlist_data, tracks_data):
     """Determine release type with priority system.
-    1. Check native SoundCloud kind
-    2. Check title keywords
-    3. Check track count as last resort
+    1. Check title keywords first
+    2. Check SoundCloud native kind
+    3. Use track count as last resort
     """
-    # 1. First check SoundCloud's native kind
+    title = playlist_data.get('title', '').lower()
+
+    # 1. Check title keywords first - most reliable indicator
+    if 'mixtape' in title or 'mix tape' in title:
+        return 'mixtape'
+    elif any(kw in title for kw in ['ep', 'extended play']):
+        return 'EP'
+    elif any(kw in title for kw in ['album', 'lp', 'record']):
+        return 'album'
+
+    # 2. Check SoundCloud's kind - respect playlist designation
     if playlist_data.get('kind') == 'playlist':
-        # Only override if explicit album/EP indicators exist
-        title = playlist_data.get('title', '').lower()
-        if any(kw in title for kw in ['album', 'lp', 'record']):
-            return 'album'
-        elif any(kw in title for kw in ['ep', 'extended play']):
-            return 'EP'
-        else:
-            return 'playlist'  # Default to playlist if that's what SoundCloud says it is
+        return 'playlist'
 
-    # 2. Check title keywords
-    title_indicators = {
-        'album': ['album', 'lp', 'record'],
-        'EP': ['ep', 'extended play'],
-        'mixtape': ['mixtape', 'mix tape'],
-        'compilation': ['compilation', 'various artists', 'va']
-    }
-    
-    for release_type, keywords in title_indicators.items():
-        if any(keyword in title for keyword in keywords):
-            return release_type.lower()
-
-    # 3. Only use track count as last resort if no other indicators exist
+    # 3. Track count as last resort
     track_count = len(tracks_data) if tracks_data else 0
     if track_count >= 7:
         return 'deluxe' if 'deluxe' in title else 'album'

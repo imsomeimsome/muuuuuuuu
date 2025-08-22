@@ -423,15 +423,14 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
         try:
             artist_name = artist.get("artist_name", "unknown")
             artist_id = artist.get("artist_id")
-            artist_url = artist.get("artist_url")
             last_date = artist.get("last_release_date")
 
             logging.info(f"🟢 Checking {artist_name}")
-            
+
             try:
                 latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
                 if not latest_album_id:
-                    logging.info(f"     ⚠️ No releases found for {artist_name}")
+                    logging.info(f"     ⏳ No new releases found for {artist_name}")
                     continue
 
                 release_info = await run_blocking(get_spotify_release_info, latest_album_id)
@@ -441,72 +440,61 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
 
                 current_date = release_info.get("release_date")
                 if not current_date:
-                    logging.info(f"     ⚠️ No release date found for {artist_name}")
                     continue
 
-                # Handle release posting logic
-                should_post = False
-                if not is_catchup:
-                    try:
-                        current_dt = parse_date(current_date) if current_date else None
-                        last_dt = parse_date(last_date) if last_date else None
-                        
-                        if current_dt and (not last_dt or current_dt > last_dt):
-                            should_post = True
-                            logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
-                    except Exception as e:
-                        logging.error(f"     ❌ Error comparing dates: {e}")
-                        continue
-                elif should_catch_up_content(current_date, last_date, shutdown_time):
-                    should_post = True
-                    logging.info(f"     ✨ [CATCH-UP] NEW RELEASE DETECTED: {release_info['title']}")
+                # Always show the last release date for context
+                if last_date:
+                    logging.info(f"     🕒 Last release: {release_info['title']} ({current_date})")
 
-                if should_post:
-                    logging.info(f"     📝 Posting release: {release_info['title']}")
+                # Compare dates
+                try:
+                    current_dt = parse_date(current_date)
+                    last_dt = parse_date(last_date) if last_date else datetime.min.replace(tzinfo=timezone.utc)
                     
-                    # Check if this exact release was already posted recently (within 24h)
-                    cache_key = f"posted_spotify:{artist_id}:{release_info['url']}"
-                    if get_cache(cache_key):
-                        logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
-                        continue
+                    if current_dt > last_dt:
+                        logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
+                        
+                        # Check for duplicate posts
+                        cache_key = f"posted_spotify:{artist_id}:{latest_album_id}"
+                        if get_cache(cache_key):
+                            logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
+                            continue
+                            
+                        # Create and send embed
+                        embed = create_music_embed(
+                            platform="spotify",
+                            artist_name=artist_name,
+                            title=release_info["title"],
+                            url=release_info["url"],
+                            release_date=current_date,
+                            cover_url=release_info["cover_url"],
+                            features=release_info.get("features"),
+                            track_count=release_info.get("track_count"),
+                            duration=release_info.get("duration"),
+                            genres=release_info.get("genres", []),
+                            repost=False
+                        )
 
-                    embed = create_music_embed(
-                        platform="spotify",
-                        artist_name=artist_name,
-                        title=release_info["title"],
-                        url=release_info["url"],
-                        release_date=release_info["release_date"],
-                        cover_url=release_info["cover_url"],
-                        features=release_info["features"],
-                        track_count=release_info["track_count"],
-                        duration=release_info["duration"],
-                        genres=release_info["genres"]
-                    )
-
-                    channel = await get_release_channel(guild_id=artist["guild_id"], platform="spotify")
-                    if channel:
-                        await channel.send(embed=embed)
-                        update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
-                        # Cache this release to prevent duplicate posts
-                        set_cache(cache_key, "posted", ttl=86400)  # 24 hour TTL
-                        spotify_releases += 1
-                        if is_catchup:
-                            await asyncio.sleep(2)  # Rate limit catch-up posts
-                    else:
-                        logging.warning(f"     ⚠️ No channel configured for {artist['platform']}")
-                else:
-                    logging.info(f"     ⏳ No new releases found for {artist_name}")
+                        channel = await get_release_channel(guild_id=artist["guild_id"], platform="spotify")
+                        if channel:
+                            await channel.send(embed=embed)
+                            update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
+                            set_cache(cache_key, "posted", ttl=86400)
+                            spotify_releases += 1
+                except Exception as e:
+                    logging.error(f"     ❌ Error comparing dates: {e}")
+                    continue
 
             except Exception as e:
-                logging.error(f"     ❌ Error processing release: {e}")
+                logging.error(f"     ❌ Error checking releases: {e}")
+                errors.append({"type": "Spotify", "message": str(e)})
                 continue
 
         except Exception as e:
-            errors.append({"type": "Spotify Check", "message": str(e)})
-            logging.error(f"❌ Error checking {artist_name}: {e}")
+            logging.error(f"❌ Error checking Spotify artist {artist_name}: {e}")
+            errors.append({"type": "Spotify", "message": str(e)})
+            continue
 
-    logging.info(f"✅ Found {spotify_releases} new Spotify releases")
-    logging.info("=" * 50)
     return spotify_releases, errors
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False):
