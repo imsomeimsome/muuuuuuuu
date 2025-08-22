@@ -42,11 +42,27 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
 
     # Add release date
     try:
+        release_timestamp = None
         if release_date:
-            release_timestamp = int(datetime.strptime(
-                release_date.replace('Z', '+0000'), 
-                '%Y-%m-%dT%H:%M:%S%z'
-            ).timestamp())
+            rd = release_date
+            try:
+                # Standard full datetime
+                if 'T' in rd:
+                    rd_norm = rd.replace('Z', '+0000')
+                    for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+                        try:
+                            release_timestamp = int(datetime.strptime(rd_norm, fmt).timestamp())
+                            break
+                        except ValueError:
+                            continue
+                if release_timestamp is None:
+                    # Date-only fallback
+                    dt = datetime.strptime(rd[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                    release_timestamp = int(dt.timestamp())
+            except Exception as e:
+                logging.warning(f"Error parsing release date '{release_date}': {e}")
+                release_timestamp = None
+        if release_timestamp:
             embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     except Exception as e:
         logging.error(f"Error parsing release date: {e}")

@@ -12,6 +12,7 @@ from utils import get_cache, set_cache, delete_cache
 import json
 from database_utils import DB_PATH, get_channel
 from dateutil.parser import parse as isoparse
+from functools import lru_cache
 
 
 # At the top after imports
@@ -890,81 +891,77 @@ def get_soundcloud_artist_id(url):
         return None
 
 # In soundcloud_utils.py
+@lru_cache(maxsize=512)
+def _cached_resolve(url: str):
+    return resolve_url(url)
+
 def get_soundcloud_release_info(url):
-    """Universal release info fetcher for tracks/playlists/artists."""
-    try:
-        cache_key = f"sc_release:{url}"
-        cached = get_cache(cache_key)
-        if cached:
+    """
+    Resolve any SoundCloud URL (track / playlist / user profile) into a normalized release dict.
+    Adds fallback for user profiles with empty initial track collections.
+    """
+    cache_key = f"sc_release:{url}"
+    cached = get_cache(cache_key)
+    if cached:
+        try:
             return json.loads(cached)
+        except Exception:
+            pass  # Corrupt cache entry -> rebuild
 
-        clean_url = clean_soundcloud_url(url)
-        resolve_url = f"https://api-v2.soundcloud.com/resolve?url={clean_url}&client_id={CLIENT_ID}"
-        response = safe_request(resolve_url, headers=HEADERS)
-        if not response:
-            logging.warning(f"⚠️ Could not resolve URL: {url}")
+    try:
+        resolved = _cached_resolve(url)
+        if not resolved:
+            logging.warning(f"Resolve failed for {url}")
             return None
 
-        data = response.json()
-        if not data:
-            logging.warning(f"⚠️ Empty response for URL: {url}")
+        kind = resolved.get("kind")
+        info = None
+
+        if kind == "track":
+            info = process_track(resolved)
+
+        elif kind == "playlist":
+            # Ensure 'tracks' key present (sometimes truncated)
+            if not resolved.get("tracks"):
+                # Refetch full playlist if needed
+                playlist_api = f"https://api-v2.soundcloud.com/playlists/{resolved.get('id')}?client_id={CLIENT_ID}"
+                full_resp = safe_request(playlist_api, headers=HEADERS)
+                if full_resp and full_resp.status_code == 200:
+                    resolved = full_resp.json()
+            info = process_playlist(resolved)
+
+        elif kind == "user":
+            # First attempt: helper
+            info = get_artist_release(resolved)
+
+            # Fallback if helper returned None
+            if not info:
+                user_id = resolved.get("id")
+                if user_id:
+                    tracks_url = (
+                        f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
+                        f"?client_id={CLIENT_ID}&limit=1&linked_partitioning=1&representation=full"
+                    )
+                    resp = safe_request(tracks_url, headers=HEADERS)
+                    if resp:
+                        data = resp.json()
+                        tracks = data.get('collection', data if isinstance(data, list) else [])
+                        if tracks:
+                            info = process_track(tracks[0])
+                if not info:
+                    logging.info(f"ℹ️ No tracks available after fallback for {url}")
+                    return None
+        else:
+            logging.warning(f"Unsupported content kind '{kind}' for {url}")
             return None
 
-        # Handle user profile
-        if data.get('kind') == 'user':
-            user_id = data.get('id')
-            tracks_url = f"https://api-v2.soundcloud.com/users/{user_id}/tracks?client_id={CLIENT_ID}&limit=1"
-            tracks_response = safe_request(tracks_url)
-            
-            # Set a default datetime for 'no tracks' case
-            default_date = datetime.now(timezone.utc).isoformat()
-            
-            if not tracks_response or tracks_response.status_code != 200:
-                return {
-                    'type': 'profile',
-                    'artist_name': data.get('username', 'Unknown Artist'),
-                    'title': 'No tracks yet',
-                    'url': data.get('permalink_url', url),
-                    'release_date': default_date,
-                    'cover_url': data.get('avatar_url'),
-                    'duration': None,
-                    'features': None,
-                    'genres': [],
-                    'repost': False,
-                    'track_count': 0
-                }
-
-            tracks = tracks_response.json().get('collection', [])
-            if not tracks:
-                logging.info(f"ℹ️ No tracks available for {url}")
-                return None
-
-            track = tracks[0]
-            # Ensure we have a valid release date
-            release_date = track.get('created_at')
-            if not release_date:
-                release_date = default_date
-
-            result = {
-                'type': 'track',
-                'artist_name': data.get('username', 'Unknown Artist'),
-                'title': track.get('title', 'Unknown Title'),
-                'url': track.get('permalink_url', url),
-                'release_date': release_date,
-                'cover_url': track.get('artwork_url') or data.get('avatar_url'),
-                'duration': format_duration(track.get('duration', 0)),
-                'features': extract_features(track.get('title', '')),
-                'genres': [track.get('genre')] if track.get('genre') else [],
-                'repost': False,
-                'track_count': 1
-            }
-            
-            set_cache(cache_key, json.dumps(result), ttl=CACHE_TTL)
-            return result
+        if info:
+            set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
+        return info
 
     except Exception as e:
         logging.error(f"Error fetching release info for {url}: {e}")
-        raise ValueError(f"Release info fetch failed: {e}")
+        return None
 
 def extract_soundcloud_id(url):
     """Alias for extract_soundcloud_username, for compatibility."""
@@ -1113,25 +1110,34 @@ logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
 
 def determine_release_type(playlist_data, tracks_data):
     """Determine release type with priority system.
-    1. Check title keywords first
-    2. Check SoundCloud native kind
-    3. Use track count as last resort
+    1. Check native SoundCloud kind
+    2. Check title keywords
+    3. Check track count as last resort
     """
-    title = playlist_data.get('title', '').lower()
+    # 1. First check SoundCloud's native kind
+    if (kind := playlist_data.get('kind')) == 'playlist':
+        # Only override if explicit album/EP indicators exist
+        title = playlist_data.get('title', '').lower()
+        if any(kw in title for kw in ['album', 'lp', 'record']):
+            return 'album'
+        elif any(kw in title for kw in ['ep', 'extended play']):
+            return 'EP'
+        else:
+            return 'playlist'  # Default to playlist if that's what SoundCloud says it is
 
-    # 1. Check title keywords first - most reliable indicator
-    if 'mixtape' in title or 'mix tape' in title:
-        return 'mixtape'
-    elif any(kw in title for kw in ['ep', 'extended play']):
-        return 'EP'
-    elif any(kw in title for kw in ['album', 'lp', 'record']):
-        return 'album'
+    # 2. Check title keywords
+    title_indicators = {
+        'album': ['album', 'lp', 'record'],
+        'EP': ['ep', 'extended play'],
+        'mixtape': ['mixtape', 'mix tape'],
+        'compilation': ['compilation', 'various artists', 'va']
+    }
+    
+    for release_type, keywords in title_indicators.items():
+        if any(keyword in title for keyword in keywords):
+            return release_type.lower()
 
-    # 2. Check SoundCloud's kind - respect playlist designation
-    if playlist_data.get('kind') == 'playlist':
-        return 'playlist'
-
-    # 3. Track count as last resort
+    # 3. Only use track count as last resort if no other indicators exist
     track_count = len(tracks_data) if tracks_data else 0
     if track_count >= 7:
         return 'deluxe' if 'deluxe' in title else 'album'
