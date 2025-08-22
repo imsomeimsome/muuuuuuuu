@@ -21,14 +21,14 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
     # Create base embed
     if platform.lower() == "spotify":
         embed = discord.Embed(
-            title=f"🎵 {artist_name} released a {release_type}!",
+            title=f"# 🎵 {artist_name} released a {release_type}!",
             description=f"[{title}]({url})",
             color=0x1DB954  # Spotify green
         )
     else:
         # Keep existing SoundCloud embed format
         embed = discord.Embed(
-            title=f"🎵 {artist_name} released a {release_type}!",
+            title=f"# 🎵 {artist_name} released a {release_type}!",
             description=f"[{title}]({url})",
             color=0xfa5a02  # SoundCloud orange
         )
