@@ -45,10 +45,14 @@ class SpotifyKeyManager:
             raise ValueError("No Spotify credentials configured.")
         return self.keys[self.index]
 
-    def mark_rate_limited(self, minutes=15):
-        # Put current key on cooldown
+    def mark_rate_limited(self, minutes=15, seconds=None):
+        """Put current key on cooldown. If seconds provided, override minutes."""
         from datetime import datetime, timezone, timedelta
-        self.key_cooldowns[self.index] = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        if seconds is not None:
+            cooldown = timedelta(seconds=max(1, int(seconds)))
+        else:
+            cooldown = timedelta(minutes=minutes)
+        self.key_cooldowns[self.index] = datetime.now(timezone.utc) + cooldown
 
     def rotate_key(self):
         from datetime import datetime, timezone
@@ -188,13 +192,40 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
         except SpotifyException as e:
             status = getattr(e, "http_status", None)
             msg_lc = str(e).lower()
+            # Custom detection for non-standard rate limit message (observed):
+            # "Your application has reached a rate/request limit. Retry will occur after: 2556"
+            if "rate/request limit" in msg_lc or "retry will occur after" in msg_lc:
+                # Try to extract seconds after colon
+                wait_seconds = None
+                import re
+                m = re.search(r"after:?\s*(\d+)", msg_lc)
+                if m:
+                    try:
+                        wait_seconds = int(m.group(1))
+                    except ValueError:
+                        wait_seconds = None
+                logging.warning(f"⚠️ Detected Spotify rate limit (custom message). wait_seconds={wait_seconds}")
+                if spotify_key_manager:
+                    if wait_seconds is not None and wait_seconds > 0:
+                        spotify_key_manager.mark_rate_limited(seconds=wait_seconds)
+                    else:
+                        spotify_key_manager.mark_rate_limited(minutes=15)
+                rotated = _attempt_rotation("rate_limit_detected_message")
+                if rotated:
+                    logging.info("🔄 Rotated Spotify key after custom rate limit message")
+                    continue
+                # If cannot rotate, sleep minimal then retry same key (exponential backoff)
+                backoff = min(60, (wait_seconds or (attempt + 1) * delay))
+                logging.info(f"⏳ Waiting {backoff}s before retrying Spotify call (custom rate limit)")
+                time.sleep(backoff)
+                continue
             # Handle invalid credentials
             if "invalid_client" in msg_lc or status in (400, 401):
                 logging.error("❌ Spotify invalid/expired credentials. Rotating...")
                 if _attempt_rotation("invalid_client"):
                     continue
                 raise
-            # Rate limit
+            # Rate limit (standard 429)
             if status == 429:
                 wait = 0
                 if hasattr(e, "headers") and e.headers and e.headers.get("Retry-After"):
@@ -204,11 +235,11 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
                         wait = 5
                 logging.warning(f"⚠️ Spotify rate limited (Retry-After {wait}s). Rotating...")
                 if spotify_key_manager:
-                    spotify_key_manager.mark_rate_limited(minutes=max(1, wait // 60))
+                    # Convert to seconds -> mark
+                    spotify_key_manager.mark_rate_limited(seconds=wait if wait else None, minutes=max(1, wait // 60) if wait else 1)
                 rotated = _attempt_rotation("rate_limit")
                 if rotated:
                     continue
-                # If rotation failed, sleep then retry same key
                 time.sleep(wait or delay)
                 continue
             # 5xx transient
