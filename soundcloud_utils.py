@@ -24,97 +24,92 @@ key_manager = None
 
 class SoundCloudKeyManager:
     def __init__(self, bot=None):
-        self.bot = bot  # Store bot reference for logging
+        self.bot = bot
         self.api_keys = [
             os.getenv("SOUNDCLOUD_CLIENT_ID"),
             os.getenv("SOUNDCLOUD_CLIENT_ID_2"),
-            os.getenv("SOUNDCLOUD_CLIENT_ID_3")
-#            os.getenv("SOUNDCLOUD_CLIENT_ID_4")
+            os.getenv("SOUNDCLOUD_CLIENT_ID_3"),
         ]
+        self.api_keys = [k for k in self.api_keys if k]
         self.current_key_index = 0
-        self.key_cooldowns = {}  # Track when each key hits rate limit
-
-
-    async def log_key_rotation(self, old_index, new_index):
-        """Log key rotation to Discord logs channel with status of all keys."""
-        if self.bot:
-            try:
-                now = datetime.now(timezone.utc)
-                status_lines = []
-
-                # Build status for each key
-                for i, key in enumerate(self.api_keys):
-                    if not key:
-                        status = "Not configured"
-                    elif i == new_index:
-                        status = "Currently in use"
-                    elif i in self.key_cooldowns:
-                        cooldown_time = int(self.key_cooldowns[i].timestamp())
-                        status = f"Cooldown until <t:{cooldown_time}:R>"
-                    else:
-                        status = "Ready for use"
-                    
-                    status_lines.append(f"ID {i+1}: {status}")
-
-                message = (
-                    "🔄 **SoundCloud API Key Status Update**\n"
-                    f"Switched from Key {old_index + 1} to Key {new_index + 1}\n\n"
-                    "**Current Key Status:**\n" + 
-                    "\n".join(status_lines)
-                )
-
-                # Send to all configured log channels
-                for guild in self.bot.guilds:
-                    channel_id = get_channel(str(guild.id), "logs")
-                    if channel_id:
-                        try:
-                            channel = self.bot.get_channel(int(channel_id))
-                            if channel:
-                                await channel.send(message)
-                        except Exception as e:
-                            logging.error(f"Failed to send key rotation log to guild {guild.id}: {e}")
-
-            except Exception as e:
-                logging.error(f"Failed to log key rotation: {e}")
+        self.key_cooldowns = {}          # idx -> datetime until reusable
+        self.fail_counts = {}            # idx -> consecutive failures
+        if not self.api_keys:
+            logging.error("❌ No SoundCloud API keys configured.")
+        else:
+            logging.info(f"✅ Loaded {len(self.api_keys)} SoundCloud key(s). Using index 0.")
 
     def get_current_key(self):
-        """Get current working API key."""
+        if not self.api_keys:
+            raise ValueError("No SoundCloud keys configured.")
         return self.api_keys[self.current_key_index]
 
-    def rotate_key(self):
-        """Switch to next available API key."""
-        old_index = self.current_key_index
-        self.key_cooldowns[old_index] = datetime.now(timezone.utc) + timedelta(hours=12)
-        
-        # Try each key in sequence
-        for _ in range(len(self.api_keys)):
-            next_index = (self.current_key_index + 1) % len(self.api_keys)
-            # Check if next key exists and isn't on cooldown
-            if self.api_keys[next_index] and (
-                next_index not in self.key_cooldowns or 
-                datetime.now(timezone.utc) > self.key_cooldowns[next_index]
-            ):
-                self.current_key_index = next_index
-                new_key = self.get_current_key()
-                # Log the rotation
-                if self.bot:
-                    asyncio.create_task(self.log_key_rotation(old_index, next_index))
-                return new_key
-            self.current_key_index = next_index  # Move to next key even if it fails
-            
-        raise ValueError("No API keys available - all on cooldown")
-        
-        # Find next available key
-        for i in range(len(self.api_keys)):
-            next_index = (self.current_key_index + i + 1) % len(self.api_keys)
-            if self.api_keys[next_index] and (
-                next_index not in self.key_cooldowns or 
-                datetime.now(timezone.utc) > self.key_cooldowns[next_index]
-            ):
-                self.current_key_index = next_index
-                return self.get_current_key()
-        
-        raise ValueError("No API keys available - all on cooldown")
+    def _calc_cooldown(self, idx):
+        """Adaptive cooldown: grows with consecutive failures."""
+        base = 30   # seconds
+        fails = self.fail_counts.get(idx, 0)
+        # Exponential-ish backoff capped
+        seconds = min(base * (2 ** fails), 60 * 60 * 6)  # cap at 6h
+        return timedelta(seconds=seconds)
+
+    def mark_rate_limited(self):
+        """Mark current key as limited without rotating (used before rotate)."""
+        idx = self.current_key_index
+        self.fail_counts[idx] = self.fail_counts.get(idx, 0) + 1
+        self.key_cooldowns[idx] = datetime.now(timezone.utc) + self._calc_cooldown(idx)
+
+    async def _log_rotation(self, old_index, new_index, reason, exhausted=False):
+        if not self.bot:
+            return
+        try:
+            now = datetime.now(timezone.utc)
+            lines = []
+            for i, key in enumerate(self.api_keys):
+                if i == new_index and not exhausted:
+                    state = "▶️ Active"
+                else:
+                    cd = self.key_cooldowns.get(i)
+                    if cd and cd > now:
+                        state = f"⏳ Cooldown until <t:{int(cd.timestamp())}:R>"
+                    else:
+                        state = "✅ Ready"
+                preview = key[:10] + "…" if key else "N/A"
+                lines.append(f"Key {i+1}: {state} ({preview})")
+            header = "🛑 All SoundCloud keys exhausted" if exhausted else "🔄 SoundCloud Key Rotation"
+            msg = f"{header}\nReason: {reason}\nFrom Key {old_index+1} ➜ Key {new_index+1 if not exhausted else 'N/A'}\n\n" + "\n".join(lines)
+            from database_utils import get_channel
+            for guild in self.bot.guilds:
+                channel_id = get_channel(str(guild.id), "logs")
+                if channel_id:
+                    ch = self.bot.get_channel(int(channel_id))
+                    if ch:
+                        await ch.send(msg)
+        except Exception as e:
+            logging.error(f"Failed to log SoundCloud rotation: {e}")
+
+    def rotate_key(self, reason="rate_limit"):
+        """Rotate to next available key; schedule async log."""
+        if len(self.api_keys) <= 1:
+            logging.warning("⚠️ Only one SoundCloud key configured; cannot rotate.")
+            return None
+        old = self.current_key_index
+        for _ in range(len(self.api_keys) - 1):
+            nxt = (self.current_key_index + 1) % len(self.api_keys)
+            cd = self.key_cooldowns.get(nxt)
+            if cd and datetime.now(timezone.utc) < cd:
+                self.current_key_index = nxt  # advance but continue searching
+                continue
+            self.current_key_index = nxt
+            new_key = self.get_current_key()
+            # Reset failure count for new key
+            self.fail_counts[self.current_key_index] = 0
+            if self.bot:
+                asyncio.create_task(self._log_rotation(old, self.current_key_index, reason))
+            return new_key
+        # Exhausted
+        if self.bot:
+            asyncio.create_task(self._log_rotation(old, old, reason, exhausted=True))
+        raise ValueError("No SoundCloud API keys available (all on cooldown)")
 
 def init_key_manager(bot):
     """Initialize the key manager with bot reference."""
@@ -126,8 +121,6 @@ def init_key_manager(bot):
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
-
-
 
 def resolve_url(url):
     """Resolve a SoundCloud URL to its API data."""
@@ -166,54 +159,56 @@ def resolve_url(url):
 def safe_request(url, headers=None, retries=3, timeout=10):
     """Make a request with automatic key rotation on rate limits."""
     global CLIENT_ID, key_manager
-    
     if not CLIENT_ID:
         raise ValueError("No SoundCloud CLIENT_ID available")
-    
+
     original_url = url
     for attempt in range(retries):
         try:
             response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
-            
-            # Enhanced rate limit detection
+            text_lower = response.text.lower() if hasattr(response, "text") else ""
             is_rate_limited = (
-                response.status_code in [401, 429] or
-                "rate/request limit" in response.text.lower() or
-                "retry will occur after:" in response.text.lower()
+                response.status_code in (401, 429)
+                or "rate/request limit" in text_lower
+                or "retry will occur after" in text_lower
             )
-            
             if is_rate_limited:
-                # Detect platform from URL
-                platform = "Unknown"
-                if "api.spotify.com" in url:
-                    platform = "Spotify"
-                elif "api-v2.soundcloud.com" in url:
-                    platform = "SoundCloud"
-                
-                logging.warning(f"⚠️ {platform} Rate limit hit for key {CLIENT_ID[:8]}...")
-                try:
-                    new_key = key_manager.rotate_key()
-                    if new_key:
-                        CLIENT_ID = new_key
-                        logging.info(f"🔄 {platform}: Rotated to new key: {new_key[:8]}...")
-                        url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', original_url)
-                        time.sleep(1)
-                        continue
-                except ValueError as e:
-                    logging.error(f"❌ {platform}: Key rotation failed: {e}")
-                    break  # All keys are on cooldown
+                logging.warning(f"⚠️ SoundCloud rate limit on key {CLIENT_ID[:8]} (attempt {attempt+1}/{retries})")
+                if key_manager:
+                    key_manager.mark_rate_limited()
+                    try:
+                        new_key = key_manager.rotate_key(reason="rate_limit")
+                        if new_key:
+                            CLIENT_ID = new_key
+                            # Replace client_id param if present
+                            url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', original_url)
+                            # jitter
+                            time.sleep(0.5 + (attempt * 0.3))
+                            continue
+                    except ValueError:
+                        logging.error("🛑 SoundCloud: all keys exhausted.")
+                        return None
+                # If no manager / rotation: backoff then retry
+                time.sleep(2 + attempt)
+                continue
 
             if response.status_code == 200:
                 return response
-                
+
+            # Retry transient 5xx
+            if 500 <= response.status_code < 600 and attempt < retries - 1:
+                logging.warning(f"🔥 SoundCloud {response.status_code} - retry {attempt+1}")
+                time.sleep(1 + attempt)
+                continue
+
             response.raise_for_status()
-            
+
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(2)
+                time.sleep(1 + attempt)
                 continue
-            raise
-    
+            logging.error(f"❌ SoundCloud request failed: {e}")
+            return None
     return None
 
 # Global headers for all requests to avoid 403 errors

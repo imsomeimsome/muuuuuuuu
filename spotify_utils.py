@@ -15,63 +15,194 @@ SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
 import time
 from spotipy.exceptions import SpotifyException
 
+import asyncio
+
+# Gather multiple Spotify credential sets (primary + backups)
+SPOTIFY_KEYS = [
+    (os.getenv("SPOTIFY_CLIENT_ID"), os.getenv("SPOTIFY_CLIENT_SECRET")),
+    (os.getenv("SPOTIFY_CLIENT_ID_2"), os.getenv("SPOTIFY_CLIENT_SECRET_2")),
+    (os.getenv("SPOTIFY_CLIENT_ID_3"), os.getenv("SPOTIFY_CLIENT_SECRET_3")),
+]
+
+# Filter out incomplete pairs
+SPOTIFY_KEYS = [(cid, sec) for cid, sec in SPOTIFY_KEYS if cid and sec]
+
+spotify_key_manager = None  # will be initialized via init_spotify_key_manager
+
+class SpotifyKeyManager:
+    def __init__(self, bot=None):
+        self.bot = bot
+        self.keys = SPOTIFY_KEYS
+        self.index = 0
+        self.key_cooldowns = {}  # index -> datetime when usable again
+        if not self.keys:
+            logging.error("❌ No Spotify credentials found in environment.")
+        else:
+            logging.info(f"✅ Loaded {len(self.keys)} Spotify credential set(s). Using index 0.")
+
+    def get_current_key(self):
+        if not self.keys:
+            raise ValueError("No Spotify credentials configured.")
+        return self.keys[self.index]
+
+    def mark_rate_limited(self, minutes=15):
+        # Put current key on cooldown
+        from datetime import datetime, timezone, timedelta
+        self.key_cooldowns[self.index] = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    def rotate_key(self):
+        from datetime import datetime, timezone
+        if not self.keys or len(self.keys) == 1:
+            logging.warning("⚠️ Cannot rotate Spotify key (only one set configured).")
+            return None
+        start = self.index
+        for _ in range(len(self.keys)):
+            self.index = (self.index + 1) % len(self.keys)
+            # Skip if still on cooldown
+            cooldown_until = self.key_cooldowns.get(self.index)
+            if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
+                continue
+            logging.info(f"🔄 Switching to Spotify key index {self.index}")
+            return self.get_current_key()
+        logging.error("❌ All Spotify keys are on cooldown.")
+        return None
+
+    async def log_key_rotation(self, old_index, new_index, reason):
+        if not self.bot:
+            return
+        from datetime import datetime, timezone
+        lines = []
+        now = datetime.now(timezone.utc)
+        for i, (cid, _) in enumerate(self.keys):
+            if i == new_index:
+                status = "▶️ Active"
+            else:
+                cd = self.key_cooldowns.get(i)
+                if cd and cd > now:
+                    status = f"⏳ Cooldown until {cd.isoformat()}"
+                else:
+                    status = "✅ Ready"
+            lines.append(f"Key {i+1}: {status} (client_id={cid[:10]}…)")
+        message = (
+            "🔄 **Spotify Key Rotation**\n"
+            f"Reason: {reason}\n"
+            f"Switched from Key {old_index+1} ➜ Key {new_index+1}\n\n"
+            + "\n".join(lines)
+        )
+        # Send to all guild log channels
+        try:
+            from database_utils import get_channel
+            for guild in self.bot.guilds:
+                channel_id = get_channel(str(guild.id), "logs")
+                if channel_id:
+                    ch = self.bot.get_channel(int(channel_id))
+                    if ch:
+                        await ch.send(message)
+        except Exception as e:
+            logging.error(f"Failed to send Spotify rotation log: {e}")
+
+def _rebuild_spotify_client(client_id, client_secret):
+    global spotify
+    spotify = spotipy.Spotify(
+        auth_manager=SpotifyClientCredentials(
+            client_id=client_id,
+            client_secret=client_secret
+        )
+    )
+    logging.info(f"✅ Reinitialized Spotify client with key {client_id[:10]}…")
+
+def init_spotify_key_manager(bot=None):
+    """Call from bot startup to enable rotation + logging."""
+    global spotify_key_manager
+    if spotify_key_manager is None:
+        spotify_key_manager = SpotifyKeyManager(bot)
+        if spotify_key_manager.keys:
+            cid, sec = spotify_key_manager.get_current_key()
+            _rebuild_spotify_client(cid, sec)
+    return spotify_key_manager
+
+# Replace initial single-client construction with manager-based init guard
+if 'spotify_key_manager' not in globals() or spotify_key_manager is None:
+    try:
+        # Fallback to original single credentials if manager not yet set up
+        if SPOTIFY_KEYS:
+            cid, sec = SPOTIFY_KEYS[0]
+            spotify = spotipy.Spotify(
+                auth_manager=SpotifyClientCredentials(
+                    client_id=cid,
+                    client_secret=sec
+                )
+            )
+        else:
+            spotify = None
+    except Exception as e:
+        logging.error(f"Failed to initialize Spotify client: {e}")
+        spotify = None
+
+def _attempt_rotation(reason):
+    """Try rotating Spotify credentials; return True if rotated."""
+    global spotify_key_manager
+    if not spotify_key_manager or not spotify_key_manager.keys:
+        return False
+    old = spotify_key_manager.index
+    new_pair = spotify_key_manager.rotate_key()
+    if not new_pair:
+        return False
+    cid, sec = new_pair
+    _rebuild_spotify_client(cid, sec)
+    try:
+        # schedule async log if event loop running
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(spotify_key_manager.log_key_rotation(old, spotify_key_manager.index, reason))
+    except RuntimeError:
+        pass
+    return True
+
 def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
-    """Make a Spotify API call with error handling and retries."""
+    """Make a Spotify API call with error handling, rate limit + key rotation."""
+    global spotify_key_manager
     for attempt in range(retries):
         try:
             return callable_fn(*args, **kwargs)
         except SpotifyException as e:
-            if e.http_status == 429 and 'Retry-After' in e.headers:
-                wait = int(e.headers['Retry-After'])
-                logging.warning(f"Rate limited by Spotify. Retrying in {wait} seconds...")
-                time.sleep(wait)
-                continue
-            elif "invalid_client" in str(e).lower():
-                logging.error("❌ Invalid Spotify client credentials")
-                raise ValueError("Invalid Spotify credentials - please check your .env file") 
-            elif e.http_status and 500 <= e.http_status < 600:
-                logging.warning(f"Spotify server error: {e}")
-                if attempt < retries - 1:
-                    time.sleep(delay)
+            status = getattr(e, "http_status", None)
+            msg_lc = str(e).lower()
+            # Handle invalid credentials
+            if "invalid_client" in msg_lc or status in (400, 401):
+                logging.error("❌ Spotify invalid/expired credentials. Rotating...")
+                if _attempt_rotation("invalid_client"):
                     continue
-            logging.error(f"Spotify API error: {e}")
+                raise
+            # Rate limit
+            if status == 429:
+                wait = 0
+                if hasattr(e, "headers") and e.headers and e.headers.get("Retry-After"):
+                    try:
+                        wait = int(e.headers["Retry-After"])
+                    except ValueError:
+                        wait = 5
+                logging.warning(f"⚠️ Spotify rate limited (Retry-After {wait}s). Rotating...")
+                if spotify_key_manager:
+                    spotify_key_manager.mark_rate_limited(minutes=max(1, wait // 60))
+                rotated = _attempt_rotation("rate_limit")
+                if rotated:
+                    continue
+                # If rotation failed, sleep then retry same key
+                time.sleep(wait or delay)
+                continue
+            # 5xx transient
+            if status and 500 <= status < 600:
+                logging.warning(f"⚠️ Spotify server error {status}. Retry {attempt+1}/{retries}")
+                time.sleep(delay)
+                continue
+            logging.error(f"Spotify API error (no rotation): {e}")
             break
         except Exception as e:
             logging.error(f"Unexpected Spotify error: {e}")
-            if attempt < retries - 1:
-                time.sleep(delay)
-                continue
-            break
+            time.sleep(delay)
+            continue
     return None
-
-# Spotify API client setup
-spotify = spotipy.Spotify(auth_manager=SpotifyClientCredentials(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET
-))
-
-
-def retry_on_rate_limit(func, *args, **kwargs):
-    try:
-        return func(*args, **kwargs)
-    except SpotifyException as e:
-        if e.http_status == 429:
-            retry_after = 10  # fallback default
-            if e.headers:
-                retry_after = int(e.headers.get("Retry-After", 10))
-            logging.warning(f"Rate limit hit. Retrying after {retry_after} seconds...")
-            time.sleep(retry_after)
-            try:
-                return func(*args, **kwargs)
-            except Exception as e2:
-                logging.error(f"Retry after rate limit failed: {e2}")
-                return None
-        else:
-            logging.error(f"Spotify API error: {e}")
-            return None
-    except Exception as e:
-        logging.error(f"Spotify call failed: {e}")
-        return None
 
 # --- Utilities ---
 

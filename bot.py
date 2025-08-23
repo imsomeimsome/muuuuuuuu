@@ -33,7 +33,8 @@ from spotify_utils import (
     get_artist_info as get_spotify_artist_info,
     get_last_release_date as get_spotify_last_release_date,
     get_release_info as get_spotify_release_info,
-    get_latest_album_id as get_spotify_latest_album_id
+    get_latest_album_id as get_spotify_latest_album_id,
+    init_spotify_key_manager  # <-- add
 )
 
 from soundcloud_utils import (
@@ -168,6 +169,7 @@ class MusicBot(commands.Bot):
 
 bot = MusicBot()
 CLIENT_ID = init_key_manager(bot) 
+init_spotify_key_manager(bot)  # ✅ initialize Spotify key rotation manager
 
 if not CLIENT_ID:
     logging.error("❌ No valid SoundCloud CLIENT_ID available")
@@ -451,48 +453,37 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
                 try:
                     current_dt = parse_date(current_date)
                     last_dt = parse_date(last_date) if last_date else datetime.min.replace(tzinfo=timezone.utc)
-                    
-                    # Show last release info
-                    if last_date:
-                        try:
-                            relative_time = discord.utils.format_dt(last_dt, style='R')
-                            logging.info(f"     🕒 Last release: {release_info['title']} ({current_date})")
-                        except Exception:
-                            logging.info(f"     🕒 Last release: {release_info['title']} ({current_date})")
 
-                    # Compare dates including same-day releases
-                    if current_dt >= last_dt:  # Changed from > to >=
+                    is_new = (last_date is None) or (current_dt > last_dt)
+                    if is_new:
                         logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
-                        # ...existing code...
-                    else:
-                        logging.info(f"     ⏭️ Skipping (not newer) {release_info['title']} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
-                        # Check for duplicate posts
                         cache_key = f"posted_spotify:{artist_id}:{latest_album_id}"
                         if get_cache(cache_key):
                             logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
-                            continue
-                            
-                        # Create and send embed
-                        embed = create_music_embed(
-                            platform="spotify",
-                            artist_name=artist_name,
-                            title=release_info["title"],
-                            url=release_info["url"],
-                            release_date=current_date,
-                            cover_url=release_info["cover_url"],
-                            features=release_info.get("features"),
-                            track_count=release_info.get("track_count"),
-                            duration=release_info.get("duration"),
-                            genres=release_info.get("genres", []),
-                            repost=False
-                        )
-
-                        channel = await get_release_channel(guild_id=artist["guild_id"], platform="spotify")
-                        if channel:
-                            await channel.send(embed=embed)
-                            update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
-                            set_cache(cache_key, "posted", ttl=86400)
-                            spotify_releases += 1
+                        else:
+                            embed = create_music_embed(
+                                platform="spotify",
+                                artist_name=artist_name,
+                                title=release_info["title"],
+                                url=release_info["url"],
+                                release_date=current_date,
+                                cover_url=release_info["cover_url"],
+                                features=release_info.get("features"),
+                                track_count=release_info.get("track_count"),
+                                duration=release_info.get("duration"),
+                                genres=release_info.get("genres", []),
+                                repost=False
+                            )
+                            channel = await get_release_channel(guild_id=artist["guild_id"], platform="spotify")
+                            if channel:
+                                await channel.send(embed=embed)
+                                update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
+                                set_cache(cache_key, "posted", ttl=86400)
+                                spotify_releases += 1
+                            else:
+                                logging.warning(f"     ⚠️ No channel configured for {artist['platform']}")
+                    else:
+                        logging.info(f"     ⏭️ Skipping (not newer) {release_info['title']} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
                 except Exception as e:
                     logging.error(f"     ❌ Error comparing dates: {e}")
                     continue
@@ -557,58 +548,47 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     current_date = release_info.get("release_date")
                     if current_date:
                         try:
-                            # Ensure both dates are timezone-aware datetime objects
                             current_dt = parse_date(current_date)
                             last_dt = parse_date(last_date) if last_date else datetime.min.replace(tzinfo=timezone.utc)
-                            
-                            # Log the dates we're comparing
                             logging.info(f"     🕒 Comparing dates - Current: {current_date}, Last: {last_date}")
-                            
-                            # Compare dates including same-day releases
-                            if current_dt >= last_dt:  # Changed from > to >=
-                                should_post = True
+
+                            is_new = (last_date is None) or (current_dt > last_dt)
+                            if is_new:
                                 logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info.get('title')}")
-                                # ...existing code...
-                            else:
-                                logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title')} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
-                                # Check for duplicate posts with improved cache key
                                 cache_key = f"posted_sc:{artist_id}:{release_info['url']}:{current_date}"
                                 if get_cache(cache_key):
                                     logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
-                                    continue
-                                
-                                # Create and send embed
-                                embed = create_music_embed(
-                                    platform="soundcloud",
-                                    artist_name=artist_name,
-                                    title=release_info["title"],
-                                    url=release_info["url"],
-                                    release_date=current_date,
-                                    cover_url=release_info["cover_url"],
-                                    features=release_info["features"],
-                                    track_count=release_info["track_count"],
-                                    duration=release_info["duration"],
-                                    genres=release_info["genres"],
-                                    repost=False
-                                )
-
-                                channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
-                                if channel:
-                                    await channel.send(embed=embed)
-                                    # Update last release date after successful post
-                                    update_last_release_date(
-                                        artist_id=artist_id,
-                                        owner_id=artist["owner_id"],
-                                        guild_id=artist["guild_id"],
-                                        new_date=current_date
-                                    )
-                                    set_cache(cache_key, "posted", ttl=86400)
-                                    soundcloud_counts["releases"] += 1
                                 else:
-                                    logging.warning(f"     ⚠️ No channel configured for {artist['platform']}")
-                                # (Catch-up pacing sleep placed after channel handling)
-                                if is_catchup:
-                                    await asyncio.sleep(2)
+                                    embed = create_music_embed(
+                                        platform="soundcloud",
+                                        artist_name=artist_name,
+                                        title=release_info["title"],
+                                        url=release_info["url"],
+                                        release_date=current_date,
+                                        cover_url=release_info["cover_url"],
+                                        features=release_info["features"],
+                                        track_count=release_info["track_count"],
+                                        duration=release_info["duration"],
+                                        genres=release_info["genres"],
+                                        repost=False
+                                    )
+                                    channel = await get_release_channel(guild_id=artist["guild_id"], platform="soundcloud")
+                                    if channel:
+                                        await channel.send(embed=embed)
+                                        update_last_release_date(
+                                            artist_id=artist_id,
+                                            owner_id=artist["owner_id"],
+                                            guild_id=artist["guild_id"],
+                                            new_date=current_date
+                                        )
+                                        set_cache(cache_key, "posted", ttl=86400)
+                                        soundcloud_counts["releases"] += 1
+                                    else:
+                                        logging.warning(f"     ⚠️ No channel configured for {artist['platform']}")
+                                    if is_catchup:
+                                        await asyncio.sleep(2)
+                            else:
+                                logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title')} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
                         except Exception as e:
                             logging.error(f"     ❌ Error comparing dates: {e}")
                             continue
