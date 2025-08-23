@@ -1,319 +1,146 @@
-import sqlite3
-import os
 from datetime import datetime, timezone
+import sqlite3, os, json
 
 DB_PATH = "/data/artists.db"
 
+# Ensure directory exists
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
 def get_connection():
-    """Get database connection."""
     return sqlite3.connect(DB_PATH)
 
+# Core schema definition (idempotent)
+TABLE_DEFS = [
+    ("users", """CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        username TEXT,
+        registered_at TEXT
+    )"""),
+    ("artists", """CREATE TABLE IF NOT EXISTS artists (
+        platform TEXT,
+        artist_id TEXT,
+        artist_name TEXT,
+        artist_url TEXT,
+        owner_id TEXT,
+        guild_id TEXT,
+        genres TEXT,
+        last_release_date TEXT,
+        last_like_date TEXT,
+        last_repost_date TEXT,
+        last_playlist_date TEXT,
+        PRIMARY KEY(platform, artist_id, owner_id, COALESCE(guild_id,''))
+    )"""),
+    ("channels", """CREATE TABLE IF NOT EXISTS channels (
+        guild_id TEXT,
+        platform TEXT,
+        channel_id TEXT,
+        PRIMARY KEY(guild_id, platform)
+    )"""),
+    ("posted_likes", """CREATE TABLE IF NOT EXISTS posted_likes (
+        artist_id TEXT,
+        guild_id TEXT,
+        like_id TEXT,
+        PRIMARY KEY(artist_id, guild_id, like_id)
+    )"""),
+    ("posted_reposts", """CREATE TABLE IF NOT EXISTS posted_reposts (
+        artist_id TEXT,
+        guild_id TEXT,
+        repost_id TEXT,
+        PRIMARY KEY(artist_id, guild_id, repost_id)
+    )"""),
+    ("posted_playlists", """CREATE TABLE IF NOT EXISTS posted_playlists (
+        artist_id TEXT,
+        guild_id TEXT,
+        playlist_id TEXT,
+        PRIMARY KEY(artist_id, guild_id, playlist_id)
+    )"""),
+    ("playlist_states", """CREATE TABLE IF NOT EXISTS playlist_states (
+        artist_id TEXT,
+        guild_id TEXT,
+        playlist_id TEXT,
+        tracks TEXT,
+        PRIMARY KEY(artist_id, guild_id, playlist_id)
+    )"""),
+    ("release_stats", """CREATE TABLE IF NOT EXISTS release_stats (
+        user_id TEXT,
+        artist_id TEXT,
+        release_type TEXT,
+        release_date TEXT
+    )"""),
+    ("activity_logs", """CREATE TABLE IF NOT EXISTS activity_logs (
+        user_id TEXT,
+        action TEXT,
+        timestamp TEXT,
+        details TEXT
+    )"""),
+    ("cache", """CREATE TABLE IF NOT EXISTS cache (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        expires_at TEXT
+    )"""),
+    ("api_keys", """CREATE TABLE IF NOT EXISTS api_keys (
+        platform TEXT,
+        key_index INTEGER,
+        key_prefix TEXT,
+        fail_count INTEGER,
+        cooldown_until TEXT,
+        active INTEGER,
+        PRIMARY KEY(platform, key_index)
+    )"""),
+    ("guild_features", """CREATE TABLE IF NOT EXISTS guild_features (
+        guild_id TEXT,
+        feature TEXT,
+        enabled INTEGER,
+        PRIMARY KEY(guild_id, feature)
+    )"""),
+    ("api_key_rotations", """CREATE TABLE IF NOT EXISTS api_key_rotations (
+        platform TEXT,
+        old_index INTEGER,
+        new_index INTEGER,
+        reason TEXT,
+        exhausted INTEGER,
+        timestamp TEXT
+    )"""),
+]
+
 def drop_all_tables():
-    """Drop all existing tables for clean slate."""
-    print("🗑️ Dropping all existing tables...")
-    
-    tables_to_drop = [
-        'artists', 'users', 'channels', 'releases', 'posted_content',
-        'release_preferences', 'activity_logs', 'platform_configs',
-        'posted_likes', 'reposts', 'release_prefs', 'untrack_logs'
-        'cache', 'playlist_states'
-    ]
-    
     with get_connection() as conn:
-        cursor = conn.cursor()
-        for table in tables_to_drop:
-            try:
-                cursor.execute(f"DROP TABLE IF EXISTS {table}")
-                print(f"✅ Dropped table: {table}")
-            except Exception as e:
-                print(f"⚠️ Could not drop {table}: {e}")
+        cur = conn.cursor()
+        for name, _ in TABLE_DEFS:
+            cur.execute(f"DROP TABLE IF EXISTS {name}")
         conn.commit()
 
 def create_all_tables():
-    """Create all database tables with proper schema."""
-    print("🏗️ Creating all database tables...")
-    
     with get_connection() as conn:
-        cursor = conn.cursor()
-        
-        # ===== CORE TABLES =====
-        
-        # Users table
-        cursor.execute('''
-            CREATE TABLE users (
-                user_id TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                registered_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        ''')
-        print("✅ Created table: users")
-        
-        # Artists table - expandable for new platforms
-        cursor.execute('''
-            CREATE TABLE artists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                platform TEXT NOT NULL CHECK(platform IN ('spotify', 'soundcloud', 'youtube', 'bandcamp', 'apple_music')),
-                artist_id TEXT NOT NULL,
-                artist_name TEXT NOT NULL,
-                artist_url TEXT NOT NULL,
-                owner_id TEXT NOT NULL,
-                guild_id TEXT NOT NULL,
-                genres TEXT DEFAULT '',
-                last_release_date TEXT,
-                last_like_date TEXT,
-                last_repost_date TEXT,
-                last_playlist_date TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(platform, artist_id, owner_id, guild_id),
-                FOREIGN KEY (owner_id) REFERENCES users(user_id)
-            )
-        ''')
-        print("✅ Created table: artists")
-        
-        # Channel configuration - expandable for new platforms
-        cursor.execute('''
-            CREATE TABLE channels (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id TEXT NOT NULL,
-                platform TEXT NOT NULL CHECK(platform IN ('spotify', 'soundcloud', 'youtube', 'bandcamp', 'apple_music', 'logs', 'commands')),
-                channel_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE(guild_id, platform)
-            )
-        ''')
-        print("✅ Created table: channels")
-        
-        # Playlist states table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS playlist_states (
-                artist_id TEXT NOT NULL,
-                guild_id TEXT NOT NULL,
-                playlist_id TEXT NOT NULL,
-                tracks TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (artist_id, guild_id, playlist_id)
-            )
-        ''')
-        print("✅ Created table: playlist_states")
-
-        # ===== TRACKING TABLES =====
-        
-        # Posted content tracking (prevents duplicates)
-        cursor.execute('''
-            CREATE TABLE posted_content (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                artist_id TEXT NOT NULL,
-                guild_id TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                content_type TEXT NOT NULL CHECK(content_type IN ('release', 'like', 'repost', 'playlist')),
-                content_id TEXT NOT NULL,
-                posted_at TEXT NOT NULL,
-                UNIQUE(artist_id, guild_id, platform, content_type, content_id)
-            )
-        ''')
-        print("✅ Created table: posted_content")
-
-        # Release tracking
-        cursor.execute('''
-            CREATE TABLE releases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                artist_id TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                release_id TEXT,
-                release_type TEXT NOT NULL CHECK(release_type IN ('album', 'single', 'ep', 'playlist', 'like', 'repost')),
-                release_title TEXT,
-                release_url TEXT,
-                posted_at TEXT NOT NULL,
-                guild_id TEXT NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        ''')
-        print("✅ Created table: releases")
-        
-        # Release preferences
-        cursor.execute('''
-            CREATE TABLE release_preferences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                artist_id TEXT NOT NULL,
-                platform TEXT NOT NULL,
-                albums BOOLEAN DEFAULT 1,
-                singles BOOLEAN DEFAULT 1,
-                eps BOOLEAN DEFAULT 1,
-                playlists BOOLEAN DEFAULT 1,
-                likes BOOLEAN DEFAULT 1,
-                reposts BOOLEAN DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(user_id, artist_id, platform),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        ''')
-        print("✅ Created table: release_preferences")
-        
-        # ===== LOGGING TABLES =====
-        
-        # Activity logs
-        cursor.execute('''
-        CREATE TABLE activity_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            action TEXT NOT NULL CHECK(action IN ('track', 'untrack', 'register', 'channel_set', 'import', 'export', 'bot_startup', 'bot_shutdown')),
-            details TEXT,
-            timestamp TEXT NOT NULL,
-            guild_id TEXT,
-            FOREIGN KEY (user_id) REFERENCES users(user_id)
-        )
-    ''')
-        print("✅ Created table: activity_logs")
-        
-        # ===== PLATFORM CONFIG =====
-        
-        # Platform configurations (for future expansion)
-        cursor.execute('''
-            CREATE TABLE platform_configs (
-                platform TEXT PRIMARY KEY CHECK(platform IN ('spotify', 'soundcloud', 'youtube', 'bandcamp', 'apple_music')),
-                enabled BOOLEAN DEFAULT 1,
-                api_endpoint TEXT,
-                rate_limit INTEGER DEFAULT 60,
-                check_interval INTEGER DEFAULT 300,
-                supports_likes BOOLEAN DEFAULT 0,
-                supports_reposts BOOLEAN DEFAULT 0,
-                supports_playlists BOOLEAN DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        ''')
-        print("✅ Created table: platform_configs")
-        
-        # ===== INDEXES FOR PERFORMANCE =====
-        
-        # Artists indexes
-        cursor.execute('CREATE INDEX idx_artists_owner_guild ON artists(owner_id, guild_id)')
-        cursor.execute('CREATE INDEX idx_artists_platform ON artists(platform)')
-        cursor.execute('CREATE INDEX idx_artists_lookup ON artists(platform, artist_id)')
-        
-        # Posted content indexes
-        cursor.execute('CREATE INDEX idx_posted_content_lookup ON posted_content(artist_id, guild_id, platform, content_type)')
-        cursor.execute('CREATE INDEX idx_posted_content_unique ON posted_content(content_type, content_id)')
-        
-        # Releases indexes
-        cursor.execute('CREATE INDEX idx_releases_user ON releases(user_id)')
-        cursor.execute('CREATE INDEX idx_releases_artist ON releases(artist_id)')
-        cursor.execute('CREATE INDEX idx_releases_date ON releases(posted_at)')
-        
-        # Activity logs indexes
-        cursor.execute('CREATE INDEX idx_activity_logs_user ON activity_logs(user_id)')
-        cursor.execute('CREATE INDEX idx_activity_logs_action ON activity_logs(action)')
-        cursor.execute('CREATE INDEX idx_activity_logs_timestamp ON activity_logs(timestamp)')
-        
-        print("✅ Created all performance indexes")
-        
+        cur = conn.cursor()
+        for _, ddl in TABLE_DEFS:
+            cur.execute(ddl)
+        # Add index for cache pruning performance
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires_at ON cache(expires_at)")
+        except Exception:
+            pass
         conn.commit()
 
-def populate_default_data():
-    """Insert default platform configurations."""
-    print("📝 Populating default data...")
-    
-    now = datetime.now(timezone.utc).isoformat()
-    
-    platforms = [
-        ('spotify', 1, 'https://api.spotify.com/v1', 100, 300, 0, 0, 1),
-        ('soundcloud', 1, 'https://api-v2.soundcloud.com', 60, 300, 1, 1, 1),
-        ('youtube', 0, 'https://www.googleapis.com/youtube/v3', 100, 300, 1, 0, 1),
-        ('bandcamp', 0, '', 30, 600, 0, 0, 1),
-        ('apple_music', 0, 'https://api.music.apple.com/v1', 100, 300, 0, 0, 1)
-    ]
-    
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        for platform_data in platforms:
-            cursor.execute('''
-                INSERT INTO platform_configs 
-                (platform, enabled, api_endpoint, rate_limit, check_interval, supports_likes, supports_reposts, supports_playlists, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', platform_data + (now, now))
-        
-        conn.commit()
-        print(f"✅ Added {len(platforms)} platform configurations")
+# Fresh init utility
 
 def initialize_fresh_database():
-    """Complete database initialization - drops everything and recreates."""
-    print("🚀 Initializing fresh database...")
-    
-    # Ensure data directory exists
-    os.makedirs('/data', exist_ok=True)
-    
-    # Drop all existing tables
     drop_all_tables()
-    
-    # Create all tables
     create_all_tables()
-    
-    # Populate default data
-    populate_default_data()
-    
-    print("🎉 Fresh database initialization complete!")
 
-def get_table_info():
-    """Get information about all tables for debugging."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Get all table names
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = cursor.fetchall()
-        
-        print("📊 Database Table Information:")
-        print("=" * 50)
-        
-        for (table_name,) in tables:
-            print(f"\n🗂️ Table: {table_name}")
-            cursor.execute(f"PRAGMA table_info({table_name})")
-            columns = cursor.fetchall()
-            
-            for col in columns:
-                col_id, name, data_type, not_null, default, pk = col
-                pk_str = " (PK)" if pk else ""
-                null_str = " NOT NULL" if not_null else ""
-                default_str = f" DEFAULT {default}" if default else ""
-                print(f"  - {name}: {data_type}{pk_str}{null_str}{default_str}")
-        
-        print("\n" + "=" * 50)
-
-# Add this to tables.py and run it once
-def reset_like_tracking():
-    """Reset like tracking to current time to prevent posting old content."""
-    from database_utils import reset_like_tracking_for_all
-    reset_like_tracking_for_all()
+# Cache table (already created but helper used elsewhere)
 
 def initialize_cache_table():
-    """Create the cache table if it doesn't exist."""
-    conn = sqlite3.connect("/data/artists.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            expires_at DATETIME
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with get_connection() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, expires_at TEXT)")
+        conn.commit()
+
+# No-op populate placeholder
+
+def populate_default_data():
+    pass
 
 if __name__ == "__main__":
     # Run this to initialize a fresh database
     initialize_fresh_database()
-    
-    # Reset like tracking to prevent old content flood
-    reset_like_tracking()
-    
-    get_table_info()
-
-if __name__ == "__main__":
-    # Run this to initialize a fresh database
-    initialize_fresh_database()
-    get_table_info()
+    populate_default_data()

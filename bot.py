@@ -24,7 +24,8 @@ from database_utils import (
     log_untrack, get_untrack_count, get_user_registered_at, get_global_artist_count, get_artist_full_record,
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier,
     update_last_repost_date, update_last_playlist_date, is_already_posted_playlist, mark_posted_playlist,
-    record_bot_startup, record_bot_shutdown, get_downtime_duration, get_playlist_state, store_playlist_state
+    record_bot_startup, record_bot_shutdown, get_downtime_duration, get_playlist_state, store_playlist_state,
+    set_guild_feature, is_feature_enabled, get_guild_features
 )
 from embed_utils import create_music_embed, create_repost_embed, create_like_embed
 from spotify_utils import (
@@ -34,7 +35,9 @@ from spotify_utils import (
     get_last_release_date as get_spotify_last_release_date,
     get_release_info as get_spotify_release_info,
     get_latest_album_id as get_spotify_latest_album_id,
-    init_spotify_key_manager  # <-- add
+    init_spotify_key_manager,
+    spotify_key_manager,  # <-- import manager instance for status
+    manual_rotate_spotify_key
 )
 
 from soundcloud_utils import (
@@ -52,9 +55,11 @@ from soundcloud_utils import (
     get_artist_info,
     init_key_manager,
     key_manager,
-    CLIENT_ID as SC_CLIENT_ID
+    CLIENT_ID as SC_CLIENT_ID,
+    manual_rotate_soundcloud_key,
+    get_soundcloud_telemetry_snapshot  # <-- added import
 )
-from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache
+from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
 from reset_artists import reset_tables
 from tables import initialize_fresh_database, initialize_cache_table
 import sqlite3
@@ -91,6 +96,21 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logging.getLogger().handlers[0].setFormatter(CustomFormatter())
+
+# Optional JSON logging toggle
+if os.getenv('LOG_JSON') == '1':
+    class _JSONFormatter(logging.Formatter):
+        def format(self, record):
+            payload = {
+                'ts': datetime.utcnow().isoformat() + 'Z',
+                'level': record.levelname,
+                'msg': record.getMessage(),
+                'logger': record.name,
+                'module': record.module
+            }
+            return json.dumps(payload, ensure_ascii=False)
+    for h in logging.getLogger().handlers:
+        h.setFormatter(_JSONFormatter())
 
 # Helper function to summarize errors
 def summarize_errors(errors):
@@ -151,7 +171,8 @@ class MusicBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.log_channel = None
-        
+        self._health_task = None
+    
     async def setup_hook(self):
         if LOG_CHANNEL_ID:
             self.log_channel = self.get_channel(LOG_CHANNEL_ID)
@@ -166,6 +187,65 @@ class MusicBot(commands.Bot):
             await self.log_channel.send(
                 f"`[{datetime.now(timezone.utc)}]` {content}"
             )
+
+    async def start_health_logger(self):
+        if self._health_task:
+            return
+        async def _loop():
+            while not self.is_closed():
+                try:
+                    await asyncio.sleep(900)  # 15 minutes
+                    await self.emit_health_log()
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logging.error(f"Health logger error: {e}")
+        self._health_task = asyncio.create_task(_loop())
+
+    async def emit_health_log(self):
+        try:
+            artists = get_all_artists()
+            total = len(artists)
+            spotify_count = sum(1 for a in artists if a.get('platform') == 'spotify')
+            sc_count = sum(1 for a in artists if a.get('platform') == 'soundcloud')
+
+            # Spotify key status
+            spotify_rows = []
+            if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
+                for row in spotify_key_manager.get_status_rows():
+                    spotify_rows.append(f"K{row['index']+1}:{row['state']}")
+            else:
+                spotify_rows.append("none")
+
+            # SoundCloud key status
+            sc_rows = []
+            if key_manager and getattr(key_manager, 'api_keys', None):
+                from datetime import datetime as _dt, timezone as _tz
+                now = _dt.now(_tz.utc)
+                for idx, key in enumerate(key_manager.api_keys):
+                    if idx == key_manager.current_key_index:
+                        state = 'active'
+                    else:
+                        cd = key_manager.key_cooldowns.get(idx)
+                        state = f"cooldown_until={cd.isoformat()}" if cd and cd > now else 'ready'
+                    sc_rows.append(f"K{idx+1}:{state}")
+            else:
+                sc_rows.append("none")
+
+            msg = (
+                "🩺 **Health Report**\n"
+                f"Artists: {total} (Spotify {spotify_count} / SoundCloud {sc_count})\n"
+                f"Spotify Keys: {' | '.join(spotify_rows)}\n"
+                f"SoundCloud Keys: {' | '.join(sc_rows)}"
+            )
+            logging.info(msg)
+            if self.log_channel:
+                try:
+                    await self.log_channel.send(msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.error(f"Failed to emit health log: {e}")
 
 bot = MusicBot()
 CLIENT_ID = init_key_manager(bot) 
@@ -528,6 +608,12 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
         if artist.get("platform") != "soundcloud":
             continue
 
+        # Feature flags per guild
+        guild_id = artist.get("guild_id")
+        playlists_enabled = is_feature_enabled(guild_id, 'playlists')
+        reposts_enabled = is_feature_enabled(guild_id, 'reposts')
+        likes_enabled = is_feature_enabled(guild_id, 'likes')
+
         if retry_after and now < retry_after:
             logging.warning(f"⏭️ Skipping remaining SoundCloud checks until {retry_after}")
             break
@@ -609,7 +695,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                 logging.error(f"     ❌ Error checking releases: {e}")
 
             # Check playlists if not rate limited
-            if not retry_after:
+            if not retry_after and playlists_enabled:
                 try:
                     playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url)
                     if playlist_info:
@@ -624,7 +710,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     logging.error(f"Error checking playlists: {e}")
 
             # Check reposts if not rate limited
-            if not retry_after:
+            if not retry_after and reposts_enabled:
                 try:
                     reposts = await run_blocking(get_soundcloud_reposts_info, artist_url)
                     if reposts:
@@ -663,7 +749,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     logging.error(f"Error checking reposts: {e}")
 
             # Check likes if not rate limited
-            if not retry_after:
+            if not retry_after and likes_enabled:
                 try:
                     likes = await run_blocking(get_soundcloud_likes_info, artist_url)
                     if likes:
@@ -806,13 +892,28 @@ async def on_ready():
         bot.release_checker_started = True
         asyncio.create_task(release_check_scheduler(bot))
         logging.info("🚀 Started release checker")
+    # Start health logger
+    await bot.start_health_logger()
 
 # Handle graceful shutdown
 def signal_handler(sig, frame):
     """Handle shutdown gracefully."""
     logging.info("🛑 Bot shutting down...")
-    record_bot_shutdown()
-    sys.exit(0)
+    try:
+        record_bot_shutdown()
+    except Exception:
+        pass
+    try:
+        if key_manager:
+            key_manager.stop_background_tasks()
+        if spotify_key_manager:
+            pass  # (no background loop presently)
+    except Exception as e:
+        logging.error(f"Error stopping background tasks: {e}")
+    finally:
+        loop = asyncio.get_event_loop()
+        loop.stop()
+        sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -1268,7 +1369,7 @@ async def debug_soundcloud(interaction: discord.Interaction, url: str):
         embed.add_field(name="Duration", value=info["duration"], inline=True)
         embed.add_field(name="Features", value=info["features"], inline=True)
         embed.add_field(name="Genres", value=", ".join(info["genres"]) or "None", inline=False)
-        embed.add_field(name="Repost?", value="📌 Yes" if info.get("repost") else "No", inline=True)
+        embed.add_field(name="Repost?", value="📌 Yes" if info.get('repost') else "No", inline=True)
         embed.url = info["url"]
 
         await interaction.followup.send(embed=embed)
@@ -1387,6 +1488,203 @@ async def forceremove_command(interaction: discord.Interaction, url: str):
     except Exception as e:
         await interaction.followup.send(f"❌ Error: {str(e)}")
 
+@bot.tree.command(name="spotify_keystatus", description="Show Spotify API key rotation status (admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def spotify_keystatus_command(interaction: discord.Interaction):
+    rows = []
+    if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
+        for row in spotify_key_manager.get_status_rows():
+            rows.append(f"Key {row['index']+1}: {row['state']} (client_id={row['client_id_preview']})")
+    else:
+        rows.append("No Spotify keys configured")
+    embed = discord.Embed(title="Spotify Key Status", description="\n".join(rows), color=0x1DB954)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="sc_keystatus", description="Show SoundCloud API key rotation status (admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def sc_keystatus_command(interaction: discord.Interaction):
+    lines = []
+    if key_manager and getattr(key_manager, 'api_keys', None):
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        for idx, key in enumerate(key_manager.api_keys):
+            if idx == key_manager.current_key_index:
+                state = 'active'
+            else:
+                cd = key_manager.key_cooldowns.get(idx)
+                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
+            preview = (key or '')[:12] + '…'
+            lines.append(f"Key {idx+1}: {preview} ({state})")
+    else:
+        lines.append("No SoundCloud keys configured")
+    embed = discord.Embed(title="SoundCloud Key Status", description="\n".join(lines), color=0xfa5a02)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="keys", description="Show API key / credential status (admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def keys_command(interaction: discord.Interaction):
+    sc_lines = []
+    if key_manager and getattr(key_manager, 'api_keys', None):
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        for idx, key in enumerate(key_manager.api_keys):
+            if idx == key_manager.current_key_index:
+                state = 'active'
+            else:
+                cd = key_manager.key_cooldowns.get(idx)
+                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
+            preview = (key or '')[:12] + '…'
+            sc_lines.append(f"SC Key {idx+1}: {preview} ({state})")
+    else:
+        sc_lines.append("No SoundCloud keys loaded")
+
+    sp_lines = []
+    if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        for idx, (cid, _sec) in enumerate(spotify_key_manager.keys):
+            if idx == spotify_key_manager.index:
+                state = 'active'
+            else:
+                cd = spotify_key_manager.key_cooldowns.get(idx)
+                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
+            sp_lines.append(f"Spotify Key {idx+1}: {cid[:12]}… ({state})")
+    else:
+        sp_lines.append("No Spotify keys loaded")
+
+    msg = "**API Key Status**\n" + "\n".join(sc_lines + [""] + sp_lines)
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
+@app_commands.describe(platform="Which platform to rotate (spotify or soundcloud)")
+@app_commands.checks.has_permissions(administrator=True)
+async def rotatekeys_command(interaction: discord.Interaction, platform: Literal["spotify", "soundcloud"]):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if platform == "spotify":
+            result = manual_rotate_spotify_key(reason="manual_command")
+            if not result.get('rotated'):
+                await interaction.followup.send(f"❌ Spotify rotation failed: {result.get('error', 'unknown error')}")
+                return
+            active = result['active_index'] + 1
+            old = result.get('old_index', -1) + 1
+            lines = [f"Key {row['index']+1}: {row['state']} ({row['client_id_preview']})" for row in result['keys']]
+            msg = f"✅ Rotated Spotify key {old} ➜ {active}\n" + "\n".join(lines)
+            await interaction.followup.send(msg)
+        else:
+            result = manual_rotate_soundcloud_key(reason="manual_command")
+            if not result.get('rotated'):
+                await interaction.followup.send(f"❌ SoundCloud rotation failed: {result.get('error', 'unknown error')}")
+                return
+            active = result['active_index'] + 1
+            old = result.get('old_index', -1) + 1
+            lines = [f"Key {row['index']+1}: {row['state']} ({row['key_preview']})" for row in result['keys']]
+            msg = f"✅ Rotated SoundCloud key {old} ➜ {active}\n" + "\n".join(lines)
+            await interaction.followup.send(msg)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error rotating keys: {e}")
+
+@bot.tree.command(name="feature", description="Enable/disable per-guild feature (likes/reposts/playlists)")
+@app_commands.checks.has_permissions(administrator=True)
+async def feature_command(interaction: discord.Interaction, feature: Literal["likes", "reposts", "playlists"], state: Literal["on", "off"]):
+    set_guild_feature(str(interaction.guild.id), feature, state == 'on')
+    await interaction.response.send_message(f"✅ Feature '{feature}' set to {state}", ephemeral=True)
+
+@bot.tree.command(name="features", description="List feature toggle states for this guild")
+async def features_command(interaction: discord.Interaction):
+    states = get_guild_features(str(interaction.guild.id))
+    msg = "\n".join([f"{name}: {'✅ on' if enabled else '❌ off'}" for name, enabled in states.items()])
+    await interaction.response.send_message(f"**Feature States**\n{msg}", ephemeral=True)
+
+@bot.tree.command(name="telemetry", description="Show key / cache telemetry")
+@app_commands.checks.has_permissions(administrator=True)
+async def telemetry_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        sc_snapshot = get_soundcloud_telemetry_snapshot()
+        sp_status = spotify_key_manager.get_status_rows() if spotify_key_manager else []
+        cache_stats = get_cache_stats()
+        now = datetime.now(timezone.utc)
+
+        # SoundCloud keys with enhanced backoff visualization
+        sc_key_lines = []
+        if key_manager and key_manager.api_keys:
+            for row in key_manager.get_status_rows():
+                state = row['state']
+                fail = row.get('fail_count', 0)
+                next_use = 'now'
+                rel = ''
+                if 'cooldown_until=' in state:
+                    iso = state.split('cooldown_until=')[1]
+                    try:
+                        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
+                        remaining = (dt - now).total_seconds()
+                        if remaining < 0:
+                            next_use = 'now'
+                        else:
+                            next_use = f"<t:{int(dt.timestamp())}:R>"
+                            rel = f" ({int(remaining//60)}m{int(remaining%60)}s)"
+                    except Exception:
+                        pass
+                marker = '▶' if state == 'active' else '⏳' if 'cooldown_until=' in state else '✅'
+                sc_key_lines.append(
+                    f"K{row['index']+1} {marker} fail={fail} next={next_use}{rel}"
+                )
+        else:
+            sc_key_lines.append('none')
+
+        # Spotify keys with enhanced backoff visualization
+        sp_key_lines = []
+        if sp_status:
+            for row in sp_status:
+                state = row['state']
+                next_use = 'now'
+                rel = ''
+                if 'cooldown_until=' in state:
+                    iso = state.split('cooldown_until=')[1]
+                    try:
+                        dt = datetime.fromisoformat(iso.replace('Z','+00:00'))
+                        remaining = (dt - now).total_seconds()
+                        if remaining >= 0:
+                            next_use = f"<t:{int(dt.timestamp())}:R>"
+                            rel = f" ({int(remaining//60)}m{int(remaining%60)}s)"
+                    except Exception:
+                        pass
+                marker = '▶' if state == 'active' else '⏳' if 'cooldown_until=' in state else '✅'
+                sp_key_lines.append(
+                    f"K{row['index']+1} {marker} next={next_use}{rel} {row['client_id_preview']}"
+                )
+        else:
+            sp_key_lines.append('none')
+
+        # Circuit breaker visualization
+        cb = sc_snapshot['circuit_breaker']
+        if cb['active']:
+            try:
+                until_dt = datetime.fromisoformat(cb['until'].replace('Z','+00:00')) if cb['until'] else None
+            except Exception:
+                until_dt = None
+            if until_dt:
+                remaining = max(0, int((until_dt - now).total_seconds()))
+                mins, secs = divmod(remaining, 60)
+                cb_line = f"ACTIVE {mins}m{secs}s (until <t:{int(until_dt.timestamp())}:R>)"
+            else:
+                cb_line = 'ACTIVE'
+        else:
+            cb_line = 'inactive'
+
+        tele = sc_snapshot['telemetry']
+        msg = (
+            "**Telemetry**\n"
+            f"SoundCloud Requests: {tele['requests']} ok={tele['success']} client_err={tele['client_errors']} server_err={tele['server_errors']} rotations={tele['rotations']} html_soft_fail={tele['html_soft_fail']}\n"
+            f"Circuit Breaker: {cb_line}\n"
+            f"SC Keys:\n - " + "\n - ".join(sc_key_lines) + "\n"
+            f"Spotify Keys:\n - " + "\n - ".join(sp_key_lines) + "\n"
+            f"Cache: total={cache_stats['total']} expired={cache_stats['expired']} expiring_soon={cache_stats['expiring_soon']} (~{cache_stats['soon_window_seconds']}s)"
+        )
+        await interaction.followup.send(msg, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Error building telemetry: {e}", ephemeral=True)
 if __name__ == "__main__":
     # Initialize SQLite cache table
     initialize_cache_table()

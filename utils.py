@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 import logging
 from dateutil.parser import isoparse
@@ -58,6 +58,29 @@ def delete_cache(key):
     """, (key,))
     conn.commit()
     conn.close()
+
+def get_cache_stats(soon_seconds: int = 600):
+    """Return cache statistics: total rows, expired rows, rows expiring within soon_seconds."""
+    try:
+        now = datetime.now()
+        soon_threshold = now + timedelta(seconds=soon_seconds)
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM cache")
+            total = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?", (now.isoformat(),))
+            expired = cur.fetchone()[0] or 0
+            cur.execute("SELECT COUNT(*) FROM cache WHERE expires_at IS NOT NULL AND expires_at >= ? AND expires_at <= ?", (now.isoformat(), soon_threshold.isoformat()))
+            expiring_soon = cur.fetchone()[0] or 0
+        return {
+            'total': total,
+            'expired': expired,
+            'expiring_soon': expiring_soon,
+            'soon_window_seconds': soon_seconds
+        }
+    except Exception as e:
+        logging.error(f"Failed to compute cache stats: {e}")
+        return {'total': 0, 'expired': 0, 'expiring_soon': 0, 'soon_window_seconds': soon_seconds, 'error': str(e)}
 
 # Configure logging with color-coded levels
 class CustomFormatter(logging.Formatter):
@@ -166,3 +189,75 @@ def get_highest_quality_artwork(url: str) -> str:
             pass
             
     return url  # Return original if no upgrades possible
+
+def parse_sc_datetime(value: str):
+    """Robust SoundCloud/ISO8601 datetime parser returning aware UTC datetime or None.
+    Accepts: full timestamps with/without Z / fractional seconds, date-only strings.
+    """
+    if not value:
+        return None
+    try:
+        v = value.strip()
+        # Normalize Z
+        if v.endswith('Z'):
+            v = v[:-1] + '+00:00'
+        # Date only
+        if len(v) == 10 and v.count('-') == 2:
+            return datetime.strptime(v, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        # Try common fractional / non-fractional
+        fmts = [
+            '%Y-%m-%dT%H:%M:%S%z',
+            '%Y-%m-%dT%H:%M:%S.%f%z'
+        ]
+        for fmt in fmts:
+            try:
+                return datetime.strptime(v, fmt)
+            except ValueError:
+                continue
+        # Fallback to dateutil
+        dt = isoparse(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception as e:
+        logging.debug(f"parse_sc_datetime failed for '{value}': {e}")
+        return None
+
+def prune_expired_cache(now: datetime = None):
+    """Delete expired cache rows and return count removed."""
+    now = now or datetime.now()
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?", (now.isoformat(),))
+            to_remove = cur.fetchone()[0] or 0
+            cur.execute("DELETE FROM cache WHERE expires_at IS NOT NULL AND expires_at < ?", (now.isoformat(),))
+            conn.commit()
+        return to_remove
+    except Exception as e:
+        logging.error(f"Failed pruning cache: {e}")
+        return 0
+
+# Runtime log mode switcher
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return requests.utils.json.dumps({
+            'ts': datetime.utcnow().isoformat()+'Z',
+            'level': record.levelname,
+            'msg': record.getMessage(),
+            'logger': record.name,
+            'module': record.module
+        }, ensure_ascii=False)
+
+def set_log_mode(mode: str):
+    """Switch root logger between 'json' and 'text' formats at runtime."""
+    mode = (mode or '').lower()
+    root = logging.getLogger()
+    if mode == 'json':
+        fmt = JSONFormatter()
+    else:
+        from utils import CustomFormatter  # circular safe (already defined above)
+        fmt = CustomFormatter('%(asctime)s %(levelname)s: %(message)s')
+    for h in root.handlers:
+        h.setFormatter(fmt)
+    logging.info(f"Log mode switched to {mode or 'text'}")

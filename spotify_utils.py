@@ -101,6 +101,26 @@ class SpotifyKeyManager:
         except Exception as e:
             logging.error(f"Failed to send Spotify rotation log: {e}")
 
+    def get_status_rows(self):
+        """Return structured status info for all keys."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        rows = []
+        for i, (cid, _sec) in enumerate(self.keys):
+            cooldown_until = self.key_cooldowns.get(i)
+            if i == self.index:
+                state = "active"
+            elif cooldown_until and cooldown_until > now:
+                state = f"cooldown_until={cooldown_until.isoformat()}"
+            else:
+                state = "ready"
+            rows.append({
+                "index": i,
+                "client_id_preview": cid[:12] + "…",
+                "state": state
+            })
+        return rows
+
 def _rebuild_spotify_client(client_id, client_secret):
     global spotify
     spotify = spotipy.Spotify(
@@ -203,6 +223,36 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
             time.sleep(delay)
             continue
     return None
+
+def get_spotify_key_status():
+    """Public helper to fetch current Spotify credential status."""
+    global spotify_key_manager
+    if not spotify_key_manager or not spotify_key_manager.keys:
+        return {"loaded": False, "keys": []}
+    return {
+        "loaded": True,
+        "active_index": spotify_key_manager.index,
+        "total_keys": len(spotify_key_manager.keys),
+        "keys": spotify_key_manager.get_status_rows()
+    }
+
+def manual_rotate_spotify_key(reason: str = "manual"):
+    """Public helper to manually rotate Spotify credentials.
+    Returns dict with keys: rotated(bool), active_index, total_keys, keys(list)."""
+    global spotify_key_manager
+    if not spotify_key_manager or not getattr(spotify_key_manager, 'keys', None):
+        return {"rotated": False, "error": "No Spotify keys configured", "keys": []}
+    if len(spotify_key_manager.keys) == 1:
+        return {"rotated": False, "error": "Only one Spotify key configured", "keys": spotify_key_manager.get_status_rows()}
+    old_index = spotify_key_manager.index
+    rotated = _attempt_rotation(reason)
+    return {
+        "rotated": rotated,
+        "old_index": old_index,
+        "active_index": spotify_key_manager.index,
+        "total_keys": len(spotify_key_manager.keys),
+        "keys": spotify_key_manager.get_status_rows()
+    }
 
 # --- Utilities ---
 

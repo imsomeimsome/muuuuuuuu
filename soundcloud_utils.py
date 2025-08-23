@@ -4,16 +4,17 @@ import re
 import time
 import sqlite3
 import asyncio
+import random
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from datetime import datetime, timezone, timedelta
 import logging
 from utils import get_cache, set_cache, delete_cache
 import json
-from database_utils import DB_PATH, get_channel
+from database_utils import DB_PATH, get_channel, save_api_key_state, load_api_key_state
 from dateutil.parser import parse as isoparse
 from functools import lru_cache
-
+import threading
 
 # At the top after imports
 load_dotenv()
@@ -21,6 +22,46 @@ load_dotenv()
 # Initialize global variables
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 key_manager = None
+
+# --- Telemetry & Circuit Breaker ---
+TELEMETRY = {
+    'requests': 0,
+    'success': 0,
+    'client_errors': 0,
+    'server_errors': 0,
+    'rotations': 0,
+    'refresh_attempts': 0,
+    'html_soft_fail': 0,
+    'circuit_breaker_tripped': 0
+}
+CIRCUIT_BREAKER_UNTIL = None  # datetime when breaker lifts
+CIRCUIT_BREAKER_MIN = timedelta(minutes=10)
+
+def circuit_breaker_active():
+    global CIRCUIT_BREAKER_UNTIL
+    if not CIRCUIT_BREAKER_UNTIL:
+        return False
+    if datetime.now(timezone.utc) >= CIRCUIT_BREAKER_UNTIL:
+        CIRCUIT_BREAKER_UNTIL = None
+        return False
+    return True
+
+def trip_circuit_breaker(duration: timedelta = None, reason: str = ''):
+    """Activate circuit breaker for given duration (default adaptive)."""
+    global CIRCUIT_BREAKER_UNTIL, TELEMETRY
+    if duration is None:
+        duration = CIRCUIT_BREAKER_MIN
+    CIRCUIT_BREAKER_UNTIL = datetime.now(timezone.utc) + duration
+    TELEMETRY['circuit_breaker_tripped'] += 1
+    logging.error(f"🛑 SoundCloud circuit breaker tripped for {duration}. Reason: {reason}")
+
+
+def get_circuit_breaker_status():
+    return {
+        'active': circuit_breaker_active(),
+        'until': CIRCUIT_BREAKER_UNTIL.isoformat() if CIRCUIT_BREAKER_UNTIL else None,
+        'seconds_remaining': (CIRCUIT_BREAKER_UNTIL - datetime.now(timezone.utc)).total_seconds() if CIRCUIT_BREAKER_UNTIL else 0
+    }
 
 class SoundCloudKeyManager:
     def __init__(self, bot=None):
@@ -34,10 +75,57 @@ class SoundCloudKeyManager:
         self.current_key_index = 0
         self.key_cooldowns = {}          # idx -> datetime until reusable
         self.fail_counts = {}            # idx -> consecutive failures
+        # Load persisted state if any
+        try:
+            persisted = load_api_key_state('soundcloud')
+            if persisted:
+                # Determine active index
+                active_indices = [idx for idx, row in persisted.items() if row.get('active')]
+                if active_indices:
+                    active_idx = active_indices[0]
+                    if active_idx < len(self.api_keys):
+                        self.current_key_index = active_idx
+                # Restore fail counts & cooldowns (only if within future)
+                from datetime import datetime as _dt, timezone as _tz
+                now = _dt.now(_tz.utc)
+                for idx, row in persisted.items():
+                    if idx < len(self.api_keys):
+                        self.fail_counts[idx] = row.get('fail_count', 0)
+                        cd_str = row.get('cooldown_until')
+                        if cd_str:
+                            try:
+                                cd_dt = _dt.fromisoformat(cd_str.replace('Z', '+00:00'))
+                                if cd_dt > now:
+                                    self.key_cooldowns[idx] = cd_dt
+                            except Exception:
+                                pass
+        except Exception as e:
+            logging.warning(f"Failed restoring SoundCloud key state: {e}")
         if not self.api_keys:
             logging.error("❌ No SoundCloud API keys configured.")
         else:
-            logging.info(f"✅ Loaded {len(self.api_keys)} SoundCloud key(s). Using index 0.")
+            logging.info(f"✅ Loaded {len(self.api_keys)} SoundCloud key(s). Using index {self.current_key_index}.")
+            self.persist_state()
+
+    def persist_state(self):
+        """Persist current rotation state to database."""
+        snapshot = []
+        for idx, key in enumerate(self.api_keys):
+            cd = self.key_cooldowns.get(idx)
+            snapshot.append({
+                'index': idx,
+                'key': key,
+                'fail_count': self.fail_counts.get(idx, 0),
+                'cooldown_until': cd.isoformat() if cd else None,
+                'active': idx == self.current_key_index
+            })
+        save_api_key_state('soundcloud', snapshot)
+
+    def stop_background_tasks(self):
+        """Cancel internal background tasks (called on shutdown)."""
+        task = getattr(self, '_auto_refresh_task', None)
+        if task and not task.done():
+            task.cancel()
 
     def get_current_key(self):
         if not self.api_keys:
@@ -57,6 +145,7 @@ class SoundCloudKeyManager:
         idx = self.current_key_index
         self.fail_counts[idx] = self.fail_counts.get(idx, 0) + 1
         self.key_cooldowns[idx] = datetime.now(timezone.utc) + self._calc_cooldown(idx)
+        self.persist_state()
 
     async def _log_rotation(self, old_index, new_index, reason, exhausted=False):
         if not self.bot:
@@ -88,7 +177,7 @@ class SoundCloudKeyManager:
             logging.error(f"Failed to log SoundCloud rotation: {e}")
 
     def rotate_key(self, reason="rate_limit"):
-        """Rotate to next available key; schedule async log."""
+        """Rotate to next available key; schedule async log. Returns new key or None."""
         if len(self.api_keys) <= 1:
             logging.warning("⚠️ Only one SoundCloud key configured; cannot rotate.")
             return None
@@ -97,115 +186,269 @@ class SoundCloudKeyManager:
             nxt = (self.current_key_index + 1) % len(self.api_keys)
             cd = self.key_cooldowns.get(nxt)
             if cd and datetime.now(timezone.utc) < cd:
-                self.current_key_index = nxt  # advance but continue searching
+                # Skip keys still cooling down
+                self.current_key_index = nxt
                 continue
             self.current_key_index = nxt
             new_key = self.get_current_key()
-            # Reset failure count for new key
             self.fail_counts[self.current_key_index] = 0
+            logging.info(f"🔄 Rotated SoundCloud key {old+1} ➜ {self.current_key_index+1} ({new_key[:10]}…)")
             if self.bot:
-                asyncio.create_task(self._log_rotation(old, self.current_key_index, reason))
+                try:
+                    asyncio.create_task(self._log_rotation(old, self.current_key_index, reason))
+                except RuntimeError:
+                    # Event loop not started yet
+                    pass
+            self.persist_state()
             return new_key
         # Exhausted
+        logging.error("🛑 All SoundCloud keys on cooldown (rotation exhausted).")
         if self.bot:
-            asyncio.create_task(self._log_rotation(old, old, reason, exhausted=True))
-        raise ValueError("No SoundCloud API keys available (all on cooldown)")
+            try:
+                asyncio.create_task(self._log_rotation(old, old, reason, exhausted=True))
+            except RuntimeError:
+                pass
+        self.persist_state()
+        return None
+
+    def get_status_rows(self):
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        rows = []
+        for i, key in enumerate(self.api_keys):
+            if i == self.current_key_index:
+                state = 'active'
+            else:
+                cd = self.key_cooldowns.get(i)
+                state = f"cooldown_until={cd.isoformat()}" if cd and cd > now else 'ready'
+            rows.append({
+                'index': i,
+                'key_preview': (key or '')[:12] + '…',
+                'state': state,
+                'fail_count': self.fail_counts.get(i, 0)
+            })
+        return rows
+
+    def start_background_tasks(self):
+        if not self.bot:
+            return
+        loop = asyncio.get_event_loop()
+        if not hasattr(self, '_auto_refresh_task'):
+            self._auto_refresh_task = loop.create_task(self._auto_refresh_loop())
+
+    async def _auto_refresh_loop(self):
+        from datetime import datetime as _dt, timezone as _tz
+        from soundcloud_utils import verify_client_id, refresh_client_id  # self import safe at runtime
+        while True:
+            try:
+                # Sleep ~30m +/- 5m jitter
+                base = 1800
+                jitter = random.randint(-300, 300)
+                await asyncio.sleep(max(60, base + jitter))
+                # Skip if no keys
+                if not self.api_keys:
+                    continue
+                # If active key is in cooldown pick a ready one
+                now = _dt.now(_tz.utc)
+                cd = self.key_cooldowns.get(self.current_key_index)
+                if cd and cd > now:
+                    rotated = self.rotate_key(reason="cooldown_active_auto")
+                    if rotated:
+                        logging.info("🔁 Auto-rotation due to active key cooldown.")
+                # Validate current key
+                if not verify_client_id():
+                    logging.warning("⚠️ Active SoundCloud key appears invalid; attempting refresh/rotation")
+                    refreshed = None
+                    # Try rotation first
+                    rotated = self.rotate_key(reason="auto_invalid")
+                    if not rotated:
+                        try:
+                            refreshed = refresh_client_id()
+                        except Exception:
+                            refreshed = None
+                    if refreshed:
+                        logging.info("♻️ Auto-refreshed SoundCloud client_id")
+                    self.persist_state()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logging.warning(f"SoundCloud auto-refresh loop error: {e}")
 
 def init_key_manager(bot):
     """Initialize the key manager with bot reference."""
     global key_manager, CLIENT_ID
     key_manager = SoundCloudKeyManager(bot)
     CLIENT_ID = key_manager.get_current_key()
+    # Start background maintenance tasks
+    try:
+        key_manager.start_background_tasks()
+    except Exception as e:
+        logging.warning(f"Failed starting SoundCloud key background tasks: {e}")
     return CLIENT_ID
+
+def manual_rotate_soundcloud_key(reason: str = 'manual'):
+    """Rotate SoundCloud key manually. Returns dict with rotation info."""
+    global key_manager, CLIENT_ID
+    if not key_manager or not getattr(key_manager, 'api_keys', None):
+        return {'rotated': False, 'error': 'No SoundCloud keys configured'}
+    if len(key_manager.api_keys) == 1:
+        return {'rotated': False, 'error': 'Only one SoundCloud key configured', 'keys': key_manager.get_status_rows()}
+    old = key_manager.current_key_index
+    new_key = key_manager.rotate_key(reason=reason)
+    if new_key:
+        CLIENT_ID = new_key
+        return {
+            'rotated': True,
+            'old_index': old,
+            'active_index': key_manager.current_key_index,
+            'total_keys': len(key_manager.api_keys),
+            'keys': key_manager.get_status_rows()
+        }
+    return {'rotated': False, 'error': 'Rotation failed (all keys exhausted)', 'keys': key_manager.get_status_rows()}
+
+def get_soundcloud_key_status():
+    global key_manager
+    if not key_manager or not getattr(key_manager, 'api_keys', None):
+        return {'loaded': False, 'keys': []}
+    return {
+        'loaded': True,
+        'active_index': key_manager.current_key_index,
+        'total_keys': len(key_manager.api_keys),
+        'keys': key_manager.get_status_rows()
+    }
 
 # Cache duration for repeated SoundCloud lookups
 CACHE_TTL = 300  # 5 minutes
 # Load environment variables
 
+# --- Cache helper with jitter ---
+import random as _random
+
+def _jittered_ttl(base:int, jitter:int=60):
+    if jitter <= 0:
+        return base
+    delta = _random.randint(-jitter, jitter)
+    return max(30, base + delta)  # enforce minimum 30s
+
+# Unified resolve logic (remove duplicate _cached_resolve layering)
+
 def resolve_url(url):
-    """Resolve a SoundCloud URL to its API data."""
+    """Resolve a SoundCloud URL to its API data with single-layer caching + jitter."""
     url = clean_soundcloud_url(url)  # Normalize the URL
     cache_key = f"resolve:{url}"
     cached = get_cache(cache_key)
     if cached:
-        return json.loads(cached)
-
-    resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
-    
-    # Try multiple times with key rotation
-    for attempt in range(3):
         try:
-            response = safe_request(resolve_endpoint)
-            if response and response.status_code == 200:
+            return json.loads(cached)
+        except Exception:
+            delete_cache(cache_key)
+    resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
+    for attempt in range(3):
+        if circuit_breaker_active():
+            logging.warning("⛔ Circuit breaker active - skipping resolve")
+            return None
+        response = safe_request(resolve_endpoint)
+        if response and response.status_code == 200:
+            try:
                 data = response.json()
-                set_cache(cache_key, json.dumps(data), ttl=3600)  # Cache for 1 hour
+            except Exception:
+                data = None
+            if data:
+                set_cache(cache_key, json.dumps(data), ttl=_jittered_ttl(3600, 120))
                 return data
-                
-            # Handle rate limits in safe_request
-            if not response:
-                logging.warning(f"Failed to resolve URL (attempt {attempt + 1})")
-                time.sleep(2)
-                continue
-
-        except Exception as e:
-            logging.error(f"Error resolving URL: {e}")
-            if attempt < 2:  # Try again if not last attempt
-                time.sleep(2)
-                continue
-            break
-
+        time.sleep(1 + attempt * 0.5)
     return None
 
+# Backwards compatibility shim (kept name, uses new resolve_url)
+@lru_cache(maxsize=512)
+def _cached_resolve(url: str):
+    return resolve_url(url)
+
+# Rate limit detection patterns (case-insensitive)
+RATE_LIMIT_PATTERNS = [
+    "rate/request limit",
+    "retry will occur after",
+    "application has reached a rate",
+    "too many requests",
+    "rate limit"  # generic fallback
+]
+
+def _ensure_client_id_param(url: str, client_id: str) -> str:
+    """Ensure the URL contains the correct client_id parameter, replacing or appending as needed."""
+    if 'client_id=' in url:
+        return re.sub(r'client_id=[^&]+', f'client_id={client_id}', url)
+    separator = '&' if '?' in url else '?'
+    return f"{url}{separator}client_id={client_id}"
+
 def safe_request(url, headers=None, retries=3, timeout=10):
-    """Make a request with automatic key rotation on rate limits."""
-    global CLIENT_ID, key_manager
+    """HTTP request with adaptive timeout, rotation, circuit breaker, soft-fail HTML detection."""
+    global CLIENT_ID, key_manager, TELEMETRY, CIRCUIT_BREAKER_UNTIL
+    if circuit_breaker_active():
+        logging.debug("🔌 Circuit breaker active - skipping request")
+        return None
     if not CLIENT_ID:
         raise ValueError("No SoundCloud CLIENT_ID available")
-
     original_url = url
+    last_error_body = None
+    timeouts = [5, 10, 15]  # adaptive timeouts
     for attempt in range(retries):
+        TELEMETRY['requests'] += 1
         try:
-            response = requests.get(url, headers=headers or HEADERS, timeout=timeout)
-            text_lower = response.text.lower() if hasattr(response, "text") else ""
-            is_rate_limited = (
-                response.status_code in (401, 429)
-                or "rate/request limit" in text_lower
-                or "retry will occur after" in text_lower
-            )
+            eff_timeout = timeouts[min(attempt, len(timeouts)-1)]
+            url = _ensure_client_id_param(original_url, CLIENT_ID)
+            response = requests.get(url, headers=headers or HEADERS, timeout=eff_timeout)
+            status = response.status_code
+            # Soft-fail HTML detection
+            ct = response.headers.get('Content-Type','')
+            text_snip = response.text[:120].lower() if response.text else ''
+            if status == 200 and ('text/html' in ct.lower() or text_snip.startswith('<!doctype') or text_snip.startswith('<html')):
+                TELEMETRY['html_soft_fail'] += 1
+                logging.warning("⚠️ Received HTML instead of JSON (soft fail) - treating as rate limit")
+                status = 429  # treat as rate limit to trigger rotation
+            try:
+                body_lower = response.text.lower()
+            except Exception:
+                body_lower = ""
+            rate_text_hit = any(pat in body_lower for pat in RATE_LIMIT_PATTERNS)
+            is_rate_limited = status in (401, 429, 403) or rate_text_hit
             if is_rate_limited:
-                logging.warning(f"⚠️ SoundCloud rate limit on key {CLIENT_ID[:8]} (attempt {attempt+1}/{retries})")
                 if key_manager:
                     key_manager.mark_rate_limited()
-                    try:
-                        new_key = key_manager.rotate_key(reason="rate_limit")
-                        if new_key:
-                            CLIENT_ID = new_key
-                            # Replace client_id param if present
-                            url = re.sub(r'client_id=[^&]+', f'client_id={new_key}', original_url)
-                            # jitter
-                            time.sleep(0.5 + (attempt * 0.3))
-                            continue
-                    except ValueError:
-                        logging.error("🛑 SoundCloud: all keys exhausted.")
+                    old_index = key_manager.current_key_index
+                    new_key = key_manager.rotate_key(reason="rate_limit")
+                    TELEMETRY['rotations'] += 1
+                    if new_key and new_key != CLIENT_ID:
+                        CLIENT_ID = new_key
+                        time.sleep(0.25)
+                        continue
+                    else:
+                        # All keys exhausted -> trip circuit breaker to avoid hammering
+                        trip_circuit_breaker(reason="all_keys_exhausted_or_rotation_failed")
                         return None
-                # If no manager / rotation: backoff then retry
-                time.sleep(2 + attempt)
-                continue
-
-            if response.status_code == 200:
+                else:
+                    logging.error("❌ key_manager missing - cannot rotate")
+                    trip_circuit_breaker(reason="no_key_manager")
+                    return None
+            if status == 200:
+                TELEMETRY['success'] += 1
                 return response
-
-            # Retry transient 5xx
-            if 500 <= response.status_code < 600 and attempt < retries - 1:
-                logging.warning(f"🔥 SoundCloud {response.status_code} - retry {attempt+1}")
-                time.sleep(1 + attempt)
-                continue
-
+            if status == 404:
+                TELEMETRY['client_errors'] += 1
+                return response
+            if 500 <= status < 600:
+                TELEMETRY['server_errors'] += 1
+                if attempt < retries - 1:
+                    time.sleep(1 + attempt)
+                    continue
+                return None
+            # Other client errors
+            if 400 <= status < 500:
+                TELEMETRY['client_errors'] += 1
+            last_error_body = body_lower
             response.raise_for_status()
-
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(1 + attempt)
+                time.sleep(0.5 + attempt * 0.5)
                 continue
             logging.error(f"❌ SoundCloud request failed: {e}")
             return None
@@ -496,7 +739,7 @@ def get_soundcloud_playlist_info(artist_url):
 
 
 def get_soundcloud_likes_info(artist_url, force_refresh=False):
-    """Fetch and process liked tracks/playlists from a SoundCloud user."""
+    """Fetch and process liked tracks/playlists from a SoundCloud user with playlist resolve batching."""
     try:
         cache_key = f"likes:{artist_url}"
         if not force_refresh:
@@ -504,120 +747,67 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if cached:
                 logging.info(f"✅ Cache hit for likes: {artist_url}")
                 return json.loads(cached)
-
         logging.info(f"⏳ Fetching likes for {artist_url}...")
         resolved = resolve_url(artist_url)
         if not resolved or "id" not in resolved:
             logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
             return []
-
         user_id = resolved["id"]
         url = f"https://api-v2.soundcloud.com/users/{user_id}/likes?client_id={CLIENT_ID}&limit=10"
         response = safe_request(url)
         if not response:
             logging.warning(f"⚠️ No response received for likes: {artist_url}")
             return []
-
         data = response.json()
         if not data or "collection" not in data:
             logging.warning(f"⚠️ Invalid or empty data received for likes: {artist_url}")
             return []
-
         likes = []
+        playlist_cache = {}
         for item in data.get("collection", []):
             original = item.get("track") or item.get("playlist")
             if not original:
                 continue
-
-            # Determine if it's a playlist/album and get tracks data
             content_type = "track"
             tracks_data = None
+            # Batch resolve for playlists
             if original.get('kind') == 'playlist':
-                try:
-                    playlist_url = original.get('permalink_url')
-                    if playlist_url:
+                playlist_url = original.get('permalink_url')
+                if playlist_url:
+                    if playlist_url not in playlist_cache:
                         playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
-                            playlist_data = playlist_response.json()
-                            tracks_data = playlist_data.get('tracks', [])
-                            
-                            # More accurate release type detection
-                            title = original.get('title', '').lower()
-                            track_count = len(tracks_data) if tracks_data else 0
-                            
-                            # Check specific keywords first
-                            if any(kw in title for kw in ['album', 'lp', 'record']):
-                                content_type = "album"
-                            elif any(kw in title for kw in ['ep', 'extended play']):
-                                content_type = "EP"
-                            elif any(kw in title for kw in ['mixtape', 'mix tape']):
-                                content_type = "mixtape"
-                            # Check track count if no keywords found
-                            elif track_count >= 7:
-                                content_type = "album"
-                            elif track_count >= 2:
-                                content_type = "EP"
-                            # Finally check for playlist indicators
-                            elif any(kw in title for kw in ['playlist', 'mix', 'selection', 'picks']):
-                                content_type = "playlist"
-                            
-                            # Additional checks for compilation vs album
-                            if content_type in ["album", "EP"]:
-                                # Check for multiple artists
-                                artists = set(track.get('user', {}).get('username') for track in tracks_data)
-                                if len(artists) > 1:
-                                    content_type = "compilation"
-
-                except Exception as e:
-                    logging.warning(f"Error fetching playlist data: {e}")
-                    content_type = "playlist"  # Default to playlist if fetch fails
-
-
-            # Get timestamps with fallbacks
+                            playlist_cache[playlist_url] = playlist_response.json()
+                        else:
+                            playlist_cache[playlist_url] = None
+                    playlist_data = playlist_cache.get(playlist_url)
+                    if playlist_data:
+                        tracks_data = playlist_data.get('tracks', [])
+                        title_lower = (original.get('title') or '').lower()
+                        track_count = len(tracks_data)
+                        if any(kw in title_lower for kw in ['album', 'lp', 'record']):
+                            content_type = 'album'
+                        elif any(kw in title_lower for kw in ['ep', 'extended play']):
+                            content_type = 'EP'
+                        elif track_count >= 7:
+                            content_type = 'album'
+                        elif track_count >= 2:
+                            content_type = 'EP'
+                        else:
+                            content_type = 'playlist'
             like_date = item.get("created_at")
             if not like_date:
                 continue
-            
             track_release_date = original.get("created_at") or like_date
-
-            # Handle genres and content type for playlists/albums
             genres = []
-            if content_type == "playlist":
-                try:
-                    playlist_url = original.get('permalink_url')
-                    if playlist_url:
-                        playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
-                        playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
-                        if playlist_response:
-                            playlist_data = playlist_response.json()
-                            tracks_data = playlist_data.get('tracks', [])
-                            
-                            # Determine the actual release type
-                            content_type = determine_release_type(playlist_data, tracks_data)
-                            
-                            # Get genres from all tracks
-                            unique_genres = set()
-                            for track in tracks_data:
-                                if track.get('genre'):
-                                    genre = track['genre'].strip()
-                                    if genre:
-                                        unique_genres.add(genre)
-                            
-                            # Also check playlist-level genre
-                            if playlist_data.get('genre'):
-                                unique_genres.add(playlist_data['genre'].strip())
-                            
-                            genres = sorted(list(unique_genres)) if unique_genres else ["N/A"]
-                except Exception as e:
-                    logging.warning(f"Error fetching playlist data: {e}")
-                    genres = ["N/A"]
+            if content_type == 'playlist' and tracks_data:
+                unique_genres = { (t.get('genre') or '').strip() for t in tracks_data if t.get('genre') }
+                genres = sorted(g for g in unique_genres if g)
             else:
-                # Single track genre handling
                 if original.get('genre'):
-                    genres = [original['genre']]
-
-            # Handle duration formatting
+                    genres = [original.get('genre')]
+            # Duration formatting
             duration = None
             if original.get('duration'):
                 ms = original['duration']
@@ -630,7 +820,6 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                     duration = f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
                 else:
                     duration = f"{minutes}:{remaining_seconds:02d}"
-
             likes.append({
                 "track_id": original.get("id"),
                 "title": original.get("title"),
@@ -645,13 +834,11 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "duration": duration,
                 "genres": genres,
                 "content_type": content_type,
-                "tracks_data": tracks_data if 'tracks_data' in locals() else None,  # Include tracks data
+                "tracks_data": tracks_data,
                 "liked": True
             })
-
-        set_cache(cache_key, json.dumps(likes), ttl=60)  # Short cache TTL for likes
+        set_cache(cache_key, json.dumps(likes), ttl=_jittered_ttl(60, 15))
         return likes
-
     except Exception as e:
         logging.error(f"Error fetching likes for {artist_url}: {e}")
         return []
@@ -840,27 +1027,34 @@ def format_duration(ms):
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
 
+# Precompile feature extraction regex patterns
+_FEATURE_PATTERNS = [
+    re.compile(r"\((?:feat|ft|with)\.?\s*([^)]+)\)", re.IGNORECASE),
+    re.compile(r"\[(?:feat|ft|with)\.?\s*([^\]]+)\]", re.IGNORECASE),
+    re.compile(r"(?:feat|ft|with)\.?\s+([^\-–()\[\]]+)", re.IGNORECASE),
+    re.compile(r"w/\s*([^\-–()\[\]]+)", re.IGNORECASE)
+]
+_MAX_FEATURE_CHARS = 120
 
 def extract_features(title):
-    """Extract featured artists from track titles."""
-    patterns = [
-        r"\((?:feat|ft|with)\.?\s*([^)]+)\)",
-        r"\[(?:feat|ft|with)\.?\s*([^\]]+)\]",
-        r"(?:feat|ft|with)\.?\s+([^\-–()\[\]]+)",
-        r"w/\s*([^\-–()\[\]]+)"
-    ]
+    """Extract featured artists from track titles using precompiled patterns with trimming."""
     features = set()
-
-    for pattern in patterns:
-        matches = re.findall(pattern, title, re.IGNORECASE)
+    for pattern in _FEATURE_PATTERNS:
+        matches = pattern.findall(title or '')
         for match in matches:
             cleaned = match.strip()
             for sep in ['/', '&', ',', ' and ', ' x ']:
                 cleaned = cleaned.replace(sep, ',')
-            features.update(
-                [name.strip() for name in cleaned.split(',') if name.strip()]
-            )
-    return ", ".join(sorted(features)) if features else "None"
+            for name in cleaned.split(','):
+                name = name.strip()
+                if name:
+                    features.add(name)
+    if not features:
+        return "None"
+    out = ", ".join(sorted(features))
+    if len(out) > _MAX_FEATURE_CHARS:
+        out = out[:_MAX_FEATURE_CHARS-3].rstrip(', ') + '...'
+    return out
 
 # --- Bot Integration Helpers ---
 
@@ -918,7 +1112,6 @@ def get_soundcloud_release_info(url):
         elif kind == "playlist":
             # Ensure 'tracks' key present (sometimes truncated)
             if not resolved.get("tracks"):
-                # Refetch full playlist if needed
                 playlist_api = f"https://api-v2.soundcloud.com/playlists/{resolved.get('id')}?client_id={CLIENT_ID}"
                 full_resp = safe_request(playlist_api, headers=HEADERS)
                 if full_resp and full_resp.status_code == 200:
@@ -926,26 +1119,24 @@ def get_soundcloud_release_info(url):
             info = process_playlist(resolved)
 
         elif kind == "user":
-            # First attempt: helper
-            info = get_artist_release(resolved)
-
-            # Fallback if helper returned None
+            # Try to get latest track(s)
+            user_id = resolved.get("id")
+            if user_id:
+                tracks_url = (
+                    f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
+                    f"?client_id={CLIENT_ID}&limit=5&linked_partitioning=1&representation=full"
+                )
+                resp = safe_request(tracks_url, headers=HEADERS)
+                if resp and resp.status_code == 200:
+                    data = resp.json()
+                    tracks = data.get('collection', data if isinstance(data, list) else [])
+                    if tracks:
+                        # Pick newest by created_at
+                        newest = max(tracks, key=lambda t: t.get('created_at', '') or '')
+                        info = process_track(newest)
             if not info:
-                user_id = resolved.get("id")
-                if user_id:
-                    tracks_url = (
-                        f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
-                        f"?client_id={CLIENT_ID}&limit=1&linked_partitioning=1&representation=full"
-                    )
-                    resp = safe_request(tracks_url, headers=HEADERS)
-                    if resp:
-                        data = resp.json()
-                        tracks = data.get('collection', data if isinstance(data, list) else [])
-                        if tracks:
-                            info = process_track(tracks[0])
-                if not info:
-                    logging.info(f"ℹ️ No tracks available after fallback for {url}")
-                    return None
+                logging.info(f"ℹ️ No tracks available after fallback for {url}")
+                return None
         else:
             logging.warning(f"Unsupported content kind '{kind}' for {url}")
             return None
@@ -1101,7 +1292,22 @@ def get_all_cache_keys():
         return []
     
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
-logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
+# Support JSON logging toggle via env var LOG_JSON=1
+if os.getenv('LOG_JSON') == '1':
+    class _JSONFormatter(logging.Formatter):
+        def format(self, record):
+            import json as _json, time as _time
+            payload = {
+                'ts': _time.strftime('%Y-%m-%dT%H:%M:%SZ', _time.gmtime(record.created)),
+                'level': record.levelname,
+                'msg': record.getMessage(),
+                'logger': record.name,
+                'module': record.module
+            }
+            return _json.dumps(payload, ensure_ascii=False)
+    logging.getLogger().handlers[0].setFormatter(_JSONFormatter())
+else:
+    logging.getLogger().handlers[0].setFormatter(RailwayLogFormatter())
 
 def determine_release_type(playlist_data, tracks_data):
     """Determine release type with priority system.
@@ -1140,3 +1346,24 @@ def determine_release_type(playlist_data, tracks_data):
         return 'EP'
     
     return 'track'
+
+# --- Telemetry accessors ---
+
+def get_soundcloud_telemetry_snapshot():
+    from datetime import datetime as _dt, timezone as _tz
+    return {
+        'timestamp': _dt.now(_tz.utc).isoformat(),
+        'telemetry': TELEMETRY.copy(),
+        'circuit_breaker': get_circuit_breaker_status(),
+        'keys': get_soundcloud_key_status(),
+    }
+
+# Expose shutdown helper
+
+def stop_soundcloud_background_tasks():
+    global key_manager
+    try:
+        if key_manager:
+            key_manager.stop_background_tasks()
+    except Exception as e:
+        logging.error(f"Failed stopping SoundCloud background tasks: {e}")

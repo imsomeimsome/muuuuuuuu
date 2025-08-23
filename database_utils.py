@@ -1,565 +1,487 @@
-import sqlite3
+import os, sqlite3, logging, json
 from datetime import datetime, timezone, timedelta
-from dateutil.parser import parse as parse_datetime
-from dateutil.parser import isoparse
+from dateutil.parser import isoparse, parse as parse_datetime
 from tables import get_connection, DB_PATH
-import os
-import json
 
-# Ensure all dates stored with timezone info
+# ---------- Helpers ----------
+
 def normalize_date_str(date_str: str) -> str:
+    """Ensure stored dates are ISO8601 with timezone (UTC)."""
+    if not date_str:
+        return None
     try:
         dt = isoparse(date_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.isoformat()
     except Exception:
-        return date_str
+        try:
+            dt = parse_datetime(date_str)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
+
+# ---------- Initialization ----------
 
 def initialize_database():
-    """Check if database exists and is properly initialized."""
-    if not os.path.exists(DB_PATH):
-        print("⚠️ Database not found. Run 'python tables.py' to initialize!")
-        return
-    
-    # Check if we have the new schema
-    try:
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='platform_configs'")
-            if not cursor.fetchone():
-                print("⚠️ Old database schema detected. Run 'python tables.py' to upgrade!")
-                return
-            print("✅ Database schema is up to date.")
-    except Exception as e:
-        print(f"❌ Database check failed: {e}")
+    if not os.path.exists(os.path.dirname(DB_PATH)):
+        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    # Tables created in tables.py; ensure file exists
+    open(DB_PATH, 'a').close()
 
-# ===== USER FUNCTIONS =====
+# ---------- User Functions ----------
 
 def is_user_registered(user_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM users WHERE user_id = ?", (str(user_id),))
-        return cursor.fetchone() is not None
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM users WHERE user_id=?", (str(user_id),))
+        return cur.fetchone() is not None
 
 def add_user(user_id, username):
     now = datetime.now(timezone.utc).isoformat()
     try:
         with get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO users (user_id, username, registered_at, updated_at) VALUES (?, ?, ?, ?)",
-                (str(user_id), username, now, now)
-            )
-            conn.commit()
-            log_activity(user_id, 'register', f'Username: {username}')
-            return True
-    except sqlite3.IntegrityError:
+            conn.execute("REPLACE INTO users(user_id,username,registered_at) VALUES (?,?,?)", (str(user_id), username, now))
+        return True
+    except sqlite3.Error as e:
+        logging.error(f"add_user failed: {e}")
         return False
 
 def get_username(user_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT username FROM users WHERE user_id = ?", (str(user_id),))
-        row = cursor.fetchone()
-        return row[0] if row else "Unknown"
+        cur = conn.cursor()
+        cur.execute("SELECT username FROM users WHERE user_id=?", (str(user_id),))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 def get_user_registered_at(user_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT registered_at FROM users WHERE user_id = ?", (str(user_id),))
-        result = cursor.fetchone()
-        return result[0] if result else None
+        cur = conn.cursor()
+        cur.execute("SELECT registered_at FROM users WHERE user_id=?", (str(user_id),))
+        row = cur.fetchone()
+        return row[0] if row else None
 
-# ===== ARTIST FUNCTIONS =====
+# ---------- Artist Functions ----------
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
-    if guild_id is None:
-        raise ValueError("guild_id must be provided when adding an artist")
-
-    now = datetime.now(timezone.utc).isoformat()
-    
-    if last_release_date is None:
-        last_release_date = now
-    else:
-        last_release_date = normalize_date_str(last_release_date)
-    
-    if isinstance(genres, list):
-        genres = ",".join(genres) if genres else ""
-
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO artists
-            (platform, artist_id, artist_name, artist_url, owner_id, guild_id, 
-             genres, last_release_date, last_like_date, last_repost_date, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (platform, artist_id, artist_name, artist_url, owner_id, guild_id, 
-              genres, last_release_date, now, now, now, now))
-        conn.commit()
-        
-        log_activity(owner_id, 'track', f'Added {artist_name} ({platform})', guild_id)
+        conn.execute(
+            """REPLACE INTO artists(platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date)
+                VALUES (?,?,?,?,?,?,?,?)""",
+            (platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date))
+        )
 
 def remove_artist(artist_id, owner_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        # Get artist name for logging
-        cursor.execute("SELECT artist_name, platform FROM artists WHERE artist_id = ? AND owner_id = ?", (artist_id, owner_id))
-        result = cursor.fetchone()
-        
-        cursor.execute("DELETE FROM artists WHERE artist_id = ? AND owner_id = ?", (artist_id, owner_id))
-        conn.commit()
-        
-        if result:
-            log_activity(owner_id, 'untrack', f'Removed {result[0]} ({result[1]})')
+        conn.execute("DELETE FROM artists WHERE artist_id=? AND owner_id=?", (artist_id, str(owner_id)))
+
 
 def artist_exists(platform, artist_id, owner_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT 1 FROM artists WHERE platform = ? AND artist_id = ? AND owner_id = ?
-        ''', (platform, artist_id, owner_id))
-        return cursor.fetchone() is not None
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM artists WHERE platform=? AND artist_id=? AND owner_id=?", (platform, artist_id, str(owner_id)))
+        return cur.fetchone() is not None
 
-# Add this function to database_utils.py
+# Like tracking helpers
+
 def update_artist_last_like_date_to_now(artist_id, guild_id):
-    """Set last_like_date to now to prevent posting old content."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_like_date = ?, updated_at = ?
-            WHERE artist_id = ? AND guild_id = ?
-        """, (now, now, artist_id, guild_id))
-        conn.commit()
-        print(f"✅ Set last_like_date to {now} for artist {artist_id}")
+    update_last_like_date(artist_id, guild_id, datetime.now(timezone.utc).isoformat())
+
 
 def reset_like_tracking_for_all():
-    """Reset all like tracking to current time to prevent old content flood."""
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_like_date = ?, updated_at = ?
-            WHERE platform = 'soundcloud'
-        """, (now, now))
-        affected = cursor.rowcount
-        conn.commit()
-        print(f"✅ Reset like tracking for {affected} SoundCloud artists")
-        return affected
-    
+        conn.execute("UPDATE artists SET last_like_date=NULL")
+
+
 def get_all_artists(guild_id=None):
     with get_connection() as conn:
-        cursor = conn.cursor()
+        cur = conn.cursor()
         if guild_id:
-            cursor.execute("SELECT * FROM artists WHERE guild_id = ?", (guild_id,))
+            cur.execute("SELECT platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date, last_like_date, last_repost_date, last_playlist_date FROM artists WHERE guild_id=?", (str(guild_id),))
         else:
-            cursor.execute("SELECT * FROM artists")
+            cur.execute("SELECT platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date, last_like_date, last_repost_date, last_playlist_date FROM artists")
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
+        result = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            if d.get('genres'):
+                try:
+                    d['genres'] = json.loads(d['genres'])
+                except Exception:
+                    d['genres'] = []
+            result.append(d)
+        return result
 
-        columns = [column[0] for column in cursor.description]
-        rows = cursor.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
 
 def get_artists_by_owner(owner_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT platform, artist_id, artist_name, artist_url, last_release_date, 
-                   owner_id, genres, guild_id 
-            FROM artists WHERE owner_id = ?
-        """, (owner_id,))
-        
-        columns = ['platform', 'artist_id', 'artist_name', 'artist_url', 'last_release_date', 
-                   'owner_id', 'genres', 'guild_id']
-        rows = cursor.fetchall()
-        return [dict(zip(columns, row)) for row in rows]
+        cur = conn.cursor()
+        cur.execute("SELECT platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date FROM artists WHERE owner_id=?", (str(owner_id),))
+        rows = cur.fetchall()
+        cols = [c[0] for c in cur.description]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            if d.get('genres'):
+                try: d['genres'] = json.loads(d['genres'])
+                except: d['genres'] = []
+            out.append(d)
+        return out
+
 
 def get_artist_by_id(artist_id, owner_id, guild_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT platform, artist_id, artist_name, artist_url, 
-                   last_release_date, owner_id, genres, guild_id
-            FROM artists
-            WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
-        ''', (artist_id, owner_id, guild_id))
-        row = cursor.fetchone()
-        if row:
-            columns = ['platform', 'artist_id', 'artist_name', 'artist_url', 
-                      'last_release_date', 'owner_id', 'genres', 'guild_id']
-            return dict(zip(columns, row))
-        return None
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM artists WHERE artist_id=? AND owner_id=? AND guild_id=?", (artist_id, str(owner_id), str(guild_id)))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [c[0] for c in cur.description]
+        d = dict(zip(cols, row))
+        if d.get('genres'):
+            try: d['genres'] = json.loads(d['genres'])
+            except: d['genres'] = []
+        return d
+
 
 def get_artist_full_record(artist_id, owner_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT platform, artist_id, artist_name, artist_url, 
-                   last_release_date, owner_id, genres, guild_id
-            FROM artists 
-            WHERE artist_id = ? AND owner_id = ?
-        ''', (artist_id, owner_id))
-        row = cursor.fetchone()
-        if row:
-            columns = ['platform', 'artist_id', 'artist_name', 'artist_url', 
-                      'last_release_date', 'owner_id', 'genres', 'guild_id']
-            return dict(zip(columns, row))
-        return None
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM artists WHERE artist_id=? AND owner_id=?", (artist_id, str(owner_id)))
+        row = cur.fetchone()
+        if not row: return None
+        cols = [c[0] for c in cur.description]
+        d = dict(zip(cols, row))
+        if d.get('genres'):
+            try: d['genres'] = json.loads(d['genres'])
+            except: d['genres'] = []
+        return d
+
+# Date updates
 
 def update_last_release_date(artist_id, owner_id, guild_id, new_date):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            UPDATE artists
-            SET last_release_date = ?, updated_at = ?
-            WHERE artist_id = ? AND owner_id = ? AND guild_id = ?
-        ''', (normalize_date_str(new_date), now, artist_id, owner_id, guild_id))
-        conn.commit()
+        conn.execute("UPDATE artists SET last_release_date=? WHERE artist_id=? AND owner_id=? AND guild_id=?", (normalize_date_str(new_date), artist_id, str(owner_id), str(guild_id)))
+
 
 def update_last_like_date(artist_id, guild_id, new_date):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_like_date = ?, updated_at = ?
-            WHERE artist_id = ? AND guild_id = ?
-        """, (new_date, now, artist_id, guild_id))
-        conn.commit()
+        conn.execute("UPDATE artists SET last_like_date=? WHERE artist_id=? AND guild_id=?", (normalize_date_str(new_date), artist_id, str(guild_id)))
+
+
+def update_last_repost_date(artist_id, guild_id, new_date):
+    with get_connection() as conn:
+        conn.execute("UPDATE artists SET last_repost_date=? WHERE artist_id=? AND guild_id=?", (normalize_date_str(new_date), artist_id, str(guild_id)))
+
+
+def update_last_playlist_date(artist_id, guild_id, new_date):
+    with get_connection() as conn:
+        conn.execute("UPDATE artists SET last_playlist_date=? WHERE artist_id=? AND guild_id=?", (normalize_date_str(new_date), artist_id, str(guild_id)))
+
+# Counts
 
 def get_global_artist_count():
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT artist_id) FROM artists")
-        return cursor.fetchone()[0]
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM artists")
+        return cur.fetchone()[0]
 
-# ===== CHANNEL CONFIG =====
+# ---------- Channel Config ----------
 
 def set_channel(guild_id, platform, channel_id):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT OR REPLACE INTO channels (guild_id, platform, channel_id, created_at) VALUES (?, ?, ?, ?)",
-            (str(guild_id), platform, str(channel_id), now)
-        )
-        conn.commit()
+        conn.execute("REPLACE INTO channels(guild_id, platform, channel_id) VALUES (?,?,?)", (str(guild_id), platform, str(channel_id)))
+
 
 def get_channel(guild_id, platform):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT channel_id FROM channels WHERE guild_id = ? AND platform = ?",
-            (str(guild_id), platform)
-        )
-        result = cursor.fetchone()
-        return int(result[0]) if result else None
+        cur = conn.cursor()
+        cur.execute("SELECT channel_id FROM channels WHERE guild_id=? AND platform=?", (str(guild_id), platform))
+        row = cur.fetchone()
+        return row[0] if row else None
 
-# ===== POSTED CONTENT TRACKING =====
+# ---------- Posted Content Tracking ----------
 
 def is_already_posted_like(artist_id, guild_id, like_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT 1 FROM posted_content
-            WHERE artist_id = ? AND guild_id = ? AND content_type = 'like' AND content_id = ?
-        ''', (artist_id, guild_id, like_id))
-        return cursor.fetchone() is not None
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM posted_likes WHERE artist_id=? AND guild_id=? AND like_id=?", (artist_id, str(guild_id), like_id))
+        return cur.fetchone() is not None
 
 def mark_posted_like(artist_id, guild_id, like_id):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO posted_content 
-            (artist_id, guild_id, platform, content_type, content_id, posted_at)
-            VALUES (?, ?, 'soundcloud', 'like', ?, ?)
-        ''', (artist_id, guild_id, like_id, now))
-        conn.commit()
+        conn.execute("REPLACE INTO posted_likes(artist_id, guild_id, like_id) VALUES (?,?,?)", (artist_id, str(guild_id), like_id))
+
 
 def is_already_posted_repost(artist_id: str, guild_id: str, repost_id: str) -> bool:
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 1 FROM posted_content 
-            WHERE artist_id=? AND guild_id=? AND content_type='repost' AND content_id=?
-        """, (artist_id, guild_id, repost_id))
-        return cursor.fetchone() is not None
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM posted_reposts WHERE artist_id=? AND guild_id=? AND repost_id=?", (artist_id, str(guild_id), repost_id))
+        return cur.fetchone() is not None
 
 def mark_posted_repost(artist_id: str, guild_id: str, repost_id: str):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO posted_content 
-            (artist_id, guild_id, platform, content_type, content_id, posted_at)
-            VALUES (?, ?, 'soundcloud', 'repost', ?, ?)
-        """, (artist_id, guild_id, repost_id, now))
-        conn.commit()
+        conn.execute("REPLACE INTO posted_reposts(artist_id, guild_id, repost_id) VALUES (?,?,?)", (artist_id, str(guild_id), repost_id))
 
-# ===== RELEASE STATS =====
+
+def is_already_posted_playlist(artist_id, guild_id, playlist_id):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM posted_playlists WHERE artist_id=? AND guild_id=? AND playlist_id=?", (artist_id, str(guild_id), playlist_id))
+        return cur.fetchone() is not None
+
+def mark_posted_playlist(artist_id, guild_id, playlist_id):
+    with get_connection() as conn:
+        conn.execute("REPLACE INTO posted_playlists(artist_id, guild_id, playlist_id) VALUES (?,?,?)", (artist_id, str(guild_id), playlist_id))
+
+
+def store_playlist_state(artist_id, guild_id, playlist_id, tracks):
+    with get_connection() as conn:
+        conn.execute("REPLACE INTO playlist_states(artist_id, guild_id, playlist_id, tracks) VALUES (?,?,?,?)", (artist_id, str(guild_id), playlist_id, json.dumps(tracks)))
+
+
+def get_playlist_state(artist_id, guild_id, playlist_id):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT tracks FROM playlist_states WHERE artist_id=? AND guild_id=? AND playlist_id=?", (artist_id, str(guild_id), playlist_id))
+        row = cur.fetchone()
+        if not row: return None
+        try: return json.loads(row[0])
+        except: return None
+
+# ---------- Release Stats ----------
 
 def get_release_stats(user_id=None):
     with get_connection() as conn:
-        cursor = conn.cursor()
+        cur = conn.cursor()
         if user_id:
-            cursor.execute("SELECT release_type, COUNT(*) FROM releases WHERE user_id = ? GROUP BY release_type", (str(user_id),))
+            cur.execute("SELECT release_type, COUNT(*) FROM release_stats WHERE user_id=? GROUP BY release_type", (str(user_id),))
         else:
-            cursor.execute("SELECT release_type, COUNT(*) FROM releases GROUP BY release_type")
-        
-        stats = {"albums": 0, "eps": 0, "singles": 0, "deluxes": 0, "total": 0}
-        rows = cursor.fetchall()
-        for release_type, count in rows:
-            if release_type == "album":
-                stats["albums"] += count
-            elif release_type == "ep":
-                stats["eps"] += count
-            elif release_type == "single":
-                stats["singles"] += count
-            stats["total"] += count
+            cur.execute("SELECT release_type, COUNT(*) FROM release_stats GROUP BY release_type")
+        rows = cur.fetchall()
+        stats = {"albums":0,"eps":0,"singles":0,"deluxes":0}
+        total = 0
+        for rtype, cnt in rows:
+            total += cnt
+            key = rtype.lower()
+            if key.startswith('album'): stats['albums'] += cnt
+            elif key.startswith('ep'): stats['eps'] += cnt
+            elif key.startswith('deluxe'): stats['deluxes'] += cnt
+            else: stats['singles'] += cnt
+        stats['total'] = total
         return stats
 
 def add_release(user_id, artist_id, release_type, release_date):
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO releases (user_id, artist_id, platform, release_type, posted_at, guild_id) VALUES (?, ?, ?, ?, ?, ?)",
-            (str(user_id), artist_id, 'unknown', release_type, now, 'unknown')
-        )
-        conn.commit()
+        conn.execute("INSERT INTO release_stats(user_id, artist_id, release_type, release_date) VALUES (?,?,?,?)", (str(user_id), artist_id, release_type, normalize_date_str(release_date)))
 
-# ===== ACTIVITY LOGGING =====
+# ---------- Activity Logging ----------
 
 def log_activity(user_id, action, details=None, guild_id=None):
-    """Log user activity."""
-    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO activity_logs (user_id, action, details, timestamp, guild_id) VALUES (?, ?, ?, ?, ?)",
-            (str(user_id), action, details, now, guild_id)
-        )
-        conn.commit()
+        conn.execute("INSERT INTO activity_logs(user_id, action, timestamp, details) VALUES (?,?,?,?)", (str(user_id), action, datetime.now(timezone.utc).isoformat(), json.dumps({"details":details, "guild_id":guild_id})))
+
 
 def get_untrack_count(user_id):
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM activity_logs WHERE user_id = ? AND action = 'untrack'", (str(user_id),))
-        return cursor.fetchone()[0]
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM activity_logs WHERE user_id=? AND action='untrack'", (str(user_id),))
+        return cur.fetchone()[0]
 
-# ===== PLATFORM MANAGEMENT =====
+# ---------- Platform Management (stubs for extensibility) ----------
 
 def get_enabled_platforms():
-    """Get list of enabled platforms."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT platform FROM platform_configs WHERE enabled = 1")
-        return [row[0] for row in cursor.fetchall()]
+    return ["spotify", "soundcloud"]
 
 def get_platform_config(platform):
-    """Get configuration for a specific platform."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM platform_configs WHERE platform = ?", (platform,))
-        row = cursor.fetchone()
-        if row:
-            columns = ['platform', 'enabled', 'api_endpoint', 'rate_limit', 'check_interval', 
-                       'supports_likes', 'supports_reposts', 'supports_playlists', 'created_at', 'updated_at']
-            return dict(zip(columns, row))
-        return None
+    return {}
 
-# ===== LEGACY COMPATIBILITY FUNCTIONS =====
+# ---------- Legacy / Compatibility ----------
 
 def log_untrack(user_id, artist_id):
-    log_activity(user_id, 'untrack', f'artist_id: {artist_id}')
+    log_activity(user_id, 'untrack', artist_id)
+
 
 def set_release_prefs(user_id, artist_id, release_type, state):
-    # TODO: Implement with new schema
-    pass
+    # Could be stored in a future table; for now log
+    log_activity(user_id, 'pref_change', {"artist":artist_id, "release_type":release_type, "state":state})
+
 
 def get_release_prefs(user_id, artist_id):
-    # TODO: Implement with new schema
-    return None
+    return {}
+
 
 def import_artists_from_json(data, owner_id, guild_id):
-    # TODO: Implement with new schema
-    return 0
+    for entry in data:
+        try:
+            add_artist(entry['platform'], entry['artist_id'], entry.get('artist_name','Unknown'), entry.get('artist_url',''), owner_id, guild_id, entry.get('genres'), entry.get('last_release_date'))
+        except Exception as e:
+            logging.error(f"Failed importing artist {entry}: {e}")
+
 
 def get_artist_by_identifier(identifier: str, owner_id: str):
-    """Get artist by URL or ID, handling both Spotify and SoundCloud."""
-    from spotify_utils import extract_spotify_id
-    from soundcloud_utils import extract_soundcloud_id
-    
-    # Try to extract ID from URL
-    if "spotify.com" in identifier:
-        artist_id = extract_spotify_id(identifier)
-    elif "soundcloud.com" in identifier:
-        artist_id = extract_soundcloud_id(identifier)
-    else:
-        # Assume it's already an ID
-        artist_id = identifier
-    
-    return get_artist_full_record(artist_id, owner_id)
+    # Try direct ID
+    rec = get_artist_full_record(identifier, owner_id)
+    if rec: return rec
+    # Try by name (case-insensitive)
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM artists WHERE LOWER(artist_name)=LOWER(?) AND owner_id=?", (identifier, str(owner_id)))
+        row = cur.fetchone()
+        if not row: return None
+        cols = [c[0] for c in cur.description]
+        d = dict(zip(cols,row))
+        try: d['genres'] = json.loads(d['genres']) if d.get('genres') else []
+        except: d['genres'] = []
+        return d
 
-# Add to database_utils.py
+# ---------- Maintenance Helpers ----------
+
 def reset_old_like_dates():
-    """Reset very old like dates to 1 week ago."""
-    one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists 
-            SET last_like_date = ? 
-            WHERE platform = 'soundcloud' 
-            AND (last_like_date IS NULL OR last_like_date < '2024-01-01')
-        """, (one_week_ago,))
-        affected = cursor.rowcount
-        conn.commit()
-        print(f"✅ Reset like tracking for {affected} artists to 1 week ago")
-        return affected
-    
-def update_last_repost_date(artist_id, guild_id, new_date):
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_repost_date = ?, updated_at = ?
-            WHERE artist_id = ? AND guild_id = ?
-        """, (new_date, now, artist_id, guild_id))
-        conn.commit()
+    reset_like_tracking_for_all()
 
-# Add to database_utils.py and run once
+
 def reset_activity_tracking():
-    """Reset like and repost tracking to 1 hour ago to catch recent activity."""
-    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-    
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_like_date = ?, last_repost_date = ?, updated_at = ?
-            WHERE platform = 'soundcloud'
-        """, (one_hour_ago, one_hour_ago, one_hour_ago))
-        affected = cursor.rowcount
-        conn.commit()
-        print(f"✅ Reset activity tracking for {affected} artists to 1 hour ago")
-        return affected
+        conn.execute("DELETE FROM activity_logs")
 
-# Add to database_utils.py
+# ---------- Lifecycle Records ----------
 
 def record_bot_shutdown():
-    """Record when the bot goes down."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO activity_logs (user_id, action, details, timestamp, guild_id)
-            VALUES ('system', 'bot_shutdown', ?, ?, NULL)
-        """, (f"Bot shutdown at {now}", now))
-        conn.commit()
+    log_activity('system', 'bot_shutdown')
+
 
 def record_bot_startup():
-    """Record when the bot starts up and return last shutdown time."""
-    now = datetime.now(timezone.utc).isoformat()
-    
+    # Return last shutdown timestamp for catch-up logic
     with get_connection() as conn:
-        cursor = conn.cursor()
-        
-        # Get last shutdown time
-        cursor.execute("""
-            SELECT timestamp FROM activity_logs 
-            WHERE user_id = 'system' AND action = 'bot_shutdown'
-            ORDER BY timestamp DESC LIMIT 1
-        """)
-        result = cursor.fetchone()
-        last_shutdown = result[0] if result else None
-        
-        # Record startup
-        cursor.execute("""
-            INSERT INTO activity_logs (user_id, action, details, timestamp, guild_id)
-            VALUES ('system', 'bot_startup', ?, ?, NULL)
-        """, (f"Bot started at {now}", now))
-        conn.commit()
-        
-        return last_shutdown
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp FROM activity_logs WHERE action='bot_shutdown' ORDER BY timestamp DESC LIMIT 1")
+        row = cur.fetchone()
+    log_activity('system', 'bot_startup')
+    return row[0] if row else None
+
 
 def get_downtime_duration():
-    """Get how long the bot was down."""
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                (SELECT timestamp FROM activity_logs WHERE user_id = 'system' AND action = 'bot_shutdown' ORDER BY timestamp DESC LIMIT 1) as last_shutdown,
-                (SELECT timestamp FROM activity_logs WHERE user_id = 'system' AND action = 'bot_startup' ORDER BY timestamp DESC LIMIT 1) as last_startup
-        """)
-        result = cursor.fetchone()
-        
-        if result and result[0] and result[1]:
-            shutdown_time = parse_datetime(result[0])
-            startup_time = parse_datetime(result[1])
-            if shutdown_time and startup_time:
-                return startup_time - shutdown_time
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp FROM activity_logs WHERE action='bot_shutdown' ORDER BY timestamp DESC LIMIT 1")
+        shut = cur.fetchone()
+        cur.execute("SELECT timestamp FROM activity_logs WHERE action='bot_startup' ORDER BY timestamp DESC LIMIT 1")
+        start = cur.fetchone()
+    if not shut or not start:
         return None
-    
-def update_last_playlist_date(artist_id, guild_id, new_date):
-    """Update the last playlist date for an artist."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE artists
-            SET last_playlist_date = ?, updated_at = ?
-            WHERE artist_id = ? AND guild_id = ?
-        """, (new_date, now, artist_id, guild_id))
-        conn.commit()
+    try:
+        shut_dt = isoparse(shut[0])
+        start_dt = isoparse(start[0])
+        return start_dt - shut_dt
+    except Exception:
+        return None
 
-def is_already_posted_playlist(artist_id, guild_id, playlist_id):
-    """Check if a playlist has already been posted."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 1 FROM posted_content
-            WHERE artist_id = ? AND guild_id = ? AND content_type = 'playlist' AND content_id = ?
-        """, (artist_id, guild_id, playlist_id))
-        return cursor.fetchone() is not None
-    
-def mark_posted_playlist(artist_id, guild_id, playlist_id):
-    """Mark a playlist as posted."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO posted_content 
-            (artist_id, guild_id, platform, content_type, content_id, posted_at)
-            VALUES (?, ?, 'soundcloud', 'playlist', ?, ?)
-        """, (artist_id, guild_id, playlist_id, now))
-        conn.commit()
+# ---------- API Key State Persistence ----------
 
-def store_playlist_state(artist_id, guild_id, playlist_id, tracks):
-    """Store the current state of a playlist."""
-    now = datetime.now(timezone.utc).isoformat()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR REPLACE INTO playlist_states 
-            (artist_id, guild_id, playlist_id, tracks, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (artist_id, guild_id, playlist_id, json.dumps(tracks), now))
-        conn.commit()
+def save_api_key_state(platform: str, keys_state: list):
+    """Persist API key manager state to DB.
+    keys_state: list of dicts with keys: index, key, fail_count, cooldown_until, active
+    Only stores a prefix of key for identification (not full secret)."""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            # Clear existing rows for platform
+            cur.execute("DELETE FROM api_keys WHERE platform=?", (platform,))
+            for st in keys_state:
+                cur.execute(
+                    "REPLACE INTO api_keys(platform, key_index, key_prefix, fail_count, cooldown_until, active) VALUES (?,?,?,?,?,?)",
+                    (
+                        platform,
+                        st.get('index'),
+                        (st.get('key') or '')[:12],
+                        st.get('fail_count', 0),
+                        st.get('cooldown_until'),
+                        1 if st.get('active') else 0
+                    )
+                )
+            conn.commit()
+    except Exception as e:
+        logging.error(f"Failed saving api key state for {platform}: {e}")
 
-def get_playlist_state(artist_id, guild_id, playlist_id):
-    """Retrieve the stored state of a playlist."""
+
+def load_api_key_state(platform: str):
+    """Load persisted API key state. Returns dict index->row dict."""
+    out = {}
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT key_index, key_prefix, fail_count, cooldown_until, active FROM api_keys WHERE platform=?", (platform,))
+            rows = cur.fetchall()
+            for row in rows:
+                idx, pref, fail_count, cooldown_until, active = row
+                out[idx] = {
+                    'key_prefix': pref,
+                    'fail_count': fail_count or 0,
+                    'cooldown_until': cooldown_until,
+                    'active': bool(active)
+                }
+    except Exception as e:
+        logging.error(f"Failed loading api key state for {platform}: {e}")
+    return out
+
+# ---------- Guild Feature Toggles ----------
+
+def set_guild_feature(guild_id: str, feature: str, enabled: bool):
+    """Enable/disable a feature (likes/reposts/playlists) for a guild."""
+    feature = feature.lower()
     with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT tracks FROM playlist_states 
-            WHERE artist_id = ? AND guild_id = ? AND playlist_id = ?
-        """, (artist_id, guild_id, playlist_id))
-        row = cursor.fetchone()
-        return json.loads(row[0]) if row else None
+        conn.execute("REPLACE INTO guild_features(guild_id, feature, enabled) VALUES (?,?,?)", (str(guild_id), feature, 1 if enabled else 0))
+
+
+def is_feature_enabled(guild_id: str, feature: str) -> bool:
+    """Return whether a feature is enabled for a guild. Defaults to True if unset."""
+    feature = feature.lower()
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT enabled FROM guild_features WHERE guild_id=? AND feature=?", (str(guild_id), feature))
+        row = cur.fetchone()
+        if row is None:
+            return True  # default enabled
+        return bool(row[0])
+
+
+def get_guild_features(guild_id: str):
+    """Return dict of feature->enabled for a guild (defaults assumed True if missing)."""
+    features = {"likes": True, "reposts": True, "playlists": True}
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT feature, enabled FROM guild_features WHERE guild_id=?", (str(guild_id),))
+        for f, en in cur.fetchall():
+            features[f] = bool(en)
+    return features
+
+# ---------- API Key Rotations ----------
+
+def log_api_key_rotation(platform: str, old_index: int, new_index: int, reason: str, exhausted: bool = False):
+    """Persist an API key rotation event."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO api_key_rotations(platform, old_index, new_index, reason, exhausted, timestamp) VALUES (?,?,?,?,?,?)",
+                (platform, old_index, new_index, reason, 1 if exhausted else 0, datetime.now(timezone.utc).isoformat())
+            )
+    except Exception as e:
+        logging.error(f"Failed logging api key rotation: {e}")
+
+
+def get_recent_api_key_rotations(platform: str, limit: int = 10):
+    """Fetch recent API key rotation rows for telemetry."""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT platform, old_index, new_index, reason, exhausted, timestamp FROM api_key_rotations WHERE platform=? ORDER BY timestamp DESC LIMIT ?",
+                (platform, limit)
+            )
+            rows = cur.fetchall()
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        logging.error(f"Failed fetching api key rotations: {e}")
+        return []
