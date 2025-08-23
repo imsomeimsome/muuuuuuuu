@@ -386,6 +386,16 @@ def save_api_key_state(platform: str, keys_state: list):
     try:
         with get_connection() as conn:
             cur = conn.cursor()
+            # Defensive: ensure table exists (early calls before create_all_tables)
+            cur.execute("""CREATE TABLE IF NOT EXISTS api_keys (
+                platform TEXT,
+                key_index INTEGER,
+                key_prefix TEXT,
+                fail_count INTEGER,
+                cooldown_until TEXT,
+                active INTEGER,
+                PRIMARY KEY(platform, key_index)
+            )""")
             # Clear existing rows for platform
             cur.execute("DELETE FROM api_keys WHERE platform=?", (platform,))
             for st in keys_state:
@@ -411,6 +421,16 @@ def load_api_key_state(platform: str):
     try:
         with get_connection() as conn:
             cur = conn.cursor()
+            # Defensive: ensure table exists
+            cur.execute("""CREATE TABLE IF NOT EXISTS api_keys (
+                platform TEXT,
+                key_index INTEGER,
+                key_prefix TEXT,
+                fail_count INTEGER,
+                cooldown_until TEXT,
+                active INTEGER,
+                PRIMARY KEY(platform, key_index)
+            )""")
             cur.execute("SELECT key_index, key_prefix, fail_count, cooldown_until, active FROM api_keys WHERE platform=?", (platform,))
             rows = cur.fetchall()
             for row in rows:

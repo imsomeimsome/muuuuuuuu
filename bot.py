@@ -61,7 +61,7 @@ from soundcloud_utils import (
 )
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
 from reset_artists import reset_tables
-from tables import initialize_fresh_database, initialize_cache_table
+from tables import initialize_fresh_database, initialize_cache_table, create_all_tables
 import sqlite3
 import signal
 import sys
@@ -73,6 +73,12 @@ import sys
 
 # Ensure the /data directory exists
 os.makedirs('/data', exist_ok=True)
+# Initialize database schema (idempotent) before any key managers use persistence
+try:
+    create_all_tables()
+    logging.info("✅ Database schema ensured (all tables created if missing)")
+except Exception as e:
+    logging.error(f"❌ Failed ensuring database schema: {e}")
 
 # Configure logging with color-coded levels
 class CustomFormatter(logging.Formatter):
