@@ -38,7 +38,9 @@ from spotify_utils import (
     get_latest_album_id as get_spotify_latest_album_id,
     init_spotify_key_manager,
     manual_rotate_spotify_key,
-    get_spotify_key_status  # <-- added
+    get_spotify_key_status,  # <-- added
+    validate_spotify_client,  # <-- added
+    ping_spotify  # <-- added
 )
 import spotify_utils  # added for dynamic key manager access
 
@@ -508,6 +510,17 @@ async def check_general_tasks(bot, is_catchup=False):
 
 async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=False):
     """Handle all Spotify-related checks using last_release_check logic to suppress duplicates."""
+    # Validate / heal client before run
+    try:
+        validate_spotify_client()
+        ok = ping_spotify()
+        if not ok:
+            logging.warning("⚠️ Spotify ping failed pre-check; attempting rotation")
+            res = manual_rotate_spotify_key(reason="auto_recovery_ping_fail")
+            if res.get('rotated'):
+                validate_spotify_client()
+    except Exception as e:
+        logging.error(f"Spotify pre-check validation error: {e}")
     errors = []
     spotify_releases = 0
     logging.info(f"\n🟢 CHECKING SPOTIFY{'(CATCH-UP)' if is_catchup else ''}...")

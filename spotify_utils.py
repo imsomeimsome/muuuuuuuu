@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import spotipy
 import logging
 from spotipy.oauth2 import SpotifyClientCredentials
+import threading
 
 # Load environment variables
 load_dotenv()
@@ -47,6 +48,8 @@ TELEMETRY = {
     'invalid_credentials': 0,
 }
 
+rotation_lock = threading.Lock()
+
 class SpotifyKeyManager:
     def __init__(self, bot=None):
         self.bot = bot
@@ -75,13 +78,13 @@ class SpotifyKeyManager:
 
     def rotate_key(self):
         from datetime import datetime, timezone
+        # Removed internal lock to avoid deadlock (locking handled in _attempt_rotation)
         if not self.keys or len(self.keys) == 1:
             logging.warning("⚠️ Cannot rotate Spotify key (only one set configured).")
             return None
         start = self.index
         for _ in range(len(self.keys)):
             self.index = (self.index + 1) % len(self.keys)
-            # Skip if still on cooldown
             cooldown_until = self.key_cooldowns.get(self.index)
             if cooldown_until and datetime.now(timezone.utc) < cooldown_until:
                 continue
@@ -201,6 +204,16 @@ def _rebuild_spotify_client(client_id, client_secret):
     logging.info(f"✅ Reinitialized Spotify client with key {client_id[:10]}…")
     _patch_rate_limit_handling()  # ensure monkeypatch applied after each rebuild
 
+def validate_spotify_client():
+    """Rebuild client if missing (e.g., after manual rotation issues)."""
+    global spotify, spotify_key_manager
+    if spotify is None and spotify_key_manager and spotify_key_manager.keys:
+        try:
+            cid, sec = spotify_key_manager.get_current_key()
+            _rebuild_spotify_client(cid, sec)
+        except Exception as e:
+            logging.error(f"Failed to validate/rebuild Spotify client: {e}")
+
 def init_spotify_key_manager(bot=None):
     """Call from bot startup to enable rotation + logging."""
     global spotify_key_manager
@@ -233,32 +246,35 @@ if 'spotify_key_manager' not in globals() or spotify_key_manager is None:
 def _attempt_rotation(reason):
     """Try rotating Spotify credentials; return True if rotated."""
     global spotify_key_manager
-    if not spotify_key_manager or not spotify_key_manager.keys:
-        return False
-    old = spotify_key_manager.index
-    new_pair = spotify_key_manager.rotate_key()
-    rotated = True if new_pair else False
-    if not new_pair:
-        return False
-    cid, sec = new_pair
-    _rebuild_spotify_client(cid, sec)
-    try:
-        # schedule async log if event loop running
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(spotify_key_manager.log_key_rotation(old, spotify_key_manager.index, reason))
-    except RuntimeError:
-        pass
-    if rotated:
-        TELEMETRY['rotations'] += 1
-    return rotated
+    with rotation_lock:
+        if not spotify_key_manager or not spotify_key_manager.keys:
+            return False
+        old = spotify_key_manager.index
+        new_pair = spotify_key_manager.rotate_key()
+        rotated = True if new_pair else False
+        if not new_pair:
+            return False
+        cid, sec = new_pair
+        _rebuild_spotify_client(cid, sec)
+        try:
+            # schedule async log if event loop running
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(spotify_key_manager.log_key_rotation(old, spotify_key_manager.index, reason))
+        except RuntimeError:
+            pass
+        if rotated:
+            TELEMETRY['rotations'] += 1
+        return rotated
 
 def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
     """Make a Spotify API call with error handling, rate limit + key rotation."""
     global spotify_key_manager
+    validate_spotify_client()
     for attempt in range(retries):
         TELEMETRY['calls'] += 1
         try:
+            logging.debug(f"Spotify call: {getattr(callable_fn,'__name__',str(callable_fn))} attempt={attempt+1}")
             result = callable_fn(*args, **kwargs)
             if result is not None:
                 TELEMETRY['success'] += 1
@@ -311,6 +327,13 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
                 if _attempt_rotation("invalid_client"):
                     continue
                 raise
+            # Access token expired
+            if status == 401 and 'access token' in msg_lc:
+                # Force rebuild (token might be stale)
+                logging.warning("🔄 Access token expired; rebuilding client")
+                validate_spotify_client()
+                if _attempt_rotation("token_expired"):
+                    continue
             # 5xx transient
             if status and 500 <= status < 600:
                 logging.warning(f"⚠️ Spotify server error {status}. Retry {attempt+1}/{retries}")
@@ -324,6 +347,15 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
             time.sleep(delay)
             continue
     return None
+
+def ping_spotify():
+    """Lightweight call to keep token fresh & trigger rotation if failing."""
+    try:
+        res = safe_spotify_call(spotify.search, q="a", type="artist", limit=1)
+        return bool(res)
+    except Exception as e:
+        logging.debug(f"Spotify ping failed: {e}")
+        return False
 
 def get_spotify_key_status():
     """Public helper to fetch current Spotify credential status."""
