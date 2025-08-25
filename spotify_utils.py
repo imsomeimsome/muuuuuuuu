@@ -29,6 +29,24 @@ SPOTIFY_KEYS = [(cid, sec) for cid, sec in SPOTIFY_KEYS if cid and sec]
 
 spotify_key_manager = None  # will be initialized via init_spotify_key_manager
 
+# Add telemetry + rate limit patterns
+RATE_LIMIT_PATTERNS = [
+    'rate/request limit',
+    'retry will occur after',
+    'rate limit',
+    'exceeded',
+    'over rate limit',
+    'temporarily disabled'
+]
+TELEMETRY = {
+    'calls': 0,
+    'success': 0,
+    'rate_limits': 0,
+    'rotations': 0,
+    'errors': 0,
+    'invalid_credentials': 0,
+}
+
 class SpotifyKeyManager:
     def __init__(self, bot=None):
         self.bot = bot
@@ -53,6 +71,7 @@ class SpotifyKeyManager:
         else:
             cooldown = timedelta(minutes=minutes)
         self.key_cooldowns[self.index] = datetime.now(timezone.utc) + cooldown
+        TELEMETRY['rate_limits'] += 1
 
     def rotate_key(self):
         from datetime import datetime, timezone
@@ -218,6 +237,7 @@ def _attempt_rotation(reason):
         return False
     old = spotify_key_manager.index
     new_pair = spotify_key_manager.rotate_key()
+    rotated = True if new_pair else False
     if not new_pair:
         return False
     cid, sec = new_pair
@@ -229,67 +249,68 @@ def _attempt_rotation(reason):
             asyncio.create_task(spotify_key_manager.log_key_rotation(old, spotify_key_manager.index, reason))
     except RuntimeError:
         pass
-    return True
+    if rotated:
+        TELEMETRY['rotations'] += 1
+    return rotated
 
 def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
     """Make a Spotify API call with error handling, rate limit + key rotation."""
     global spotify_key_manager
     for attempt in range(retries):
+        TELEMETRY['calls'] += 1
         try:
-            return callable_fn(*args, **kwargs)
+            result = callable_fn(*args, **kwargs)
+            if result is not None:
+                TELEMETRY['success'] += 1
+            return result
         except SpotifyException as e:
+            TELEMETRY['errors'] += 1
             status = getattr(e, "http_status", None)
             msg_lc = str(e).lower()
-            # Custom detection for non-standard rate limit message (observed):
-            # "Your application has reached a rate/request limit. Retry will occur after: 2556"
-            if "rate/request limit" in msg_lc or "retry will occur after" in msg_lc:
-                # Try to extract seconds after colon
-                wait_seconds = None
-                import re
-                m = re.search(r"after:?\s*(\d+)", msg_lc)
-                if m:
+            headers = getattr(e, 'headers', {}) or {}
+            # Unified pattern detection for custom messages even if status != 429
+            is_pattern_limit = any(pat in msg_lc for pat in RATE_LIMIT_PATTERNS)
+            # Standard 429 or heuristic 403 with pattern text (sometimes appears)
+            if status in (429, 403) and (status == 429 or is_pattern_limit):
+                wait = 0
+                if headers and headers.get('Retry-After'):
                     try:
-                        wait_seconds = int(m.group(1))
+                        wait = int(headers['Retry-After'])
                     except ValueError:
-                        wait_seconds = None
-                logging.warning(f"⚠️ Detected Spotify rate limit (custom message). wait_seconds={wait_seconds}")
+                        wait = 5
+                # Extract embedded numeric if present
+                if not wait:
+                    import re as _re
+                    m = _re.search(r'after:?\s*(\d+)', msg_lc)
+                    if m:
+                        try: wait = int(m.group(1))
+                        except ValueError: pass
+                logging.warning(f"⚠️ Spotify rate limit detected status={status} wait={wait}s patterns={is_pattern_limit}")
                 if spotify_key_manager:
-                    if wait_seconds is not None and wait_seconds > 0:
-                        spotify_key_manager.mark_rate_limited(seconds=wait_seconds)
-                    else:
-                        spotify_key_manager.mark_rate_limited(minutes=15)
-                rotated = _attempt_rotation("rate_limit_detected_message")
-                if rotated:
-                    logging.info("🔄 Rotated Spotify key after custom rate limit message")
+                    spotify_key_manager.mark_rate_limited(seconds=wait if wait else None)
+                if _attempt_rotation("rate_limit" + ("_pattern" if is_pattern_limit else "")):
+                    logging.info("🔄 Rotated Spotify key due to rate limit; retrying")
                     continue
-                # If cannot rotate, sleep minimal then retry same key (exponential backoff)
-                backoff = min(60, (wait_seconds or (attempt + 1) * delay))
-                logging.info(f"⏳ Waiting {backoff}s before retrying Spotify call (custom rate limit)")
+                backoff = min(60, wait or (attempt + 1) * delay)
+                logging.info(f"⏳ Waiting {backoff}s then retrying same key (no rotation available)")
                 time.sleep(backoff)
                 continue
-            # Handle invalid credentials
-            if "invalid_client" in msg_lc or status in (400, 401):
+            # Handle custom verbose message without 429 status
+            if is_pattern_limit:
+                logging.warning("⚠️ Spotify rate limit (pattern-only) with status=" + str(status))
+                if spotify_key_manager:
+                    spotify_key_manager.mark_rate_limited(minutes=15)
+                if _attempt_rotation("rate_limit_pattern_only"):
+                    continue
+                time.sleep(min(60, (attempt + 1) * delay))
+                continue
+            # Invalid client / auth
+            if 'invalid_client' in msg_lc or status in (400, 401):
+                TELEMETRY['invalid_credentials'] += 1
                 logging.error("❌ Spotify invalid/expired credentials. Rotating...")
                 if _attempt_rotation("invalid_client"):
                     continue
                 raise
-            # Rate limit (standard 429)
-            if status == 429:
-                wait = 0
-                if hasattr(e, "headers") and e.headers and e.headers.get("Retry-After"):
-                    try:
-                        wait = int(e.headers["Retry-After"])
-                    except ValueError:
-                        wait = 5
-                logging.warning(f"⚠️ Spotify rate limited (Retry-After {wait}s). Rotating...")
-                if spotify_key_manager:
-                    # Convert to seconds -> mark
-                    spotify_key_manager.mark_rate_limited(seconds=wait if wait else None, minutes=max(1, wait // 60) if wait else 1)
-                rotated = _attempt_rotation("rate_limit")
-                if rotated:
-                    continue
-                time.sleep(wait or delay)
-                continue
             # 5xx transient
             if status and 500 <= status < 600:
                 logging.warning(f"⚠️ Spotify server error {status}. Retry {attempt+1}/{retries}")
@@ -298,6 +319,7 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
             logging.error(f"Spotify API error (no rotation): {e}")
             break
         except Exception as e:
+            TELEMETRY['errors'] += 1
             logging.error(f"Unexpected Spotify error: {e}")
             time.sleep(delay)
             continue
@@ -331,6 +353,14 @@ def manual_rotate_spotify_key(reason: str = "manual"):
         "active_index": spotify_key_manager.index,
         "total_keys": len(spotify_key_manager.keys),
         "keys": spotify_key_manager.get_status_rows()
+    }
+
+def get_spotify_telemetry_snapshot():
+    from datetime import datetime, timezone
+    return {
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'telemetry': TELEMETRY.copy(),
+        'keys': get_spotify_key_status()
     }
 
 # --- Utilities ---

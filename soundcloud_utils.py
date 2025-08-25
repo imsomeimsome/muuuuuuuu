@@ -370,7 +370,10 @@ RATE_LIMIT_PATTERNS = [
     "retry will occur after",
     "application has reached a rate",
     "too many requests",
-    "rate limit"  # generic fallback
+    "rate limit",
+    "exceeded",  # new pattern
+    "over rate limit",  # new pattern
+    "temporarily disabled",  # new pattern
 ]
 
 def _ensure_client_id_param(url: str, client_id: str) -> str:
@@ -400,33 +403,46 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             status = response.status_code
             # Soft-fail HTML detection
             ct = response.headers.get('Content-Type','')
-            text_snip = response.text[:120].lower() if response.text else ''
+            text_snip_full = response.text or ''
+            text_snip = text_snip_full[:160].lower()
             if status == 200 and ('text/html' in ct.lower() or text_snip.startswith('<!doctype') or text_snip.startswith('<html')):
                 TELEMETRY['html_soft_fail'] += 1
-                logging.warning("⚠️ Received HTML instead of JSON (soft fail) - treating as rate limit")
+                logging.warning("⚠️ Received HTML instead of JSON (soft fail) - treating as rate limit (status 200 -> 429 synthetic)")
                 status = 429  # treat as rate limit to trigger rotation
             try:
-                body_lower = response.text.lower()
+                body_lower = text_snip_full.lower()
             except Exception:
                 body_lower = ""
+            # Header-based detection
+            rl_remaining = response.headers.get('x-ratelimit-remaining') or response.headers.get('X-RateLimit-Remaining')
+            rl_limit = response.headers.get('x-ratelimit-limit') or response.headers.get('X-RateLimit-Limit')
+            header_exhausted = rl_remaining == '0' and rl_limit is not None
             rate_text_hit = any(pat in body_lower for pat in RATE_LIMIT_PATTERNS)
-            is_rate_limited = status in (401, 429, 403) or rate_text_hit
+            is_rate_limited = status in (401, 429, 403) or rate_text_hit or header_exhausted
             if is_rate_limited:
+                logging.warning(
+                    f"🚫 SoundCloud rate limit indicator: status={response.status_code} url={original_url} "
+                    f"patterns_hit={rate_text_hit} header_exhausted={header_exhausted} remaining={rl_remaining} limit={rl_limit} attempt={attempt+1}/{retries}")
                 if key_manager:
+                    prev_key_value = CLIENT_ID
+                    prev_index = key_manager.current_key_index
                     key_manager.mark_rate_limited()
-                    old_index = key_manager.current_key_index
                     new_key = key_manager.rotate_key(reason="rate_limit")
                     TELEMETRY['rotations'] += 1
-                    if new_key and new_key != CLIENT_ID:
+                    if new_key:
+                        # Always switch even if same string (avoid false circuit breaker)
                         CLIENT_ID = new_key
-                        time.sleep(0.25)
+                        logging.warning(
+                            f"🔄 Rotated SoundCloud key {prev_index+1} -> {key_manager.current_key_index+1} "
+                            f"({'same value' if new_key == prev_key_value else 'new value'})")
+                        time.sleep(0.35)
+                        # Retry with new / same key
                         continue
                     else:
-                        # All keys exhausted -> trip circuit breaker to avoid hammering
                         trip_circuit_breaker(reason="all_keys_exhausted_or_rotation_failed")
                         return None
                 else:
-                    logging.error("❌ key_manager missing - cannot rotate")
+                    logging.error("❌ key_manager missing - cannot rotate; tripping circuit breaker")
                     trip_circuit_breaker(reason="no_key_manager")
                     return None
             if status == 200:
@@ -438,6 +454,7 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             if 500 <= status < 600:
                 TELEMETRY['server_errors'] += 1
                 if attempt < retries - 1:
+                    logging.warning(f"⚠️ SoundCloud server error {status}; retrying (attempt {attempt+2}/{retries})")
                     time.sleep(1 + attempt)
                     continue
                 return None
@@ -448,9 +465,10 @@ def safe_request(url, headers=None, retries=3, timeout=10):
             response.raise_for_status()
         except Exception as e:
             if attempt < retries - 1:
+                logging.warning(f"❌ SoundCloud request exception: {e} (retry {attempt+2}/{retries})")
                 time.sleep(0.5 + attempt * 0.5)
                 continue
-            logging.error(f"❌ SoundCloud request failed: {e}")
+            logging.error(f"❌ SoundCloud request failed permanently: {e} url={original_url}")
             return None
     return None
 
