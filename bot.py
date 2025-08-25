@@ -1183,3 +1183,57 @@ async def list_command(interaction: discord.Interaction):
         if len(lines) > 50:
             msg += f"\n…and {len(lines)-50} more"
         await interaction.response.send_message(msg, ephemeral=True)
+
+# ...existing code...
+@bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def rotatekeys_command(interaction: discord.Interaction, platform: Literal["spotify", "soundcloud"]):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        if platform == "spotify":
+            result = manual_rotate_spotify_key(reason="manual_command")
+            if not result.get("rotated"):
+                msg = f"⚠️ Spotify rotation not performed: {result.get('error','unknown')}"
+            else:
+                msg = f"🔄 Spotify key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
+            status_lines = []
+            for row in result.get('keys', []):
+                status_lines.append(f"K{row['index']+1}: {row['state']} ({row.get('client_id_preview','')})")
+            if status_lines:
+                msg += "\n" + "\n".join(status_lines)
+            await interaction.followup.send(msg, ephemeral=True)
+        else:  # soundcloud
+            result = manual_rotate_soundcloud_key(reason="manual_command")
+            if not result.get("rotated"):
+                msg = f"⚠️ SoundCloud rotation not performed: {result.get('error','unknown')}"
+            else:
+                msg = f"🔄 SoundCloud key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
+            status_lines = []
+            for row in result.get('keys', []):
+                preview = row.get('key_preview','')
+                status_lines.append(f"K{row['index']+1}: {row['state']} ({preview})")
+            if status_lines:
+                msg += "\n" + "\n".join(status_lines)
+            await interaction.followup.send(msg, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error rotating keys: {e}", ephemeral=True)
+# ...existing code...
+
+# === Entry Point ===
+if __name__ == "__main__":
+    if not TOKEN:
+        logging.error("❌ DISCORD_TOKEN not set. Bot will not start.")
+        raise SystemExit(1)
+    try:
+        # Optional keep-alive (only if hosted on services requiring a ping)
+        try:
+            keep_alive()
+        except Exception as e:
+            logging.warning(f"Keep-alive server failed to start: {e}")
+        logging.info("🚀 Starting Discord bot run loop…")
+        bot.run(TOKEN)
+    except KeyboardInterrupt:
+        logging.info("🛑 Interrupted by user")
+    except Exception as e:
+        logging.error(f"❌ Unhandled exception in bot run: {e}")
+        raise
