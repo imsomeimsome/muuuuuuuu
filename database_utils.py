@@ -505,3 +505,39 @@ def get_recent_api_key_rotations(platform: str, limit: int = 10):
     except Exception as e:
         logging.error(f"Failed fetching api key rotations: {e}")
         return []
+
+# ---------- Release Check Timestamp (Spotify duplicate suppression) ----------
+
+def _ensure_last_release_check_column():
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(artists)")
+            cols = [r[1] for r in cur.fetchall()]
+            if 'last_release_check' not in cols:
+                cur.execute("ALTER TABLE artists ADD COLUMN last_release_check TEXT")
+                conn.commit()
+    except Exception as e:
+        logging.error(f"Failed ensuring last_release_check column: {e}")
+
+
+def get_last_release_check(artist_id: str, owner_id: str, guild_id: str):
+    _ensure_last_release_check_column()
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT last_release_check FROM artists WHERE artist_id=? AND owner_id=? AND guild_id=?", (artist_id, str(owner_id), str(guild_id)))
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+    except Exception as e:
+        logging.error(f"Failed fetching last_release_check for {artist_id}: {e}")
+        return None
+
+
+def update_last_release_check(artist_id: str, owner_id: str, guild_id: str, ts_iso: str):
+    _ensure_last_release_check_column()
+    try:
+        with get_connection() as conn:
+            conn.execute("UPDATE artists SET last_release_check=? WHERE artist_id=? AND owner_id=? AND guild_id=?", (ts_iso, artist_id, str(owner_id), str(guild_id)))
+    except Exception as e:
+        logging.error(f"Failed updating last_release_check for {artist_id}: {e}")

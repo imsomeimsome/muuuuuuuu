@@ -125,6 +125,52 @@ class SpotifyKeyManager:
             })
         return rows
 
+def _patch_rate_limit_handling():
+    """Monkeypatch spotipy.Spotify._internal_call to enforce our rotation on rate limits.
+    Handles both standard 429 and custom 'rate/request limit' messages that may be logged
+    without re-raising in higher layers.
+    """
+    global spotify, spotify_key_manager
+    if not spotify:
+        return
+    try:
+        import types, re
+        base_call = spotify._internal_call
+        if getattr(spotify, '_rl_patched', False):
+            return
+
+        def patched_internal_call(self, method, url, payload=None, params=None, **kwargs):
+            from spotipy.exceptions import SpotifyException as _SpEx
+            try:
+                return base_call(method, url, payload=payload, params=params, **kwargs)
+            except _SpEx as e:  # Standard exception path
+                msg_lc = str(e).lower()
+                status = getattr(e, 'http_status', None)
+                # Detect custom or standard rate limit conditions
+                if status == 429 or 'rate/request limit' in msg_lc or 'retry will occur after' in msg_lc:
+                    wait_seconds = None
+                    m = re.search(r'after:?\s*(\d+)', msg_lc)
+                    if m:
+                        try: wait_seconds = int(m.group(1))
+                        except ValueError: pass
+                    logging.warning(f"⚠️ (patch) Spotify rate limit caught in _internal_call status={status} wait={wait_seconds}")
+                    if spotify_key_manager:
+                        spotify_key_manager.mark_rate_limited(seconds=wait_seconds if wait_seconds else None)
+                    rotated = _attempt_rotation("rate_limit_internal_call")
+                    if rotated:
+                        logging.info("🔄 (patch) Rotated Spotify key. Retrying request once.")
+                        try:
+                            return base_call(method, url, payload=payload, params=params, **kwargs)
+                        except _SpEx as e2:
+                            logging.error(f"❌ (patch) Retry after rotation failed: {e2}")
+                    # If cannot rotate or retry failed, re-raise to let safe_spotify_call handle backoff
+                raise
+        spotify._internal_call = types.MethodType(patched_internal_call, spotify)
+        spotify._rl_patched = True
+        logging.info("🛡️ Patched Spotify _internal_call for proactive rate limit rotation")
+    except Exception as e:
+        logging.error(f"Failed to patch Spotify internal call: {e}")
+
 def _rebuild_spotify_client(client_id, client_secret):
     global spotify
     spotify = spotipy.Spotify(
@@ -134,6 +180,7 @@ def _rebuild_spotify_client(client_id, client_secret):
         )
     )
     logging.info(f"✅ Reinitialized Spotify client with key {client_id[:10]}…")
+    _patch_rate_limit_handling()  # ensure monkeypatch applied after each rebuild
 
 def init_spotify_key_manager(bot=None):
     """Call from bot startup to enable rotation + logging."""
@@ -157,6 +204,7 @@ if 'spotify_key_manager' not in globals() or spotify_key_manager is None:
                     client_secret=sec
                 )
             )
+            _patch_rate_limit_handling()
         else:
             spotify = None
     except Exception as e:

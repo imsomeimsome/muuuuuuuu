@@ -25,7 +25,8 @@ from database_utils import (
     set_channel, get_channel, set_release_prefs, get_release_prefs, get_connection, get_artist_by_identifier,
     update_last_repost_date, update_last_playlist_date, is_already_posted_playlist, mark_posted_playlist,
     record_bot_startup, record_bot_shutdown, get_downtime_duration, get_playlist_state, store_playlist_state,
-    set_guild_feature, is_feature_enabled, get_guild_features
+    set_guild_feature, is_feature_enabled, get_guild_features,
+    get_last_release_check, update_last_release_check  # <-- added imports
 )
 from embed_utils import create_music_embed, create_repost_embed, create_like_embed
 from spotify_utils import (
@@ -36,9 +37,10 @@ from spotify_utils import (
     get_release_info as get_spotify_release_info,
     get_latest_album_id as get_spotify_latest_album_id,
     init_spotify_key_manager,
-    spotify_key_manager,  # <-- import manager instance for status
-    manual_rotate_spotify_key
+    manual_rotate_spotify_key,
+    get_spotify_key_status  # <-- added
 )
+import spotify_utils  # added for dynamic key manager access
 
 from soundcloud_utils import (
     extract_soundcloud_id,
@@ -46,7 +48,6 @@ from soundcloud_utils import (
     get_last_release_date as get_soundcloud_last_release_date,
     get_soundcloud_release_info,
     get_soundcloud_artist_id,
-    extract_soundcloud_username as extract_soundcloud_id,
     get_soundcloud_playlist_info,
     get_soundcloud_likes_info,
     get_soundcloud_reposts,
@@ -54,11 +55,12 @@ from soundcloud_utils import (
     get_soundcloud_reposts_info,
     get_artist_info,
     init_key_manager,
-    key_manager,
     CLIENT_ID as SC_CLIENT_ID,
     manual_rotate_soundcloud_key,
-    get_soundcloud_telemetry_snapshot  # <-- added import
+    get_soundcloud_telemetry_snapshot,  # <-- added import (already existed comment)
+    get_soundcloud_key_status  # <-- added
 )
+import soundcloud_utils  # added for dynamic key manager access
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
 from reset_artists import reset_tables
 from tables import initialize_fresh_database, initialize_cache_table, create_all_tables
@@ -210,33 +212,40 @@ class MusicBot(commands.Bot):
 
     async def emit_health_log(self):
         try:
+            # Attempt lazy init if managers somehow missing
+            if not getattr(spotify_utils, 'spotify_key_manager', None):
+                init_spotify_key_manager(self)
+            if not getattr(soundcloud_utils, 'key_manager', None):
+                init_key_manager(self)
+
             artists = get_all_artists()
             total = len(artists)
             spotify_count = sum(1 for a in artists if a.get('platform') == 'spotify')
             sc_count = sum(1 for a in artists if a.get('platform') == 'soundcloud')
 
-            # Spotify key status
+            # Use public status helpers (more robust & future-proof)
+            sp_status = get_spotify_key_status()
+            sc_status = get_soundcloud_key_status()
+
             spotify_rows = []
-            if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
-                for row in spotify_key_manager.get_status_rows():
+            if sp_status.get('loaded') and sp_status.get('keys'):
+                for row in sp_status['keys']:
                     spotify_rows.append(f"K{row['index']+1}:{row['state']}")
             else:
-                spotify_rows.append("none")
+                spotify_rows.append('none')
 
-            # SoundCloud key status
             sc_rows = []
-            if key_manager and getattr(key_manager, 'api_keys', None):
-                from datetime import datetime as _dt, timezone as _tz
-                now = _dt.now(_tz.utc)
-                for idx, key in enumerate(key_manager.api_keys):
-                    if idx == key_manager.current_key_index:
-                        state = 'active'
-                    else:
-                        cd = key_manager.key_cooldowns.get(idx)
-                        state = f"cooldown_until={cd.isoformat()}" if cd and cd > now else 'ready'
-                    sc_rows.append(f"K{idx+1}:{state}")
+            if sc_status.get('loaded') and sc_status.get('keys'):
+                for row in sc_status['keys']:
+                    sc_rows.append(f"K{row['index']+1}:{row['state']}")
             else:
-                sc_rows.append("none")
+                sc_rows.append('none')
+
+            # Extra diagnostic line if showing none but keys actually configured in env
+            if ('none' in spotify_rows) and os.getenv('SPOTIFY_CLIENT_ID'):
+                logging.warning("HealthLog: Spotify keys appear loaded in env but manager returned none – possible init timing issue.")
+            if ('none' in sc_rows) and os.getenv('SOUNDCLOUD_CLIENT_ID'):
+                logging.warning("HealthLog: SoundCloud keys appear loaded in env but manager returned none – possible init timing issue.")
 
             msg = (
                 "🩺 **Health Report**\n"
@@ -498,92 +507,95 @@ async def check_general_tasks(bot, is_catchup=False):
     return artists, shutdown_time, errors
 
 async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=False):
-    """Handle all Spotify-related checks."""
+    """Handle all Spotify-related checks using last_release_check logic to suppress duplicates."""
     errors = []
     spotify_releases = 0
-    
     logging.info(f"\n🟢 CHECKING SPOTIFY{'(CATCH-UP)' if is_catchup else ''}...")
     logging.info("=" * 50)
+
+    # Timestamp for this batch of artist checks
+    batch_check_time = datetime.now(timezone.utc).isoformat()
 
     for artist in artists:
         if artist.get("platform") != "spotify":
             continue
-
         try:
             artist_name = artist.get("artist_name", "unknown")
             artist_id = artist.get("artist_id")
-            last_date = artist.get("last_release_date")
-
+            owner_id = artist.get("owner_id")
+            guild_id = artist.get("guild_id")
+            stored_last_release_date = artist.get("last_release_date")  # date we last POSTED (not necessarily API latest)
+            last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
             logging.info(f"🟢 Checking {artist_name}")
-
+            logging.info(f"     Last '{artist_name}' release: {stored_last_release_date or 'None'}")
+            logging.info(f"     Last '{artist_name}' release check: {last_release_check or 'None'}")
             try:
                 latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
                 if not latest_album_id:
-                    logging.info(f"     ⏳ No new releases found for {artist_name}")
+                    logging.info("     ⏳ API returned: None (no releases)")
+                    # Update last_release_check so we don't treat same absence repeatedly
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                     continue
-
                 release_info = await run_blocking(get_spotify_release_info, latest_album_id)
                 if not release_info:
-                    logging.info(f"     ⚠️ No release info found for {artist_name}")
+                    logging.info("     ⚠️ API returned: <no info>")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                     continue
-
-                current_date = release_info.get("release_date")
-                if not current_date:
+                api_release_date = release_info.get("release_date")
+                logging.info(f"     API returned: {api_release_date}")
+                if not api_release_date:
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                     continue
-
-                # Always show the last release date for context
-                if last_date:
-                    logging.info(f"     🕒 Last release: {release_info['title']} ({current_date})")
-
-                # Compare dates
-                try:
-                    current_dt = parse_date(current_date)
-                    last_dt = parse_date(last_date) if last_date else datetime.min.replace(tzinfo=timezone.utc)
-
-                    is_new = (last_date is None) or (current_dt > last_dt)
-                    if is_new:
-                        logging.info(f"     ✨ NEW RELEASE DETECTED: {release_info['title']}")
-                        cache_key = f"posted_spotify:{artist_id}:{latest_album_id}"
-                        if get_cache(cache_key):
-                            logging.info(f"     ⏭️ Skipping duplicate post for {release_info['title']}")
-                        else:
-                            embed = create_music_embed(
-                                platform="spotify",
-                                artist_name=artist_name,
-                                title=release_info["title"],
-                                url=release_info["url"],
-                                release_date=current_date,
-                                cover_url=release_info["cover_url"],
-                                features=release_info.get("features"),
-                                track_count=release_info.get("track_count"),
-                                duration=release_info.get("duration"),
-                                genres=release_info.get("genres", []),
-                                repost=False
-                            )
-                            channel = await get_release_channel(guild_id=artist["guild_id"], platform="spotify")
-                            if channel:
-                                await channel.send(embed=embed)
-                                update_last_release_date(artist_id, artist["owner_id"], artist["guild_id"], current_date)
-                                set_cache(cache_key, "posted", ttl=86400)
-                                spotify_releases += 1
-                            else:
-                                logging.warning(f"     ⚠️ No channel configured for {artist['platform']}")
+                # Parse dates
+                api_dt = parse_date(api_release_date)
+                last_check_dt = parse_date(last_release_check) if last_release_check else None
+                # Baseline behavior: first time we ever check this artist we set last_release_check but do not post old release
+                if last_check_dt is None:
+                    logging.info("     🆕 First check baseline established (no post)")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    continue
+                # Decision: new release only if API release date strictly after last check timestamp
+                if api_dt > last_check_dt:
+                    logging.info(f"     ✨ New release detected (api_release_date {api_dt.isoformat()} > last_check {last_check_dt.isoformat()})")
+                    cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
+                    if get_cache(cache_key):
+                        logging.info("     ⏭️ Duplicate suppressed by cache key")
                     else:
-                        logging.info(f"     ⏭️ Skipping (not newer) {release_info['title']} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
-                except Exception as e:
-                    logging.error(f"     ❌ Error comparing dates: {e}")
-                    continue
-
+                        embed = create_music_embed(
+                            platform="spotify",
+                            artist_name=artist_name,
+                            title=release_info["title"],
+                            url=release_info["url"],
+                            release_date=api_release_date,
+                            cover_url=release_info["cover_url"],
+                            features=release_info.get("features"),
+                            track_count=release_info.get("track_count"),
+                            duration=release_info.get("duration"),
+                            genres=release_info.get("genres", []),
+                            repost=False
+                        )
+                        channel = await get_release_channel(guild_id=guild_id, platform="spotify")
+                        if channel:
+                            await channel.send(embed=embed)
+                            update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
+                            set_cache(cache_key, "posted", ttl=86400)
+                            spotify_releases += 1
+                        else:
+                            logging.warning("     ⚠️ No channel configured for spotify")
+                else:
+                    logging.info(f"     ⏭️ Not new (api_release_date {api_dt.isoformat()} <= last_check {last_check_dt.isoformat()})")
+                # Always update last_release_check at end of processing
+                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
             except Exception as e:
-                logging.error(f"     ❌ Error checking releases: {e}")
-                errors.append({"type": "Spotify", "message": str(e)})
+                logging.error(f"     ❌ Error during Spotify release logic: {e}")
+                errors.append({"type":"Spotify","message":str(e)})
+                # still update check time to avoid repeated spam
+                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
-
         except Exception as e:
-            logging.error(f"❌ Error checking Spotify artist {artist_name}: {e}")
-            errors.append({"type": "Spotify", "message": str(e)})
+            logging.error(f"❌ Error checking Spotify artist {artist.get('artist_name','unknown')}: {e}")
+            errors.append({"type":"Spotify","message":str(e)})
             continue
-
     return spotify_releases, errors
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False):
@@ -680,7 +692,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                                     if is_catchup:
                                         await asyncio.sleep(2)
                             else:
-                                logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title')} (current={current_dt.isoformat()} <= last={last_dt.isoformat()})")
+                                logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title')} (current={current_dt.isoformat()} <= last_dt={last_dt.isoformat()})")
                         except Exception as e:
                             logging.error(f"     ❌ Error comparing dates: {e}")
                             continue
@@ -690,7 +702,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                     retry_after = now + timedelta(hours=12)
                     logging.warning(f"⚠️ Rate limit hit. Attempting key rotation...")
                     try:
-                        new_key = key_manager.rotate_key()
+                        new_key = soundcloud_utils.key_manager.rotate_key()
                         if new_key:
                             CLIENT_ID = new_key
                             logging.info("🔄 Successfully rotated to new API key")
@@ -910,9 +922,9 @@ def signal_handler(sig, frame):
     except Exception:
         pass
     try:
-        if key_manager:
-            key_manager.stop_background_tasks()
-        if spotify_key_manager:
+        if soundcloud_utils.key_manager:
+            soundcloud_utils.key_manager.stop_background_tasks()
+        if spotify_utils.spotify_key_manager:
             pass  # (no background loop presently)
     except Exception as e:
         logging.error(f"Error stopping background tasks: {e}")
@@ -1155,548 +1167,19 @@ async def list_command(interaction: discord.Interaction):
         if not artists:
             await interaction.response.send_message("No artists tracked.")
             return
-
-        # Group artists by name (case-insensitive)
         from collections import defaultdict
-
         grouped = defaultdict(list)
         for artist in artists:
             grouped[artist['artist_name'].lower()].append(artist)
-
-        merged_artists = []
+        merged = []
         for name_lower, group in grouped.items():
-            # Prefer Spotify casing for display name
-            spotify_names = [a['artist_name'] for a in group if a['platform'] == 'spotify']
-            if spotify_names:
-                display_name = spotify_names[0]
-            else:
-                # fallback: use first artist's name with title case
-                display_name = group[0]['artist_name'].title()
-
-            # Emoji order: Spotify first, then SoundCloud
-            platforms = set(a['platform'] for a in group)
-            emojis = []
-            if 'spotify' in platforms:
-                emojis.append('🟢')
-            if 'soundcloud' in platforms:
-                emojis.append('🟠')
-
-            merged_artists.append({'name': display_name, 'emojis': emojis})
-
-        # Sort alphabetically by display name (case-insensitive)
-        merged_artists.sort(key=lambda x: x['name'].lower())
-
-        # Build the message
-        message_lines = [f"{' '.join(artist['emojis'])} {artist['name']}" for artist in merged_artists]
-        message = "**🎵 Your Artists:**\n" + "\n".join(message_lines)
-
-        await interaction.response.send_message(message)
-
-@bot.tree.command(name="userinfo", description="Show your or another user's stats.")
-@app_commands.describe(user="Optional: another user")
-@require_registration
-async def userinfo_command(interaction: discord.Interaction, user: typing.Optional[discord.User] = None):
-    await interaction.response.defer()
-    target = user or interaction.user
-    requester = interaction.user
-    if user and user != requester and not requester.guild_permissions.administrator:
-        await interaction.followup.send("❌ Admins only.")
-        return
-    if not is_user_registered(target.id):
-        await interaction.followup.send(f"❌ {target.mention} isn't registered.")
-        return
-    username = get_username(target.id)
-    tracked = len(get_artists_by_owner(target.id))
-    untracked = get_untrack_count(target.id)
-    registered_at = get_user_registered_at(target.id) or "Unknown"
-    embed = discord.Embed(title=f"📊 {username}'s Stats", color=discord.Color.blurple())
-    embed.add_field(name="User", value=f"{target.mention}", inline=True)
-    embed.add_field(name="Registered", value=registered_at, inline=True)
-    embed.add_field(name="Tracked Artists", value=tracked, inline=True)
-    embed.add_field(name="Untracked Artists", value=untracked, inline=True)
-    if user is None and requester.guild_permissions.administrator:
-        total_artists = get_global_artist_count()
-        embed.add_field(name="🌐 Server Total Artists", value=total_artists, inline=False)
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="info", description="Show bot info and stats.")
-@require_registration
-async def info_command(interaction: discord.Interaction):
-    total_artists = get_global_artist_count()
-    stats = get_release_stats()
-    message = (
-        f"**ℹ️ Bot Info**\n"
-        f"Artists Tracked: **{total_artists}**\n"
-        f"Releases: **{stats['total']}**\n"
-        f"💿 Albums: {stats['albums']}\n"
-        f"🎶 EPs: {stats['eps']}\n"
-        f"🎵 Singles: {stats['singles']}\n"
-        f"📀 Deluxes: {stats['deluxes']}\n"
-    )
-    await interaction.response.send_message(message)
-
-@bot.tree.command(name="key", description="Show release tracking key for what the bot posts.")
-async def key_command(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📚 Release Key",
-        description="Here's what each release type and field means:",
-        color=0x7289DA
-    )
-
-    embed.add_field(name="💿 Album", value="7 or more tracks released together or marked as album/mixtape.", inline=False)
-    embed.add_field(name="🎶 EP", value="2 to 6 tracks released together or marked as EP.", inline=False)
-    embed.add_field(name="🎵 Single", value="Only 1 track released.", inline=False)
-    embed.add_field(name="📑 Playlist", value="Newly posted playlist by artist.", inline=False)
-    embed.add_field(name="❤️ Like", value="Track liked by the artist.", inline=False)
-    embed.add_field(name="📢 Repost", value="Release reposted by the artist (not uploaded by them).", inline=False)
-    embed.add_field(name="Features", value="Artists featured in the release, if detected.", inline=False)
-    embed.add_field(name="Genres", value="Genres of the release if available.", inline=False)
-    embed.add_field(name="Tracks", value="Total tracks in release/playlist.", inline=False)
-    embed.add_field(name="Released on", value="Release date from SoundCloud or Spotify.", inline=False)
-
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="testembed", description="Preview a music release embed from a Spotify or SoundCloud link.")
-@app_commands.describe(link="Spotify or SoundCloud release link")
-@require_registration
-async def testembed_command(interaction: discord.Interaction, link: str):
-    await interaction.response.defer()
-    try:
-        if "spotify.com" in link:
-            release_id = extract_spotify_id(link)
-            if not release_id:
-                raise ValueError("Invalid Spotify URL.")
-            release_info = await run_blocking(get_spotify_release_info, release_id)
-            color = 0x1DB954
-        elif "soundcloud.com" in link:
-            release_info = await run_blocking(get_soundcloud_release_info, link)
-            color = 0xFF5500
-        else:
-            raise ValueError("Unsupported link. Only Spotify and SoundCloud are supported.")
-        track_count = release_info['track_count']
-        title = release_info['title'].lower()
-        if track_count == 1:
-            emoji = "🎵"
-        elif track_count <= 6:
-            emoji = "🎶"
-        elif track_count >= 20:
-            emoji = "📀" if "deluxe" in title else "💿"
-        else:
-            emoji = "💿"
-        repost_emoji = "📌" if release_info.get('repost') else ""
-        genre_text = f"\n**Genres:** {release_info.get('genres')}" if release_info.get('genres') else ""
-        embed = discord.Embed(
-            title=release_info['title'],
-            url=release_info.get('url', link),
-            color=color,
-            description=genre_text
-        )
-        embed.set_author(name=f"{emoji} New {release_info['artist_name']} Release! {repost_emoji}")
-        embed.set_thumbnail(url=release_info['cover_url'])
-        embed.add_field(name="Duration", value=release_info['duration'], inline=True)
-        embed.add_field(name="Tracks", value=track_count, inline=True)
-        embed.add_field(name="Features", value=release_info['features'], inline=True)
-        embed.add_field(name="Release Date", value=release_info['release_date'], inline=True)
-        await interaction.followup.send(embed=embed)
-    except Exception as e:
-        await bot.log_event(f"❌ Error in /testembed: {str(e)}")
-        await interaction.followup.send(f"❌ Failed to create test embed.\n{e}")
-
-@bot.tree.command(name="export", description="Export your list of tracked artists.")
-@require_registration
-async def export_command(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    artists = get_artists_by_owner(user_id)
-    if not artists:
-        await interaction.response.send_message("📭 You aren't currently tracking any artists.")
-        return
-    # Build CSV lines
-    lines = ["Platform,Artist Name,Artist ID,Artist URL,Last Release"]
-    for artist in artists:
-        lines.append(f"{artist['platform']},{artist['artist_name']},{artist['artist_id']},{artist['artist_url']},{artist['last_release_date']}")
-    content = "\n".join(lines)
-    # Save to file
-    filename = f"tracked_artists_{user_id}.csv"
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
-    file = discord.File(filename, filename=filename)
-    await interaction.response.send_message("📤 Here's your exported list of tracked artists:", file=file)
-
-@bot.tree.command(name="channels", description="Show the current channels for releases, logs, and commands.")
-@require_registration
-@app_commands.checks.has_permissions(manage_guild=True)
-async def channels_command(interaction: discord.Interaction):
-    guild = interaction.guild
-    guild_id = str(guild.id)
-
-    platforms = {
-        "spotify": "🟢 Spotify",
-        "soundcloud": "🎧 SoundCloud",
-        "logs": "🪵 Logs",
-        "commands": "💬 Commands"
-    }
-
-    lines = []
-    for key, label in platforms.items():
-        channel_id = get_channel(guild_id, key)
-        if channel_id:
-            channel = bot.get_channel(int(channel_id))
-            channel_mention = channel.mention if channel else f"`{channel_id}`"
-        else:
-            channel_mention = "*Not Set*"
-        lines.append(f"{label} — {channel_mention}")
-
-    embed = discord.Embed(
-        title="📡 Configured Channels",
-        description="\n".join(lines),
-        color=discord.Color.orange()
-    )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually.")
-@app_commands.describe(url="A SoundCloud artist or release URL")
-@require_registration
-async def debug_soundcloud(interaction: discord.Interaction, url: str):
-    from soundcloud_utils import get_soundcloud_release_info
-    await interaction.response.defer()
-
-    try:
-        info = get_soundcloud_release_info(url)
-        if info is None:
-            await interaction.followup.send("❌ Could not fetch release info. Check the URL or client ID.")
-            return
-
-        embed = discord.Embed(
-            title=info["title"],
-            description=f"By {info['artist_name']}\nReleased: {info['release_date']}\nTracks: {info['track_count']}",
-            color=discord.Color.orange()
-        )
-        embed.set_thumbnail(url=info["cover_url"])
-        embed.add_field(name="Duration", value=info["duration"], inline=True)
-        embed.add_field(name="Features", value=info["features"], inline=True)
-        embed.add_field(name="Genres", value=", ".join(info["genres"]) or "None", inline=False)
-        embed.add_field(name="Repost?", value="📌 Yes" if info.get('repost') else "No", inline=True)
-        embed.url = info["url"]
-
-        await interaction.followup.send(embed=embed)
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}")
-
-@bot.tree.command(name="checkscid", description="Verify SoundCloud client ID is valid")
-@require_registration
-async def check_scid_command(interaction: discord.Interaction):
-    from soundcloud_utils import verify_client_id, refresh_client_id
-    await interaction.response.defer(ephemeral=True)
-    if verify_client_id():
-        await interaction.followup.send("✅ SoundCloud client ID appears valid.")
-    else:
-        new_client_id = refresh_client_id()
-        if new_client_id:
-            await interaction.followup.send(f"✅ Refreshed SoundCloud client ID: `{new_client_id}`")
-        else:
-            await interaction.followup.send("❌ Failed to refresh SoundCloud client ID. Verify the ID manually.")
-
-@bot.tree.command(name="import", description="Import previously exported tracked artists")
-@app_commands.describe(file="Upload a previously exported JSON file")
-async def import_command(interaction: discord.Interaction, file: discord.Attachment):
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        if not file.filename.endswith(".json"):
-            await interaction.followup.send("❌ File must be a `.json` export.")
-            return
-
-        contents = await file.read()
-        data = json.loads(contents.decode())
-
-        owner_id = interaction.user.id
-        guild_id = str(interaction.guild.id) if interaction.guild else None
-
-        added_count = import_artists_from_json(data, owner_id, guild_id)
-        await interaction.followup.send(f"✅ Imported {added_count} artists.")
-
-    except Exception as e:
-        await interaction.followup.send(f"❌ Failed to import: {e}")
-
-@bot.tree.command(name="testcache", description="Test SQLite cache.")
-async def test_cache_command(interaction: discord.Interaction):
-    try:
-        set_cache("test_key", "test_value", ttl=60)
-        value = get_cache("test_key")
-        await interaction.response.send_message(f"✅ Cache is working. Test value: {value}")
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Cache error: {e}")
-
-@bot.tree.command(name="resetbot", description="Reset all bot data and state.")
-@app_commands.checks.has_permissions(administrator=True)
-async def reset_bot_command(interaction: discord.Interaction):
-    try:
-        # Clear cache
-        clear_all_cache()
-        initialize_fresh_database()
-
-        # Reset activity tracking
-        from database_utils import reset_activity_tracking
-        reset_activity_tracking()
-
-        # Reset bot state
-        await reset_bot_state()
-
-        await interaction.response.send_message("✅ Bot data and state reset successfully.")
-    except Exception as e:
-        await interaction.response.send_message(f"❌ Failed to reset bot: {e}")
-
-@bot.tree.command(name="forceremove", description="Admin: Force remove an artist from tracking using their URL")
-@app_commands.default_permissions(administrator=True)
-async def forceremove_command(interaction: discord.Interaction, url: str):
-    """Force remove an artist from tracking using their platform URL."""
-    await interaction.response.defer(ephemeral=True)
-    
-    try:
-        # Determine platform and get ID from URL
-        if "spotify.com" in url:
-            artist_id = url.split("/")[-1].split("?")[0]
-            platform = "spotify"
-        elif "soundcloud.com" in url:
-            artist_id = url.split("/")[-1].split("?")[0]
-            platform = "soundcloud"
-        else:
-            await interaction.followup.send("❌ Invalid URL. Must be a Spotify or SoundCloud URL.")
-            return
-
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            # Get artist info first for logging
-            cursor.execute(
-                "SELECT artist_name, platform FROM artists WHERE artist_id = ? AND platform = ?", 
-                (artist_id, platform)
-            )
-            result = cursor.fetchone()
-            
-            if result:
-                artist_name, platform = result
-                # Delete the artist
-                cursor.execute(
-                    "DELETE FROM artists WHERE artist_id = ? AND platform = ?", 
-                    (artist_id, platform)
-                )
-                conn.commit()
-                
-                await interaction.followup.send(
-                    f"✅ Force removed {artist_name} ({platform}) with URL: {url}"
-                )
-                await bot.log_event(
-                    f"🗑️ {interaction.user.name} force removed {artist_name} ({platform})"
-                )
-            else:
-                await interaction.followup.send(f"❌ No artist found with URL: {url}")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {str(e)}")
-
-@bot.tree.command(name="spotify_keystatus", description="Show Spotify API key rotation status (admin)")
-@app_commands.checks.has_permissions(administrator=True)
-async def spotify_keystatus_command(interaction: discord.Interaction):
-    rows = []
-    if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
-        for row in spotify_key_manager.get_status_rows():
-            rows.append(f"Key {row['index']+1}: {row['state']} (client_id={row['client_id_preview']})")
-    else:
-        rows.append("No Spotify keys configured")
-    embed = discord.Embed(title="Spotify Key Status", description="\n".join(rows), color=0x1DB954)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="sc_keystatus", description="Show SoundCloud API key rotation status (admin)")
-@app_commands.checks.has_permissions(administrator=True)
-async def sc_keystatus_command(interaction: discord.Interaction):
-    lines = []
-    if key_manager and getattr(key_manager, 'api_keys', None):
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
-        for idx, key in enumerate(key_manager.api_keys):
-            if idx == key_manager.current_key_index:
-                state = 'active'
-            else:
-                cd = key_manager.key_cooldowns.get(idx)
-                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
-            preview = (key or '')[:12] + '…'
-            lines.append(f"Key {idx+1}: {preview} ({state})")
-    else:
-        lines.append("No SoundCloud keys configured")
-    embed = discord.Embed(title="SoundCloud Key Status", description="\n".join(lines), color=0xfa5a02)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="keys", description="Show API key / credential status (admin only)")
-@app_commands.checks.has_permissions(administrator=True)
-async def keys_command(interaction: discord.Interaction):
-    sc_lines = []
-    if key_manager and getattr(key_manager, 'api_keys', None):
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
-        for idx, key in enumerate(key_manager.api_keys):
-            if idx == key_manager.current_key_index:
-                state = 'active'
-            else:
-                cd = key_manager.key_cooldowns.get(idx)
-                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
-            preview = (key or '')[:12] + '…'
-            sc_lines.append(f"SC Key {idx+1}: {preview} ({state})")
-    else:
-        sc_lines.append("No SoundCloud keys loaded")
-
-    sp_lines = []
-    if spotify_key_manager and getattr(spotify_key_manager, 'keys', None):
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
-        for idx, (cid, _sec) in enumerate(spotify_key_manager.keys):
-            if idx == spotify_key_manager.index:
-                state = 'active'
-            else:
-                cd = spotify_key_manager.key_cooldowns.get(idx)
-                state = f"cooldown_until={int(cd.timestamp())}" if cd and cd > now else 'ready'
-            sp_lines.append(f"Spotify Key {idx+1}: {cid[:12]}… ({state})")
-    else:
-        sp_lines.append("No Spotify keys loaded")
-
-    msg = "**API Key Status**\n" + "\n".join(sc_lines + [""] + sp_lines)
-    await interaction.response.send_message(msg, ephemeral=True)
-
-@bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
-@app_commands.describe(platform="Which platform to rotate (spotify or soundcloud)")
-@app_commands.checks.has_permissions(administrator=True)
-async def rotatekeys_command(interaction: discord.Interaction, platform: Literal["spotify", "soundcloud"]):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        if platform == "spotify":
-            result = manual_rotate_spotify_key(reason="manual_command")
-            if not result.get('rotated'):
-                await interaction.followup.send(f"❌ Spotify rotation failed: {result.get('error', 'unknown error')}")
-                return
-            active = result['active_index'] + 1
-            old = result.get('old_index', -1) + 1
-            lines = [f"Key {row['index']+1}: {row['state']} ({row['client_id_preview']})" for row in result['keys']]
-            msg = f"✅ Rotated Spotify key {old} ➜ {active}\n" + "\n".join(lines)
-            await interaction.followup.send(msg)
-        else:
-            result = manual_rotate_soundcloud_key(reason="manual_command")
-            if not result.get('rotated'):
-                await interaction.followup.send(f"❌ SoundCloud rotation failed: {result.get('error', 'unknown error')}")
-                return
-            active = result['active_index'] + 1
-            old = result.get('old_index', -1) + 1
-            lines = [f"Key {row['index']+1}: {row['state']} ({row['key_preview']})" for row in result['keys']]
-            msg = f"✅ Rotated SoundCloud key {old} ➜ {active}\n" + "\n".join(lines)
-            await interaction.followup.send(msg)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error rotating keys: {e}")
-
-@bot.tree.command(name="feature", description="Enable/disable per-guild feature (likes/reposts/playlists)")
-@app_commands.checks.has_permissions(administrator=True)
-async def feature_command(interaction: discord.Interaction, feature: Literal["likes", "reposts", "playlists"], state: Literal["on", "off"]):
-    set_guild_feature(str(interaction.guild.id), feature, state == 'on')
-    await interaction.response.send_message(f"✅ Feature '{feature}' set to {state}", ephemeral=True)
-
-@bot.tree.command(name="features", description="List feature toggle states for this guild")
-async def features_command(interaction: discord.Interaction):
-    states = get_guild_features(str(interaction.guild.id))
-    msg = "\n".join([f"{name}: {'✅ on' if enabled else '❌ off'}" for name, enabled in states.items()])
-    await interaction.response.send_message(f"**Feature States**\n{msg}", ephemeral=True)
-
-@bot.tree.command(name="telemetry", description="Show key / cache telemetry")
-@app_commands.checks.has_permissions(administrator=True)
-async def telemetry_command(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        sc_snapshot = get_soundcloud_telemetry_snapshot()
-        sp_status = spotify_key_manager.get_status_rows() if spotify_key_manager else []
-        cache_stats = get_cache_stats()
-        now = datetime.now(timezone.utc)
-
-        # SoundCloud keys with enhanced backoff visualization
-        sc_key_lines = []
-        if key_manager and key_manager.api_keys:
-            for row in key_manager.get_status_rows():
-                state = row['state']
-                fail = row.get('fail_count', 0)
-                next_use = 'now'
-                rel = ''
-                if 'cooldown_until=' in state:
-                    iso = state.split('cooldown_until=')[1]
-                    try:
-                        dt = datetime.fromisoformat(iso.replace('Z', '+00:00'))
-                        remaining = (dt - now).total_seconds()
-                        if remaining < 0:
-                            next_use = 'now'
-                        else:
-                            next_use = f"<t:{int(dt.timestamp())}:R>"
-                            rel = f" ({int(remaining//60)}m{int(remaining%60)}s)"
-                    except Exception:
-                        pass
-                marker = '▶' if state == 'active' else '⏳' if 'cooldown_until=' in state else '✅'
-                sc_key_lines.append(
-                    f"K{row['index']+1} {marker} fail={fail} next={next_use}{rel}"
-                )
-        else:
-            sc_key_lines.append('none')
-
-        # Spotify keys with enhanced backoff visualization
-        sp_key_lines = []
-        if sp_status:
-            for row in sp_status:
-                state = row['state']
-                next_use = 'now'
-                rel = ''
-                if 'cooldown_until=' in state:
-                    iso = state.split('cooldown_until=')[1]
-                    try:
-                        dt = datetime.fromisoformat(iso.replace('Z','+00:00'))
-                        remaining = (dt - now).total_seconds()
-                        if remaining >= 0:
-                            next_use = f"<t:{int(dt.timestamp())}:R>"
-                            rel = f" ({int(remaining//60)}m{int(remaining%60)}s)"
-                    except Exception:
-                        pass
-                marker = '▶' if state == 'active' else '⏳' if 'cooldown_until=' in state else '✅'
-                sp_key_lines.append(
-                    f"K{row['index']+1} {marker} next={next_use}{rel} {row['client_id_preview']}"
-                )
-        else:
-            sp_key_lines.append('none')
-
-        # Circuit breaker visualization
-        cb = sc_snapshot['circuit_breaker']
-        if cb['active']:
-            try:
-                until_dt = datetime.fromisoformat(cb['until'].replace('Z','+00:00')) if cb['until'] else None
-            except Exception:
-                until_dt = None
-            if until_dt:
-                remaining = max(0, int((until_dt - now).total_seconds()))
-                mins, secs = divmod(remaining, 60)
-                cb_line = f"ACTIVE {mins}m{secs}s (until <t:{int(until_dt.timestamp())}:R>)"
-            else:
-                cb_line = 'ACTIVE'
-        else:
-            cb_line = 'inactive'
-
-        tele = sc_snapshot['telemetry']
-        msg = (
-            "**Telemetry**\n"
-            f"SoundCloud Requests: {tele['requests']} ok={tele['success']} client_err={tele['client_errors']} server_err={tele['server_errors']} rotations={tele['rotations']} html_soft_fail={tele['html_soft_fail']}\n"
-            f"Circuit Breaker: {cb_line}\n"
-            f"SC Keys:\n - " + "\n - ".join(sc_key_lines) + "\n"
-            f"Spotify Keys:\n - " + "\n - ".join(sp_key_lines) + "\n"
-            f"Cache: total={cache_stats['total']} expired={cache_stats['expired']} expiring_soon={cache_stats['expiring_soon']} (~{cache_stats['soon_window_seconds']}s)"
-        )
-        await interaction.followup.send(msg, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"Error building telemetry: {e}", ephemeral=True)
-if __name__ == "__main__":
-    # Initialize SQLite cache table
-    initialize_cache_table()
-
-    try:
-        keep_alive()  # Start the web server for UptimeRobot
-        bot.run(TOKEN)
-    finally:
-        logging.info("✅ Bot shutdown complete.")
+            # Prefer Spotify case if available
+            display_name = next((a['artist_name'] for a in group if a['platform']=='spotify'), group[0]['artist_name'])
+            platforms = sorted({a['platform'] for a in group})
+            merged.append((display_name, ", ".join(p.capitalize() for p in platforms)))
+        merged.sort(key=lambda x: x[0].lower())
+        lines = [f"• {name} ({plats})" for name, plats in merged]
+        msg = "**🎧 Tracked Artists:**\n" + "\n".join(lines[:50])
+        if len(lines) > 50:
+            msg += f"\n…and {len(lines)-50} more"
+        await interaction.response.send_message(msg, ephemeral=True)
