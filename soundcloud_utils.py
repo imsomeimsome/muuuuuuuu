@@ -15,6 +15,7 @@ from database_utils import DB_PATH, get_channel, save_api_key_state, load_api_ke
 from dateutil.parser import parse as isoparse
 from functools import lru_cache
 import threading
+from collections import deque
 
 # At the top after imports
 load_dotenv()
@@ -36,6 +37,36 @@ TELEMETRY = {
 }
 CIRCUIT_BREAKER_UNTIL = None  # datetime when breaker lifts
 CIRCUIT_BREAKER_MIN = timedelta(minutes=10)
+
+# Passive anomaly detection (data truncation / unexpected empties)
+DATA_ANOMALIES = deque(maxlen=50)  # (ts, kind, endpoint, detail)
+DATA_ANOMALY_THRESHOLD = 4  # number of anomalies inside window to trigger rotation
+DATA_ANOMALY_WINDOW_SEC = 120
+
+def record_data_anomaly(kind: str, endpoint: str, detail: str = ''):
+    """Record an unexpected empty/truncated data response. If too many inside
+    a short window, proactively rotate the key (treat as implicit rate limit)."""
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        now = _dt.now(_tz.utc)
+        DATA_ANOMALIES.append((now, kind, endpoint, detail))
+        recent = [r for r in DATA_ANOMALIES if (now - r[0]).total_seconds() <= DATA_ANOMALY_WINDOW_SEC]
+        if len(recent) >= DATA_ANOMALY_THRESHOLD:
+            logging.warning(f"⚠️ Detected {len(recent)} SoundCloud data anomalies in {DATA_ANOMALY_WINDOW_SEC}s; rotating key proactively (kind={kind}).")
+            if key_manager:
+                try:
+                    key_manager.mark_rate_limited()
+                    new_key = key_manager.rotate_key(reason="data_anomaly")
+                    if new_key:
+                        global CLIENT_ID
+                        CLIENT_ID = new_key
+                        TELEMETRY['rotations'] += 1
+                        logging.info("🔄 Proactive SoundCloud key rotation due to anomaly clustering")
+                except Exception as e:
+                    logging.error(f"Failed proactive rotation on anomaly: {e}")
+            DATA_ANOMALIES.clear()
+    except Exception as e:
+        logging.debug(f"record_data_anomaly failed: {e}")
 
 def circuit_breaker_active():
     global CIRCUIT_BREAKER_UNTIL
@@ -62,6 +93,50 @@ def get_circuit_breaker_status():
         'until': CIRCUIT_BREAKER_UNTIL.isoformat() if CIRCUIT_BREAKER_UNTIL else None,
         'seconds_remaining': (CIRCUIT_BREAKER_UNTIL - datetime.now(timezone.utc)).total_seconds() if CIRCUIT_BREAKER_UNTIL else 0
     }
+
+# --- Batch Release Fetch Monitor (detect truncated runs / silent rate limits) ---
+class _ReleaseFetchMonitor:
+    def __init__(self):
+        self.reset()
+        self.consecutive_fail_threshold = int(os.getenv('SC_RUN_FAIL_THRESHOLD', '5'))
+        self.failure_rate_threshold = float(os.getenv('SC_RUN_FAIL_RATE', '0.8'))
+        self.min_samples_for_rate = int(os.getenv('SC_RUN_MIN_SAMPLES', '6'))
+        self.rotated_this_run = False
+
+    def reset(self):
+        self.total = 0
+        self.success = 0
+        self.fail = 0
+        self.consecutive_fail = 0
+        self.rotated_this_run = False
+
+    def note(self, success: bool, context: str = ''):
+        self.total += 1
+        if success:
+            self.success += 1
+            self.consecutive_fail = 0
+        else:
+            self.fail += 1
+            self.consecutive_fail += 1
+
+    def should_rotate(self):
+        if self.rotated_this_run:
+            return False
+        # Hard trigger on consecutive failures
+        if self.consecutive_fail >= self.consecutive_fail_threshold:
+            return True
+        # Soft trigger on high failure rate after enough samples
+        if self.total >= self.min_samples_for_rate and self.fail / max(1, self.total) >= self.failure_rate_threshold:
+            return True
+        return False
+
+    def mark_rotated(self):
+        self.rotated_this_run = True
+
+_release_monitor_singleton = _ReleaseFetchMonitor()
+
+def get_release_monitor():
+    return _release_monitor_singleton
 
 class SoundCloudKeyManager:
     def __init__(self, bot=None):
@@ -543,47 +618,86 @@ def extract_soundcloud_user_id(artist_url):
     except Exception as e:
         raise ValueError(f"Failed to extract user ID from URL: {e}")
 
-
-
 def clean_soundcloud_url(url):
-    """Normalize and verify SoundCloud URLs."""
+    """Normalize and verify SoundCloud URLs.
+    Supports regular and shortened (on.soundcloud.com) redirect links.
+    Only performs a HEAD + final GET fetch; raises ValueError if invalid.
+    """
     try:
-        # Remove duplicate prefixes
-        while "https://soundcloud.com/https://soundcloud.com/" in url:
-            url = url.replace("https://soundcloud.com/https://soundcloud.com/", "https://soundcloud.com/")
+        if not url:
+            raise ValueError("Empty URL")
+        url = url.strip()
+        # Prepend scheme if missing
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
 
-        # Ensure the URL starts with the correct base
-        if not url.startswith("https://soundcloud.com/"):
-            raise ValueError(f"Invalid SoundCloud URL: {url}")
+        # First: allow both soundcloud.com and on.soundcloud.com for redirect expansion
+        parsed_initial = urlparse(url)
+        host = parsed_initial.netloc.lower()
+        if host.endswith(':80') or host.endswith(':443'):
+            host = host.split(':')[0]
 
-        # Handle shortened URLs (e.g., on.soundcloud.com)
-        if 'on.soundcloud.com' in url:
-            response = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
-            url = response.url
-            logging.debug(f"🔄 Redirected URL: {url}")
+        # Expand on.soundcloud.com short link BEFORE strict base validation
+        if 'on.soundcloud.com' in host:
+            try:
+                head_resp = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
+                # Some short links may require GET if HEAD filtered
+                if head_resp.status_code in (403, 405) or 'soundcloud.com' not in head_resp.url:
+                    get_resp = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=10)
+                    final_url = get_resp.url
+                else:
+                    final_url = head_resp.url
+                url = final_url
+                parsed_initial = urlparse(url)
+                host = parsed_initial.netloc.lower()
+                logging.debug(f"🔄 Expanded short SoundCloud URL to: {url}")
+            except Exception as e:
+                raise ValueError(f"Failed to expand short link: {e}")
 
-        # Validate domain
-        parsed = urlparse(url)
-        if 'soundcloud.com' not in parsed.netloc:
-            logging.warning(f"⚠️ Invalid SoundCloud domain for URL: {url}")
-            raise ValueError("Invalid SoundCloud domain")
+        # Validate domain now
+        if 'soundcloud.com' not in host:
+            raise ValueError(f"Invalid SoundCloud domain: {host}")
 
-        # Validate URL existence
-        response = requests.get(url, headers=HEADERS, timeout=10)
-        if response.status_code == 404:
-            logging.warning(f"⚠️ 404 Not Found for SoundCloud URL: {url}")
+        # Strip duplicate nested prefixes if somehow present
+        while 'https://soundcloud.com/https://soundcloud.com/' in url:
+            url = url.replace('https://soundcloud.com/https://soundcloud.com/', 'https://soundcloud.com/')
+
+        # Fetch page to ensure existence (use GET not safe_request because this is HTML)
+        page_resp = requests.get(url, headers=HEADERS, timeout=10)
+        if page_resp.status_code == 404:
             raise ValueError("SoundCloud URL returned 404")
-        response.raise_for_status()
-        logging.info(f"✅ Successfully validated SoundCloud URL: {url}")
+        page_resp.raise_for_status()
+        logging.info(f"✅ Validated SoundCloud URL: {url}")
 
-        # Extract canonical URL
-        match = re.search(r'<link rel="canonical" href="([^"]+)"', response.text)
-        return match.group(1) if match else url
-
+        # Canonical <link>
+        match = re.search(r'<link rel="canonical" href="([^"]+)"', page_resp.text)
+        canonical = match.group(1) if match else url
+        return canonical
     except Exception as e:
         logging.error(f"❌ URL validation failed for {url}: {e}")
         raise ValueError(f"URL validation failed: {e}")
-    
+
+def expand_soundcloud_short_url(url: str) -> str:
+    """Expand on.soundcloud.com short (Smart Link) URLs to canonical soundcloud.com URLs.
+    Returns the final expanded URL or raises ValueError.
+    """
+    try:
+        if 'on.soundcloud.com' not in url.lower():
+            return url
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        head_resp = requests.head(url, headers=HEADERS, allow_redirects=True, timeout=10)
+        final_url = head_resp.url
+        if (head_resp.status_code in (403, 405) or 'soundcloud.com' not in final_url) and head_resp.status_code != 301:
+            # Fallback to GET if HEAD blocked
+            get_resp = requests.get(url, headers=HEADERS, allow_redirects=True, timeout=10)
+            final_url = get_resp.url
+        if 'soundcloud.com' not in final_url:
+            raise ValueError(f"Expansion did not resolve to soundcloud.com: {final_url}")
+        return final_url
+    except Exception as e:
+        raise ValueError(f"Failed to expand short SoundCloud URL: {e}")
+
 def extract_soundcloud_username(url):
     """Extract the username from a SoundCloud URL."""
     clean_url = clean_soundcloud_url(url)
@@ -708,36 +822,35 @@ def get_soundcloud_playlist_info(artist_url):
         cached = get_cache(cache_key)
         if cached:
             return json.loads(cached) if isinstance(cached, str) else cached
-
         resolved = get_artist_info(artist_url)
         user_id = resolved.get("id")
         if not user_id:
             raise ValueError(f"Could not resolve user ID for {artist_url}")
-
         url = f"https://api-v2.soundcloud.com/users/{user_id}/playlists?client_id={CLIENT_ID}&limit=5"
         response = safe_request(url)
         if not response or response.status_code != 200:
-            logging.warning(f"No playlists found for {artist_url}")
+            logging.warning(f"No playlists response for {artist_url}")
             return None
-
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            record_data_anomaly('invalid_json', url, 'playlists')
+            return None
         playlists = data.get("collection", [])
         if not playlists:
-            logging.warning(f"No playlists found for {artist_url}")
+            record_data_anomaly('empty_collection', url, 'playlists')
+            logging.debug(f"Empty playlist collection for {artist_url}")
             return None
-
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
         tracks = []
-        
         for index, track in enumerate(latest_playlist.get("tracks", [])):
-            if isinstance(track, dict):  # Ensure track is a dictionary
+            if isinstance(track, dict):
                 tracks.append({
                     "id": str(track.get("id")),
                     "title": str(track.get("title")),
                     "duration": track.get("duration"),
                     "order": index
                 })
-
         result = {
             "title": latest_playlist.get("title"),
             "artist_name": latest_playlist.get("user", {}).get("username"),
@@ -747,17 +860,18 @@ def get_soundcloud_playlist_info(artist_url):
             "track_count": len(tracks),
             "tracks": tracks
         }
-
+        if not result.get('url'):
+            record_data_anomaly('missing_field', url, 'playlist_url')
         set_cache(cache_key, json.dumps(result), ttl=300)
         return result
-
     except Exception as e:
         logging.error(f"Error checking playlists: {e}")
         return None
 
-
 def get_soundcloud_likes_info(artist_url, force_refresh=False):
-    """Fetch and process liked tracks/playlists from a SoundCloud user with playlist resolve batching."""
+    """Fetch and process liked tracks/playlists from a SoundCloud user with playlist resolve batching.
+    Adds anomaly detection for repeated empty collections.
+    """
     try:
         cache_key = f"likes:{artist_url}"
         if not force_refresh:
@@ -776,9 +890,16 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
         if not response:
             logging.warning(f"⚠️ No response received for likes: {artist_url}")
             return []
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            record_data_anomaly('invalid_json', url, 'likes')
+            return []
         if not data or "collection" not in data:
-            logging.warning(f"⚠️ Invalid or empty data received for likes: {artist_url}")
+            record_data_anomaly('missing_collection', url, 'likes')
+            return []
+        if not data.get('collection'):
+            record_data_anomaly('empty_collection', url, 'likes')
             return []
         likes = []
         playlist_cache = {}
@@ -796,7 +917,11 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                         playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
-                            playlist_cache[playlist_url] = playlist_response.json()
+                            try:
+                                playlist_cache[playlist_url] = playlist_response.json()
+                            except Exception:
+                                record_data_anomaly('playlist_invalid_json', playlist_resolve_url, 'like_playlist_resolve')
+                                playlist_cache[playlist_url] = None
                         else:
                             playlist_cache[playlist_url] = None
                     playlist_data = playlist_cache.get(playlist_url)
@@ -861,30 +986,27 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
         logging.error(f"Error fetching likes for {artist_url}: {e}")
         return []
 
-    
 def get_soundcloud_reposts_info(artist_url):
-    """Fetch and process reposts from a SoundCloud user."""
+    """Fetch and process reposts from a SoundCloud user with anomaly detection."""
     try:
         cache_key = f"reposts:{artist_url}"
         cached = get_cache(cache_key)
         if cached:
             return json.loads(cached)
-
         resolved = resolve_url(artist_url)
         if not resolved or "id" not in resolved:
             logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
             return []
-
         user_id = resolved["id"]
-        # Try multiple repost endpoints
         endpoints = [
             f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=10",
             f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=10",
             f"https://api-v2.soundcloud.com/stream/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=10"
         ]
-        
         response = None
+        last_endpoint = None
         for endpoint in endpoints:
+            last_endpoint = endpoint
             try:
                 response = safe_request(endpoint)
                 if response and response.status_code == 200:
@@ -892,24 +1014,28 @@ def get_soundcloud_reposts_info(artist_url):
             except Exception as e:
                 logging.debug(f"Failed endpoint {endpoint}: {e}")
                 continue
-
         if not response:
+            record_data_anomaly('no_response', last_endpoint or 'unknown', 'reposts')
             logging.warning(f"⚠️ Could not fetch reposts from any endpoint for {artist_url}")
             return []
-
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            record_data_anomaly('invalid_json', last_endpoint or 'unknown', 'reposts')
+            return []
         reposts = []
-
-        for item in data.get("collection", []):
+        coll = data.get('collection', [])
+        if not coll:
+            record_data_anomaly('empty_collection', last_endpoint or 'unknown', 'reposts')
+            return []
+        for item in coll:
             try:
                 original = item.get("track") or item.get("playlist")
                 if not original:
                     continue
-
                 repost_date = item.get("created_at")
                 if not repost_date:
                     continue
-
                 reposts.append({
                     "track_id": str(original.get("id")),
                     "title": original.get("title"),
@@ -926,14 +1052,12 @@ def get_soundcloud_reposts_info(artist_url):
             except Exception as e:
                 logging.warning(f"Error processing repost: {e}")
                 continue
-
         set_cache(cache_key, json.dumps(reposts), ttl=300)
         return reposts
-
     except Exception as e:
         logging.error(f"Error fetching reposts for {artist_url}: {e}")
         return []
-    
+
 # --- Data Processing ---
 
 def process_track(track_data):
@@ -1190,81 +1314,9 @@ def safe_get(url, headers=None, retries=3):
     return None
 
 def get_soundcloud_likes(artist_url):
-    try:
-        artist_info = get_artist_info(artist_url)
-        artist_id = artist_info['id']
+    """Backward-compatible wrapper returning likes list (uses likes_info)."""
+    return get_soundcloud_likes_info(artist_url)
 
-        likes_url = f"https://api-v2.soundcloud.com/users/{artist_id}/likes?client_id={CLIENT_ID}&limit=5"
-        response = safe_request(likes_url, headers=HEADERS)
-        if not response:
-            return []
-
-        items = response.json().get('collection', [])
-        likes = []
-        for item in items:
-            if item.get('track'):
-                track = item['track']
-                likes.append({
-                    "artist_name": track.get('user', {}).get('username'),
-                    "title": track.get('title'),
-                    "url": track.get('permalink_url'),
-                    "release_date": track.get('created_at'),
-                    "cover_url": track.get('artwork_url'),
-                    "features": None,
-                    "track_count": 1,
-                    "duration": track.get('full_duration', 0) // 1000,
-                    "repost": False,
-                    "genres": track.get('genre', []),
-                    "release_type": "Like"
-                })
-        return likes
-    except Exception as e:
-        print(f"SoundCloud likes fetch failed: {e}")
-        return []
-    
-def get_soundcloud_reposts(artist_url):
-    cache_key = f"sc_reposts:{artist_url}"
-    cached = get_cache(cache_key)  # Use get_cache
-    if cached:
-        return json.loads(cached)
-    try:
-        user_id = extract_soundcloud_user_id(artist_url)
-        url = f"https://api-v2.soundcloud.com/users/{user_id}/reposts?client_id={CLIENT_ID}&limit=5"
-        response = safe_request(url)
-        if response is None or response.status_code == 404:
-            alt_url = f"https://api-v2.soundcloud.com/users/{user_id}/track_reposts?client_id={CLIENT_ID}&limit=5"
-            response = safe_request(alt_url)
-        if not response:
-            return []
-        
-        data = response.json()
-        reposts = []
-
-        for item in data.get("collection", []):
-            if item.get("type") == "track-repost":
-                track = item.get("track")
-                if not track:
-                    continue
-                reposts.append({
-                    "track_id": track.get("id"),
-                    "title": track.get("title"),
-                    "artist_name": track.get("user", {}).get("username"),
-                    "url": track.get("permalink_url"),
-                    "release_date": track.get("created_at"),
-                    "cover_url": track.get("artwork_url"),
-                    "features": extract_features(track.get("title", "")),
-                    "track_count": 1,
-                    "duration": str(round(track.get("duration", 0) / 1000)) + "s",
-                    "genres": [track.get("genre")] if track.get("genre") else [],
-                    "repost": True
-                })
-
-        set_cache(cache_key, json.dumps(reposts), ttl=CACHE_TTL)  # Use set_cache
-        return reposts
-    except Exception as e:
-        logging.error(f"SoundCloud repost fetch failed: {e}")
-        return []
-    
 RATE_LIMIT_DELAY = 5  # Delay in seconds between requests
 
 def rate_limited_request(url, headers=None):
@@ -1282,10 +1334,50 @@ class RailwayLogFormatter(logging.Formatter):
     RESET = "\033[0m"
 
     def format(self, record):
+        # Fixed mismatched bracket
         color = self.COLORS.get(record.levelname, self.RESET)
         record.msg = f"{color}{record.msg}{self.RESET}"
         return super().format(record)
-    
+
+# --- Release batch monitoring integration (silent rate limit / truncation) ---
+# We already have _ReleaseFetchMonitor; add helpers to reset and automatic rotation logic.
+
+def begin_soundcloud_release_batch():
+    """Reset the per-run release fetch monitor. Call at start of a SoundCloud sweep."""
+    try:
+        mon = get_release_monitor()
+        mon.reset()
+    except Exception:
+        pass
+
+def note_soundcloud_release_fetch(success: bool, context: str = ""):
+    """Record outcome of a single artist release fetch. If thresholds exceeded, rotate key automatically.
+    success=True means the API calls succeeded (even if no new release)."""
+    global CLIENT_ID, key_manager
+    try:
+        mon = get_release_monitor()
+        mon.note(success, context)
+        if mon.should_rotate() and key_manager:
+            logging.warning("⚠️ SoundCloud release fetch failures threshold reached – rotating key (silent limit suspected)")
+            key_manager.mark_rate_limited()
+            new_key = key_manager.rotate_key(reason="batch_consecutive_failures")
+            if new_key:
+                CLIENT_ID = new_key
+                TELEMETRY['rotations'] += 1
+                mon.mark_rotated()
+                logging.info("🔄 SoundCloud key rotated due to batch failure heuristic")
+            else:
+                logging.error("🛑 Unable to rotate SoundCloud key (all exhausted) – activating circuit breaker")
+                trip_circuit_breaker(reason="batch_fail_rotation_exhausted")
+    except Exception as e:
+        logging.debug(f"note_soundcloud_release_fetch error: {e}")
+
+# --- Missing simple wrappers expected by imports (provide lightweight adapters) ---
+
+def get_soundcloud_reposts(artist_url):
+    """Backward-compatible wrapper returning repost list (uses reposts_info)."""
+    return get_soundcloud_reposts_info(artist_url)
+
 def clear_cache(key):
     """Clear a specific cache key."""
     delete_cache(key)

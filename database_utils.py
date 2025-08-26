@@ -62,13 +62,60 @@ def get_user_registered_at(user_id):
 
 # ---------- Artist Functions ----------
 
+# Cache schema introspection for performance
+_ARTISTS_HAS_CREATED_AT = None
+
+def _artists_has_created_at():
+    global _ARTISTS_HAS_CREATED_AT
+    if _ARTISTS_HAS_CREATED_AT is not None:
+        return _ARTISTS_HAS_CREATED_AT
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(artists)")
+            cols = [r[1] for r in cur.fetchall()]
+            _ARTISTS_HAS_CREATED_AT = 'created_at' in cols
+    except Exception:
+        _ARTISTS_HAS_CREATED_AT = False
+    return _ARTISTS_HAS_CREATED_AT
+
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
-    with get_connection() as conn:
-        conn.execute(
-            """REPLACE INTO artists(platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date)
-                VALUES (?,?,?,?,?,?,?,?)""",
-            (platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date))
-        )
+    """Insert/replace an artist row. Compatible with schemas with/without created_at column."""
+    created_at_needed = _artists_has_created_at()
+    cols = [
+        'platform','artist_id','artist_name','artist_url','owner_id','guild_id','genres','last_release_date'
+    ]
+    vals = [
+        platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date)
+    ]
+    if created_at_needed:
+        cols.append('created_at')
+        vals.append(datetime.now(timezone.utc).isoformat())
+    placeholders = ','.join(['?']*len(cols))
+    col_list = ','.join(cols)
+    sql = f"REPLACE INTO artists({col_list}) VALUES ({placeholders})"
+    try:
+        with get_connection() as conn:
+            conn.execute(sql, vals)
+    except sqlite3.IntegrityError as e:
+        # Fallback: if created_at missing value assumption wrong, retry without
+        if 'created_at' in str(e) and created_at_needed:
+            logging.warning("Retrying add_artist without created_at column (schema mismatch)")
+            try:
+                with get_connection() as conn:
+                    conn.execute(
+                        "REPLACE INTO artists(platform,artist_id,artist_name,artist_url,owner_id,guild_id,genres,last_release_date) VALUES (?,?,?,?,?,?,?,?)",
+                        (platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date))
+                    )
+            except Exception as e2:
+                logging.error(f"add_artist failed fallback: {e2}")
+                raise
+        else:
+            logging.error(f"add_artist integrity error: {e}")
+            raise
+    except Exception as e:
+        logging.error(f"add_artist failed: {e}")
+        raise
 
 def remove_artist(artist_id, owner_id):
     with get_connection() as conn:

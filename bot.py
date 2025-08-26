@@ -60,7 +60,10 @@ from soundcloud_utils import (
     CLIENT_ID as SC_CLIENT_ID,
     manual_rotate_soundcloud_key,
     get_soundcloud_telemetry_snapshot,  # <-- added import (already existed comment)
-    get_soundcloud_key_status  # <-- added
+    get_soundcloud_key_status,  # <-- added
+    expand_soundcloud_short_url,  # <-- NEW
+    begin_soundcloud_release_batch,        # <-- added for silent limit detection
+    note_soundcloud_release_fetch          # <-- added for silent limit detection
 )
 import soundcloud_utils  # added for dynamic key manager access
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
@@ -614,7 +617,8 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=Fal
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False):
     """Handle all SoundCloud-related checks."""
     global CLIENT_ID
-    
+    # Begin batch monitoring (detect truncated runs / silent limits)
+    begin_soundcloud_release_batch()
     errors = []
     soundcloud_counts = {
         "releases": 0,
@@ -659,9 +663,11 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
 
             # Check releases
             try:
-                should_post = False  # <-- ensure fresh flag per artist iteration
                 release_info = await run_blocking(get_soundcloud_release_info, artist_url)
-                if release_info:
+                if not release_info:
+                    # Treat missing info as a potential soft-failure (counts toward rotation heuristic)
+                    note_soundcloud_release_fetch(False, f"{artist_name}:no_release_info")
+                else:
                     current_date = release_info.get("release_date")
                     if current_date:
                         try:
@@ -706,11 +712,17 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=
                                         await asyncio.sleep(2)
                             else:
                                 logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title')} (current={current_dt.isoformat()} <= last_dt={last_dt.isoformat()})")
+                            # Mark success only after full comparison logic completes
+                            note_soundcloud_release_fetch(True, f"{artist_name}:release_checked")
                         except Exception as e:
                             logging.error(f"     ❌ Error comparing dates: {e}")
+                            note_soundcloud_release_fetch(False, f"{artist_name}:date_compare_error")
                             continue
-
+                    else:
+                        # Missing date is anomalous; count as failure
+                        note_soundcloud_release_fetch(False, f"{artist_name}:missing_release_date")
             except Exception as e:
+                note_soundcloud_release_fetch(False, f"{artist_name}:exception:{type(e).__name__}")
                 if "rate/request limit" in str(e).lower():
                     retry_after = now + timedelta(hours=12)
                     logging.warning(f"⚠️ Rate limit hit. Attempting key rotation...")
@@ -1108,15 +1120,22 @@ async def track_command(interaction: discord.Interaction, link: str):
         artist_info = await run_blocking(get_spotify_artist_info, artist_id)
         genres = artist_info.get("genres", []) if artist_info else []
 
-
     elif "soundcloud.com" in link:
         platform = "soundcloud"
-        artist_id = extract_soundcloud_id(link)
-        artist_info = await run_blocking(get_artist_info, link)
-        artist_name = artist_info.get("name", artist_id)  # Fallback to artist_id if name is unavailable
+        # Expand short Smart Link if needed (on.soundcloud.com/...)
+        try:
+            expanded_link = await run_blocking(expand_soundcloud_short_url, link)
+        except Exception:
+            expanded_link = link  # fallback silently
+        try:
+            artist_id = extract_soundcloud_id(expanded_link)
+            artist_info = await run_blocking(get_artist_info, expanded_link)
+        except Exception:
+            await interaction.followup.send("❌ Invalid SoundCloud artist URL. Provide a profile like https://soundcloud.com/artistname", ephemeral=True)
+            return
+        artist_name = artist_info.get("name", artist_id)
         artist_url = artist_info.get("url", f"https://soundcloud.com/{artist_id}")
-        genres = []  # Optional
-
+        genres = []
     else:
         await interaction.followup.send("❌ Link must be a valid Spotify or SoundCloud artist URL.")
         return
@@ -1126,11 +1145,9 @@ async def track_command(interaction: discord.Interaction, link: str):
         await interaction.followup.send("⚠️ You're already tracking this artist.")
         return
 
-    # ✅ Set last_release_date as time of tracking to prevent false first posts
     from datetime import datetime, timezone
     current_time = datetime.now(timezone.utc).isoformat()
 
-    # Add artist
     add_artist(
         platform=platform,
         artist_id=artist_id,
@@ -1139,7 +1156,7 @@ async def track_command(interaction: discord.Interaction, link: str):
         owner_id=user_id,
         guild_id=guild_id,
         genres=genres,
-        last_release_date=current_time  # ✅ store track time
+        last_release_date=current_time
     )
 
     print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
