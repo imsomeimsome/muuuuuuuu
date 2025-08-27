@@ -63,56 +63,98 @@ def get_user_registered_at(user_id):
 # ---------- Artist Functions ----------
 
 # Cache schema introspection for performance
-_ARTISTS_HAS_CREATED_AT = None
+_ARTISTS_SCHEMA_CACHE = None
 
-def _artists_has_created_at():
-    global _ARTISTS_HAS_CREATED_AT
-    if _ARTISTS_HAS_CREATED_AT is not None:
-        return _ARTISTS_HAS_CREATED_AT
+_DEF_ARTIST_BASE_COLS = {
+    'platform','artist_id','artist_name','artist_url','owner_id','guild_id','genres','last_release_date',
+    'last_like_date','last_repost_date','last_playlist_date','last_release_check'
+}
+
+def _load_artists_schema():
+    global _ARTISTS_SCHEMA_CACHE
+    if _ARTISTS_SCHEMA_CACHE is not None:
+        return _ARTISTS_SCHEMA_CACHE
     try:
         with get_connection() as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(artists)")
-            cols = [r[1] for r in cur.fetchall()]
-            _ARTISTS_HAS_CREATED_AT = 'created_at' in cols
+            rows = cur.fetchall()  # cid, name, type, notnull, dflt_value, pk
+            schema = []
+            for cid, name, col_type, notnull, dflt_value, pk in rows:
+                schema.append({
+                    'name': name,
+                    'type': col_type,
+                    'notnull': bool(notnull),
+                    'dflt': dflt_value,
+                    'pk': bool(pk)
+                })
+            _ARTISTS_SCHEMA_CACHE = schema
     except Exception:
-        _ARTISTS_HAS_CREATED_AT = False
-    return _ARTISTS_HAS_CREATED_AT
+        _ARTISTS_SCHEMA_CACHE = []
+    return _ARTISTS_SCHEMA_CACHE
+
+def _refresh_artists_schema_cache():
+    global _ARTISTS_SCHEMA_CACHE
+    _ARTISTS_SCHEMA_CACHE = None
+    return _load_artists_schema()
 
 def add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id=None, genres=None, last_release_date=None):
-    """Insert/replace an artist row. Compatible with schemas with/without created_at column."""
-    created_at_needed = _artists_has_created_at()
-    cols = [
+    """Insert/replace an artist row.
+    Dynamically supplies values for NOT NULL columns (e.g., created_at, updated_at) that are not part of the base set.
+    If 'updated_at' exists it is always refreshed; 'created_at' only set on insert/replace event.
+    """
+    schema = _load_artists_schema()
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    base_cols = [
         'platform','artist_id','artist_name','artist_url','owner_id','guild_id','genres','last_release_date'
     ]
-    vals = [
-        platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date)
+    base_vals = [
+        platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None,
+        json.dumps(genres or []), normalize_date_str(last_release_date)
     ]
-    if created_at_needed:
-        cols.append('created_at')
-        vals.append(datetime.now(timezone.utc).isoformat())
-    placeholders = ','.join(['?']*len(cols))
-    col_list = ','.join(cols)
+
+    # Detect extra NOT NULL cols with no default requiring values (e.g., created_at, updated_at)
+    extra_cols = []
+    extra_vals = []
+    for col in schema:
+        name = col['name']
+        if name in base_cols or name in ('last_like_date','last_repost_date','last_playlist_date','last_release_check'):
+            continue
+        if name in ('created_at','updated_at'):
+            extra_cols.append(name)
+            # Always set updated_at; created_at also set (REPLACE semantics will recreate row)
+            extra_vals.append(now_iso)
+        elif col['notnull'] and col['dflt'] is None and name not in _DEF_ARTIST_BASE_COLS:
+            # Provide a generic value (timestamp) to satisfy NOT NULL if unexpected column exists
+            extra_cols.append(name)
+            extra_vals.append(now_iso)
+
+    all_cols = base_cols + extra_cols
+    all_vals = base_vals + extra_vals
+    placeholders = ','.join(['?']*len(all_cols))
+    col_list = ','.join(all_cols)
     sql = f"REPLACE INTO artists({col_list}) VALUES ({placeholders})"
+
     try:
         with get_connection() as conn:
-            conn.execute(sql, vals)
+            conn.execute(sql, all_vals)
+    except sqlite3.OperationalError as e:
+        # Schema changed after cache? Refresh and retry once.
+        if 'no such column' in str(e).lower():
+            _refresh_artists_schema_cache()
+            return add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date)
+        logging.error(f"add_artist operational error: {e}")
+        raise
     except sqlite3.IntegrityError as e:
-        # Fallback: if created_at missing value assumption wrong, retry without
-        if 'created_at' in str(e) and created_at_needed:
-            logging.warning("Retrying add_artist without created_at column (schema mismatch)")
-            try:
-                with get_connection() as conn:
-                    conn.execute(
-                        "REPLACE INTO artists(platform,artist_id,artist_name,artist_url,owner_id,guild_id,genres,last_release_date) VALUES (?,?,?,?,?,?,?,?)",
-                        (platform, artist_id, artist_name, artist_url, str(owner_id), str(guild_id) if guild_id else None, json.dumps(genres or []), normalize_date_str(last_release_date))
-                    )
-            except Exception as e2:
-                logging.error(f"add_artist failed fallback: {e2}")
-                raise
-        else:
-            logging.error(f"add_artist integrity error: {e}")
-            raise
+        # If integrity refers to a column we missed, refresh schema and retry once
+        if 'NOT NULL constraint failed' in str(e):
+            missing_col = str(e).split(':')[-1].strip()
+            if missing_col and missing_col not in all_cols:
+                _refresh_artists_schema_cache()
+                return add_artist(platform, artist_id, artist_name, artist_url, owner_id, guild_id, genres, last_release_date)
+        logging.error(f"add_artist integrity error: {e}")
+        raise
     except Exception as e:
         logging.error(f"add_artist failed: {e}")
         raise
