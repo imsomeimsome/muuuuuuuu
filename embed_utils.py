@@ -22,7 +22,8 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
     if platform.lower() == "spotify":
         embed = discord.Embed(
             title=f"# 🎵 {artist_name} released a {release_type}!",
-            description=f"[{title}]({url})",
+            # Emphasize title (Discord headings inside embeds are not larger; using bold+underline for emphasis)
+            description=f"__**{title}**__\n[{title}]({url})",
             color=0x1DB954  # Spotify green
         )
     else:

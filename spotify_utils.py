@@ -48,6 +48,157 @@ TELEMETRY = {
     'invalid_credentials': 0,
 }
 
+# --- Tier 2 & 3 Monitoring State (Spotify) ---
+from collections import deque
+import statistics as _stats
+import time as _time
+SPOTIFY_DATA_ANOMALIES = deque(maxlen=50)  # (ts, kind, endpoint, detail)
+SPOTIFY_ANOMALY_WINDOW_SEC = 120
+SPOTIFY_ANOMALY_THRESHOLD = int(os.getenv('SPOTIFY_ANOMALY_THRESHOLD', '4'))
+SPOTIFY_BATCH_STATE = {
+    'start_time': None,
+    'expected_total': None,
+    'processed': 0,
+    'latencies_ms': [],
+    'median_baseline_ms': None,
+    'watchdog_task': None,
+    'last_progress_time': None,
+    'rotated_this_run': False,
+    'fail': 0,
+    'success': 0,
+    'consecutive_fail': 0,
+}
+SPOTIFY_CONSEC_FAIL_THRESHOLD = int(os.getenv('SPOTIFY_CONSEC_FAIL_THRESHOLD', '5'))
+SPOTIFY_FAIL_RATE_THRESHOLD = float(os.getenv('SPOTIFY_FAIL_RATE_THRESHOLD', '0.8'))
+SPOTIFY_MIN_SAMPLES_FOR_RATE = int(os.getenv('SPOTIFY_MIN_SAMPLES_FOR_RATE', '6'))
+SPOTIFY_WATCHDOG_GRACE = int(os.getenv('SPOTIFY_WATCHDOG_GRACE', '180'))  # seconds inactivity
+SPOTIFY_EXPECTED_DURATION_FACTOR = float(os.getenv('SPOTIFY_EXPECTED_DURATION_FACTOR', '1.6'))
+SPOTIFY_EMA_ALPHA = 0.3
+
+def record_spotify_anomaly(kind: str, endpoint: str, detail: str = ''):
+    """Tier 2 structural anomaly tracker (missing keys, empty collections). Rotates key on clustering."""
+    global SPOTIFY_DATA_ANOMALIES
+    try:
+        now = _time.time()
+        SPOTIFY_DATA_ANOMALIES.append((now, kind, endpoint, detail))
+        recent = [r for r in SPOTIFY_DATA_ANOMALIES if now - r[0] <= SPOTIFY_ANOMALY_WINDOW_SEC]
+        if len(recent) >= SPOTIFY_ANOMALY_THRESHOLD:
+            logging.warning(f"⚠️ Spotify anomaly cluster ({len(recent)}) in {SPOTIFY_ANOMALY_WINDOW_SEC}s – rotating credentials (kind={kind}).")
+            if _attempt_rotation('spotify_data_anomaly_cluster'):
+                logging.info("🔄 Rotated Spotify key due to anomaly cluster")
+            SPOTIFY_DATA_ANOMALIES.clear()
+    except Exception as e:
+        logging.debug(f"record_spotify_anomaly failed: {e}")
+
+def begin_spotify_release_batch(expected_total: int):
+    """Initialize Tier 3 batch monitoring for a Spotify sweep."""
+    st = SPOTIFY_BATCH_STATE
+    st['start_time'] = _time.time()
+    st['expected_total'] = expected_total
+    st['processed'] = 0
+    st['latencies_ms'] = []
+    st['last_progress_time'] = st['start_time']
+    st['rotated_this_run'] = False
+    st['fail'] = 0
+    st['success'] = 0
+    st['consecutive_fail'] = 0
+    # Cancel old watchdog
+    task = st.get('watchdog_task')
+    if task and not task.done():
+        task.cancel()
+    # Launch watchdog if event loop active
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            st['watchdog_task'] = loop.create_task(_spotify_batch_watchdog())
+    except Exception:
+        pass
+
+def note_spotify_release_fetch(success: bool, context: str = '', latency_ms: float = None):
+    """Record per-artist Spotify fetch outcome for Tier 3 heuristics."""
+    st = SPOTIFY_BATCH_STATE
+    if st['start_time'] is None:
+        return
+    if success:
+        st['success'] += 1
+        st['consecutive_fail'] = 0
+    else:
+        st['fail'] += 1
+        st['consecutive_fail'] += 1
+    if latency_ms is not None:
+        st['latencies_ms'].append(latency_ms)
+    if any(tag in context for tag in [':release_checked', ':no_release', ':exception']):
+        st['processed'] += 1
+        st['last_progress_time'] = _time.time()
+    # Rotation heuristics (consecutive fail / fail rate)
+    if not st['rotated_this_run']:
+        if st['consecutive_fail'] >= SPOTIFY_CONSEC_FAIL_THRESHOLD:
+            logging.warning("⚠️ Spotify consecutive failure threshold reached – rotating key")
+            if _attempt_rotation('spotify_consecutive_failures'):
+                st['rotated_this_run'] = True
+        elif (st['processed'] >= SPOTIFY_MIN_SAMPLES_FOR_RATE and st['fail'] / max(1, st['processed']) >= SPOTIFY_FAIL_RATE_THRESHOLD):
+            logging.warning("⚠️ Spotify batch high failure rate – rotating key")
+            if _attempt_rotation('spotify_failure_rate'):
+                st['rotated_this_run'] = True
+
+def finalize_spotify_release_batch():
+    st = SPOTIFY_BATCH_STATE
+    if not st['start_time']:
+        return
+    try:
+        duration = _time.time() - st['start_time']
+        exp = st['expected_total'] or 0
+        proc = st['processed']
+        latencies = st['latencies_ms']
+        median_lat = _stats.median(latencies) if latencies else None
+        base = st['median_baseline_ms']
+        if median_lat is not None:
+            st['median_baseline_ms'] = median_lat if base is None else (SPOTIFY_EMA_ALPHA * median_lat + (1-SPOTIFY_EMA_ALPHA) * base)
+        baseline = st['median_baseline_ms']
+        if exp and proc < exp * 0.5:
+            logging.warning(f"📉 Spotify batch processed only {proc}/{exp} ({proc/exp:.0%}) – potential abort; rotating")
+            _attempt_rotation('spotify_processed_mismatch')
+        if baseline and median_lat and median_lat > baseline * 2 and proc < exp:
+            logging.warning(f"🐢 Spotify latency spike median {median_lat:.1f}ms > 2x baseline {baseline:.1f}ms – rotating")
+            _attempt_rotation('spotify_latency_spike')
+        logging.info(f"🧾 Spotify batch finalize: duration={duration:.1f}s processed={proc}/{exp} median_latency={median_lat:.1f if median_lat else 'n/a'}ms baseline={baseline:.1f if baseline else 'n/a'}ms fail={st['fail']} success={st['success']}")
+    except Exception as e:
+        logging.debug(f"finalize_spotify_release_batch error: {e}")
+    finally:
+        task = st.get('watchdog_task')
+        if task and not task.done():
+            task.cancel()
+        st['start_time'] = None
+
+def spotify_batch_in_progress():
+    return SPOTIFY_BATCH_STATE['start_time'] is not None
+
+async def _spotify_batch_watchdog():
+    st = SPOTIFY_BATCH_STATE
+    try:
+        while spotify_batch_in_progress():
+            await asyncio.sleep(30)
+            if not spotify_batch_in_progress():
+                break
+            now = _time.time()
+            if st['last_progress_time'] and (now - st['last_progress_time']) > SPOTIFY_WATCHDOG_GRACE:
+                logging.warning("🕒 Spotify batch inactivity watchdog triggered – rotating key")
+                if _attempt_rotation('spotify_watchdog_inactivity'):
+                    st['last_progress_time'] = now
+            # Overrun detection
+            if st['expected_total'] and st['latencies_ms']:
+                avg_lat = sum(st['latencies_ms'])/len(st['latencies_ms'])/1000.0
+                elapsed = now - st['start_time']
+                projected_max = avg_lat * st['expected_total'] * SPOTIFY_EXPECTED_DURATION_FACTOR
+                if elapsed > projected_max and st['processed'] < st['expected_total']:
+                    logging.warning("⏱️ Spotify batch duration overrun with incomplete progress – rotating key")
+                    _attempt_rotation('spotify_watchdog_overrun')
+                    break
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logging.debug(f"Spotify watchdog error: {e}")
+
 rotation_lock = threading.Lock()
 
 class SpotifyKeyManager:

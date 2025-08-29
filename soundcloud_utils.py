@@ -16,6 +16,7 @@ from dateutil.parser import parse as isoparse
 from functools import lru_cache
 import threading
 from collections import deque
+import statistics
 
 # At the top after imports
 load_dotenv()
@@ -913,7 +914,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             if original.get('kind') == 'playlist':
                 playlist_url = original.get('permalink_url')
                 if playlist_url:
-                    if playlist_url not in playlist_cache:
+                    if (playlist_url not in playlist_cache):
                         playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
                         if playlist_response:
@@ -1477,3 +1478,162 @@ def stop_soundcloud_background_tasks():
             key_manager.stop_background_tasks()
     except Exception as e:
         logging.error(f"Failed stopping SoundCloud background tasks: {e}")
+
+# --- Tier 2 & 3 Batch / Heuristic Monitoring State ---
+BATCH_STATE = {
+    'start_time': None,
+    'expected_total': None,
+    'processed': 0,
+    'latencies_ms': [],
+    'baseline_latency_ms': None,  # exponential moving average
+    'watchdog_task': None,
+    'last_progress_time': None,
+}
+
+BATCH_WATCHDOG_GRACE = 180  # seconds after which inactivity considered stall
+BATCH_EXPECTED_FALLOUT_FACTOR = 1.6  # expected_total * avg_latency * factor -> max duration
+EMA_ALPHA = 0.3
+
+async def _soundcloud_batch_watchdog():
+    """Detect stalled / abruptly halted SoundCloud release sweeps (Tier 3 heuristic)."""
+    global BATCH_STATE, CLIENT_ID
+    try:
+        while True:
+            await asyncio.sleep(30)
+            if not BATCH_STATE['start_time']:
+                continue
+            now = time.time()
+            # Inactivity detection
+            if BATCH_STATE['last_progress_time'] and (now - BATCH_STATE['last_progress_time']) > BATCH_WATCHDOG_GRACE:
+                logging.warning("🕒 SoundCloud batch watchdog: inactivity > grace threshold; rotating key (possible silent limit)")
+                if key_manager:
+                    key_manager.mark_rate_limited()
+                    new_key = key_manager.rotate_key(reason="watchdog_inactivity")
+                    if new_key:
+                        CLIENT_ID = new_key
+                # Reset to avoid repeated rotations
+                BATCH_STATE['last_progress_time'] = now
+            # Duration overrun detection
+            if BATCH_STATE['expected_total'] and BATCH_STATE['latencies_ms']:
+                avg_lat = sum(BATCH_STATE['latencies_ms']) / len(BATCH_STATE['latencies_ms']) / 1000.0
+                elapsed = now - BATCH_STATE['start_time']
+                projected_max = avg_lat * BATCH_STATE['expected_total'] * BATCH_EXPECTED_FALLOUT_FACTOR
+                if elapsed > projected_max and BATCH_STATE['processed'] < BATCH_STATE['expected_total']:
+                    logging.warning(f"⏱️ SoundCloud batch exceeded projected duration ({elapsed:.1f}s > {projected_max:.1f}s) with incomplete progress {BATCH_STATE['processed']}/{BATCH_STATE['expected_total']}; rotating key.")
+                    if key_manager:
+                        key_manager.mark_rate_limited()
+                        new_key = key_manager.rotate_key(reason="watchdog_overrun")
+                        if new_key:
+                            CLIENT_ID = new_key
+                    # Break after action to avoid repeat until next batch
+                    break
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logging.debug(f"Watchdog task error: {e}")
+
+# Update begin function to accept expected_total
+# ...existing code...
+
+def begin_soundcloud_release_batch(expected_total: int = None):
+    """Reset per-run monitor & establish batch state (Tier 3 heuristics)."""
+    try:
+        mon = get_release_monitor()
+        mon.reset()
+    except Exception:
+        pass
+    # Initialize batch state
+    BATCH_STATE['start_time'] = time.time()
+    BATCH_STATE['expected_total'] = expected_total
+    BATCH_STATE['processed'] = 0
+    BATCH_STATE['latencies_ms'] = []
+    BATCH_STATE['last_progress_time'] = BATCH_STATE['start_time']
+    # Cancel previous watchdog
+    task = BATCH_STATE.get('watchdog_task')
+    if (task and not task.done()):
+        task.cancel()
+    # Launch new watchdog if we have an event loop (bot started)
+    try:
+        if key_manager and key_manager.bot:
+            loop = asyncio.get_event_loop()
+            BATCH_STATE['watchdog_task'] = loop.create_task(_soundcloud_batch_watchdog())
+    except Exception:
+        pass
+
+# Enhance note function with latency & processed counting
+# ...existing code...
+
+def note_soundcloud_release_fetch(success: bool, context: str = "", latency_ms: float = None):
+    """Record outcome of a single artist release fetch. Adds latency & Tier 3 anomaly heuristics."""
+    global CLIENT_ID, key_manager
+    try:
+        mon = get_release_monitor()
+        mon.note(success, context)
+        # Latency tracking
+        if latency_ms is not None:
+            BATCH_STATE['latencies_ms'].append(latency_ms)
+        # Count processed when context indicates end of primary release attempt
+        if any(tag in context for tag in [':release_checked', ':no_release_info', ':missing_release_date', ':exception']):
+            BATCH_STATE['processed'] += 1
+            BATCH_STATE['last_progress_time'] = time.time()
+        # Rotation based on existing monitor
+        if mon.should_rotate() and key_manager:
+            logging.warning("⚠️ SoundCloud release fetch failures threshold reached – rotating key (silent limit suspected)")
+            key_manager.mark_rate_limited()
+            new_key = key_manager.rotate_key(reason="batch_consecutive_failures")
+            if new_key:
+                CLIENT_ID = new_key
+                TELEMETRY['rotations'] += 1
+                mon.mark_rotated()
+                logging.info("🔄 SoundCloud key rotated due to batch failure heuristic")
+            else:
+                logging.error("🛑 Unable to rotate SoundCloud key (all exhausted) – activating circuit breaker")
+                trip_circuit_breaker(reason="batch_fail_rotation_exhausted")
+    except Exception as e:
+        logging.debug(f"note_soundcloud_release_fetch error: {e}")
+
+
+def finalize_soundcloud_release_batch():
+    """Finalize batch; evaluate Tier 3 behavioral heuristics (processed mismatch, latency spike)."""
+    global CLIENT_ID
+    try:
+        if not BATCH_STATE['start_time']:
+            return
+        duration = time.time() - BATCH_STATE['start_time']
+        exp = BATCH_STATE['expected_total'] or 0
+        proc = BATCH_STATE['processed']
+        lat_list = BATCH_STATE['latencies_ms']
+        median_lat = statistics.median(lat_list) if lat_list else None
+        # Update EMA baseline
+        if median_lat is not None:
+            base = BATCH_STATE['baseline_latency_ms']
+            if base is None:
+                BATCH_STATE['baseline_latency_ms'] = median_lat
+            else:
+                BATCH_STATE['baseline_latency_ms'] = (EMA_ALPHA * median_lat) + (1-EMA_ALPHA) * base
+        baseline = BATCH_STATE['baseline_latency_ms']
+        # Processed mismatch (less than 50%)
+        if exp and proc < exp * 0.5:
+            logging.warning(f"📉 SoundCloud batch processed only {proc}/{exp} artists ({proc/exp:.0%}) – potential silent abort")
+            if key_manager:
+                key_manager.mark_rate_limited()
+                new_key = key_manager.rotate_key(reason="processed_mismatch")
+                if new_key:
+                    CLIENT_ID = new_key
+        # Latency spike heuristic
+        if baseline and median_lat and median_lat > baseline * 2 and proc < exp:  # spike w/ incomplete batch
+            logging.warning(f"🐢 SoundCloud batch latency spike: median {median_lat:.1f}ms > 2x baseline {baseline:.1f}ms with incomplete batch; rotating key")
+            if key_manager:
+                key_manager.mark_rate_limited()
+                new_key = key_manager.rotate_key(reason="latency_spike")
+                if new_key:
+                    CLIENT_ID = new_key
+        logging.info(f"🧾 SoundCloud batch finalize: duration={duration:.1f}s processed={proc}/{exp} median_latency={median_lat:.1f if median_lat else 'n/a'}ms baseline_latency={baseline:.1f if baseline else 'n/a'}ms")
+    except Exception as e:
+        logging.debug(f"finalize_soundcloud_release_batch error: {e}")
+    finally:
+        # Cancel watchdog
+        task = BATCH_STATE.get('watchdog_task')
+        if task and not task.done():
+            task.cancel()
+        BATCH_STATE['start_time'] = None
