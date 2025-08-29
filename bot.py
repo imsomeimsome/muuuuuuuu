@@ -468,6 +468,15 @@ async def check_for_new_releases(bot, is_catchup=False):
 
     # --- Spotify Phase ---
     logging.info("▶️ Starting Spotify phase")
+    # Added explicit debug of active Spotify credentials
+    try:
+        if getattr(spotify_utils, 'spotify_key_manager', None) and spotify_utils.spotify_key_manager.keys:
+            _cid, _sec = spotify_utils.spotify_key_manager.get_current_key()
+            logging.warning("Starting Spotify Phase using....\nclient_id: %s\nclient_secret: %s" % (_cid, _sec))  # INTENTIONAL FULL OUTPUT FOR DEBUG
+        else:
+            logging.warning("Starting Spotify Phase using....\nclient_id: <unavailable>\nclient_secret: <unavailable> (manager not initialized)")
+    except Exception as _cred_e:
+        logging.error(f"Failed retrieving current Spotify credentials for debug: {_cred_e}")
     try:
         spotify_results = await asyncio.wait_for(
             check_spotify_updates(bot, artists, shutdown_time, is_catchup),
