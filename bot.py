@@ -7,7 +7,6 @@ import discord
 import functools
 import logging
 import json
-import time  # added
 from dateutil.parser import isoparse
 from dateutil.parser import parse as parse_datetime
 from discord.ext import tasks
@@ -64,8 +63,7 @@ from soundcloud_utils import (
     get_soundcloud_key_status,  # <-- added
     expand_soundcloud_short_url,  # <-- NEW
     begin_soundcloud_release_batch,        # <-- added for silent limit detection
-    note_soundcloud_release_fetch,         # <-- added for silent limit detection
-    finalize_soundcloud_release_batch      # <-- NEW ensure batch finalized
+    note_soundcloud_release_fetch          # <-- added for silent limit detection
 )
 import soundcloud_utils  # added for dynamic key manager access
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
@@ -469,7 +467,16 @@ async def check_for_new_releases(bot, is_catchup=False):
         return
 
     # --- Spotify Phase ---
-    logging.info("▶️ Starting Spotify phase")  # removed credential dump for safety
+    logging.info("▶️ Starting Spotify phase")
+    # Added explicit debug of active Spotify credentials
+    try: 
+        if getattr(spotify_utils, 'spotify_key_manager', None) and spotify_utils.spotify_key_manager.keys:
+            _cid, _sec = spotify_utils.spotify_key_manager.get_current_key()
+            logging.warning("Starting Spotify Phase using....\nclient_id: %s\nclient_secret: %s" % (_cid, _sec))  # INTENTIONAL FULL OUTPUT FOR DEBUG
+        else:
+            logging.warning("Starting Spotify Phase using....\nclient_id: <unavailable>\nclient_secret: <unavailable> (manager not initialized)")
+    except Exception as _cred_e:
+        logging.error(f"Failed retrieving current Spotify credentials for debug: {_cred_e}")
     try:
         spotify_results = await asyncio.wait_for(
             check_spotify_updates(bot, artists, shutdown_time, is_catchup),
@@ -566,16 +573,6 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
     batch_check_time = datetime.now(timezone.utc).isoformat()
     logging.info(f"\n🟢 CHECKING SPOTIFY{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
-
-    def _fmt(dt_str: str):
-        if not dt_str:
-            return 'None'
-        try:
-            dt = parse_date(dt_str)
-            return dt.astimezone(timezone.utc).strftime('%Y-%m-%d %I:%M:%S %p')
-        except Exception:
-            return dt_str
-
     for artist in artists:
         if artist.get('platform') != 'spotify':
             continue
@@ -584,13 +581,8 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         owner_id = artist.get('owner_id')
         guild_id = artist.get('guild_id')
         last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
-        last_release_date_stored = artist.get('last_release_date')
         try:
             logging.info(f"🟢 Checking {artist_name}")
-            if last_release_date_stored:
-                logging.info(f"     Last '{artist_name}' release: {_fmt(last_release_date_stored)}")
-            if last_release_check:
-                logging.info(f"     Last '{artist_name}' release check: {_fmt(last_release_check)}")
             latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
             if not latest_album_id:
                 logging.info("     ⏳ No releases returned")
@@ -602,19 +594,16 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             api_release_date = release_info.get('release_date')
-            if api_release_date:
-                logging.info(f"     API returned: {_fmt(api_release_date)}")
             if not api_release_date:
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             api_dt = parse_date(api_release_date)
             last_check_dt = parse_date(last_release_check) if last_release_check else None
             if last_check_dt is None:
-                logging.info("     🆕 Baseline established (no previous check)")
+                logging.info("     🆕 Baseline established")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             if api_dt > last_check_dt:
-                logging.info(f"     ✅ New! (api_release_date {_fmt(api_release_date)} > last_check {_fmt(last_release_check)})")
                 cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
                 if get_cache(cache_key):
                     logging.info("     ⏭️ Duplicate suppressed")
@@ -638,11 +627,10 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                         set_cache(cache_key, 'posted', ttl=86400)
                         releases += 1
-                        logging.info("     📣 Posted to Discord")
                     else:
                         logging.warning("     ⚠️ No Spotify channel configured")
             else:
-                logging.info(f"     ⏭️ Not new (api_release_date {_fmt(api_release_date)} <= last_check {_fmt(last_release_check)})")
+                logging.info("     ⏭️ Not newer")
             update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
         except Exception as e:
             logging.error(f"     ❌ Error for {artist_name}: {e}")
@@ -652,46 +640,35 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup: bool = False):
     global CLIENT_ID
-    # Filter SoundCloud artists once to know expected total
-    sc_artists = [a for a in artists if a.get('platform') == 'soundcloud']
-    begin_soundcloud_release_batch(expected_total=len(sc_artists))
+    begin_soundcloud_release_batch()
     errors = []
     counts = {'releases':0,'playlists':0,'reposts':0,'likes':0}
     if not CLIENT_ID:
         logging.error("❌ No valid SoundCloud API key")
         errors.append({'type':'SoundCloud','message':'No API key'})
-        finalize_soundcloud_release_batch()
         return counts, errors
     batch_check_time = datetime.now(timezone.utc).isoformat()
     logging.info(f"\n🟠 CHECKING SOUNDCLOUD{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
-    try:
-        for artist in sc_artists:
-            artist_name = artist.get('artist_name','unknown')
-            artist_id = artist.get('artist_id')
-            owner_id = artist.get('owner_id')
-            guild_id = artist.get('guild_id')
-            artist_url = artist.get('artist_url')
-            last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
-            try:
-                logging.info(f"🟠 Checking {artist_name}")
-                start_ts = time.time()
-                release_info = await run_blocking(get_soundcloud_release_info, artist_url)
-                latency_ms = (time.time() - start_ts)*1000.0
-                if not release_info:
-                    logging.info("     ⏳ No releases returned")
-                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                    note_soundcloud_release_fetch(True, context=':no_release_info', latency_ms=latency_ms)
-                    continue
+    for artist in artists:
+        if artist.get('platform') != 'soundcloud':
+            continue
+        artist_name = artist.get('artist_name','unknown')
+        artist_id = artist.get('artist_id')
+        owner_id = artist.get('owner_id')
+        guild_id = artist.get('guild_id')
+        artist_url = artist.get('artist_url')
+        last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
+        try:
+            logging.info(f"🟠 Checking {artist_name}")
+            release_info = await run_blocking(get_soundcloud_release_info, artist_url)
+            if release_info:
                 api_release_date = release_info.get('release_date')
                 api_dt = parse_date(api_release_date) if api_release_date else None
                 last_check_dt = parse_date(last_release_check) if last_release_check else None
-                if api_dt and api_dt > (last_check_dt or datetime.min.replace(tzinfo=timezone.utc)):
-                    logging.info(f"     ✅ New release detected: {release_info.get('title','New Release')} (current={api_dt.isoformat()} > last_check={last_check_dt.isoformat() if last_check_dt else 'None'})")
+                if last_check_dt and api_dt and api_dt > last_check_dt:
                     cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
-                    if get_cache(cache_key):
-                        logging.info("     ⏭️ Duplicate suppressed")
-                    else:
+                    if not get_cache(cache_key):
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             embed = create_music_embed(
@@ -711,21 +688,140 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                             set_cache(cache_key, 'posted', ttl=86400)
                             counts['releases'] += 1
-                            logging.info("     📣 Posted to Discord")
                         else:
                             logging.warning("     ⚠️ No SoundCloud channel configured")
+                elif last_check_dt is None:
+                    # Baseline established – still proceed to reposts/likes (removed early continue)
+                    logging.info("     🆕 Baseline established (will still process reposts & likes this cycle)")
+            # === NEW: REPOSTS CHECK ===
+            try:
+                reposts = await run_blocking(get_soundcloud_reposts_info, artist_url)
+                logging.info(f"     🔄 Found {len(reposts)} recent reposts")
+                last_repost_date_str = artist.get('last_repost_date')
+                if last_repost_date_str:
+                    last_repost_date = parse_datetime(last_repost_date_str)
+                    logging.info(f"     🕒 Last repost check: {last_repost_date}")
                 else:
-                    logging.info(f"     ⏭️ Skipping (not newer) {release_info.get('title','Unknown')} (current={api_dt.isoformat() if api_dt else 'None'} <= last_check={last_check_dt.isoformat() if last_check_dt else 'None'})")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                note_soundcloud_release_fetch(True, context=':release_checked', latency_ms=latency_ms)
-            except Exception as e:
-                logging.error(f"     ❌ Error for {artist_name}: {e}")
-                errors.append({'type':'SoundCloud','message':str(e)})
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                note_soundcloud_release_fetch(False, context=':exception')
-                continue
-    finally:
-        finalize_soundcloud_release_batch()
+                    last_repost_date = datetime.now(timezone.utc) - timedelta(hours=1)
+                    logging.info(f"     🕒 No last_repost_date, using 1 hour ago: {last_repost_date}")
+                catch_up_posted = 0
+                for repost in reposts:
+                    if is_catchup and catch_up_posted >= MAX_CATCH_UP_ITEMS:
+                        logging.info(f"          ⏭️ Catch-up repost limit reached ({MAX_CATCH_UP_ITEMS})")
+                        break
+                    repost_id = repost.get('url') or repost.get('track_id') or repost.get('title')
+                    if not repost_id:
+                        logging.warning("          ⚠️ No ID for repost, skipping")
+                        continue
+                    repost_id = str(repost_id)
+                    repost_activity_date = parse_datetime(repost.get('release_date')) if repost.get('release_date') else None
+                    if is_already_posted_repost(artist_id, guild_id, repost_id):
+                        logging.info("          ⏭️ Repost already posted")
+                        continue
+                    should_post = False
+                    if not is_catchup:
+                        if repost_activity_date and last_repost_date and repost_activity_date > last_repost_date:
+                            should_post = True
+                    else:
+                        if should_catch_up_content(repost.get('release_date'), last_repost_date_str, shutdown_time):
+                            should_post = True
+                    if not should_post:
+                        continue
+                    channel = await get_release_channel(guild_id, 'soundcloud')
+                    if not channel:
+                        logging.warning("          ⚠️ No SoundCloud channel configured for repost")
+                        continue
+                    embed = create_repost_embed(
+                        platform=artist.get('platform'),
+                        reposted_by=artist_name,
+                        original_artist=repost.get('artist_name'),
+                        title=repost.get('title'),
+                        url=repost.get('url'),
+                        release_date=repost.get('track_release_date'),
+                        cover_url=repost.get('cover_url'),
+                        features=repost.get('features'),
+                        track_count=repost.get('track_count'),
+                        duration=repost.get('duration'),
+                        genres=repost.get('genres'),
+                    )
+                    await channel.send(embed=embed)
+                    mark_posted_repost(artist_id, guild_id, repost_id)
+                    update_last_repost_date(artist_id, guild_id, repost.get('release_date'))
+                    counts['reposts'] += 1
+                    if is_catchup:
+                        catch_up_posted += 1
+                        await asyncio.sleep(2)
+            except Exception as e_repost:
+                logging.error(f"     ❌ Error processing reposts for {artist_name}: {e_repost}")
+                errors.append({'type':'SoundCloud Reposts','message':str(e_repost)})
+            # === NEW: LIKES CHECK ===
+            try:
+                likes = await run_blocking(get_soundcloud_likes_info, artist_url)
+                logging.info(f"     ❤️ Found {len(likes)} recent likes")
+                last_like_date_str = artist.get('last_like_date')
+                if last_like_date_str:
+                    last_like_date = parse_datetime(last_like_date_str)
+                    logging.info(f"     🕒 Last like check: {last_like_date}")
+                else:
+                    last_like_date = datetime.now(timezone.utc) - timedelta(hours=1)
+                    logging.info(f"     🕒 No last_like_date, using 1 hour ago: {last_like_date}")
+                catch_up_posted = 0
+                for like in likes:
+                    if is_catchup and catch_up_posted >= MAX_CATCH_UP_ITEMS:
+                        logging.info(f"          ⏭️ Catch-up like limit reached ({MAX_CATCH_UP_ITEMS})")
+                        break
+                    track_id = like.get('track_id')
+                    if not track_id:
+                        logging.warning("          ⚠️ Skipping like with no track_id")
+                        continue
+                    like_id = str(track_id)
+                    like_activity_date = parse_datetime(like.get('liked_date')) if like.get('liked_date') else None
+                    if is_already_posted_like(artist_id, guild_id, like_id):
+                        continue
+                    should_post = False
+                    if not is_catchup:
+                        if like_activity_date and like_activity_date > last_like_date:
+                            should_post = True
+                    else:
+                        if should_catch_up_content(like.get('release_date'), last_like_date_str, shutdown_time):
+                            should_post = True
+                    if not should_post:
+                        continue
+                    channel = await get_release_channel(guild_id, 'soundcloud')
+                    if not channel:
+                        logging.warning("          ⚠️ No SoundCloud channel configured for like")
+                        continue
+                    embed = create_like_embed(
+                        platform=artist.get('platform'),
+                        liked_by=artist_name,
+                        title=like.get('title'),
+                        artist_name=like.get('artist_name'),
+                        url=like.get('url'),
+                        release_date=like.get('release_date'),
+                        liked_date=like.get('liked_date'),
+                        cover_url=like.get('cover_url'),
+                        features=like.get('features'),
+                        track_count=like.get('track_count'),
+                        duration=like.get('duration'),
+                        genres=like.get('genres'),
+                        content_type=like.get('content_type') or 'like'
+                    )
+                    await channel.send(embed=embed)
+                    mark_posted_like(artist_id, guild_id, like_id)
+                    update_last_like_date(artist_id, guild_id, like.get('release_date'))
+                    counts['likes'] += 1
+                    if is_catchup:
+                        catch_up_posted += 1
+                        await asyncio.sleep(2)
+            except Exception as e_likes:
+                logging.error(f"     ❌ Error processing likes for {artist_name}: {e_likes}")
+                errors.append({'type':'SoundCloud Likes','message':str(e_likes)})
+            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+        except Exception as e:
+            logging.error(f"     ❌ Error for {artist_name}: {e}")
+            errors.append({'type':'SoundCloud','message':str(e)})
+            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+            continue
     logging.info(f"Summary SC -> Releases:{counts['releases']} Playlists:{counts['playlists']} Reposts:{counts['reposts']} Likes:{counts['likes']}")
     return counts, errors
 
@@ -769,92 +865,6 @@ async def release_check_scheduler(bot):
         except Exception as e:
             logging.error(f"❌ Error during release check: {e}")
 
-# --- NEW SEPARATE PLATFORM SCHEDULERS ---
-async def spotify_release_scheduler(bot):
-    """Run Spotify checks every hour at hh:00:01 UTC."""
-    PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
-    while not bot.is_closed():
-        try:
-            now = datetime.now(timezone.utc)
-            # Target next hh:00:01
-            target = now.replace(minute=0, second=1, microsecond=0)
-            if now >= target:  # if already past this hour's trigger, schedule next hour
-                target = target + timedelta(hours=1)
-            delay = (target - now).total_seconds()
-            logging.info(f"🕰️ Next Spotify hourly check at {target.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-            await asyncio.sleep(delay)
-            # Execute Spotify phase
-            logging.info("\n🟢 Hourly Spotify check starting…")
-            artists = get_all_artists()
-            try:
-                spotify_results = await asyncio.wait_for(
-                    check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=False),
-                    timeout=PLATFORM_PHASE_TIMEOUT
-                )
-                releases, errors = spotify_results
-                logging.info(f"🟢 Spotify hourly check complete: releases={releases} errors={len(errors)}")
-            except asyncio.TimeoutError:
-                logging.error(f"⏱️ Spotify hourly phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating key")
-                try:
-                    manual_rotate_spotify_key(reason="hourly_phase_timeout")
-                except Exception:
-                    pass
-            except Exception as e:
-                logging.error(f"❌ Spotify hourly phase failed: {e}")
-                try:
-                    manual_rotate_spotify_key(reason="hourly_phase_exception")
-                except Exception:
-                    pass
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logging.error(f"Spotify scheduler loop error: {e}")
-            await asyncio.sleep(10)
-
-async def soundcloud_release_scheduler(bot):
-    """Run SoundCloud checks every 5 minutes at mm%(5)=0 + :01 UTC."""
-    PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
-    while not bot.is_closed():
-        try:
-            now = datetime.now(timezone.utc)
-            # Round up to next 5-min boundary at second 1
-            minute_increment = (5 - (now.minute % 5)) % 5
-            if minute_increment == 0 and now.second < 1:
-                minute_increment = 0
-            elif minute_increment == 0:
-                minute_increment = 5
-            target = (now + timedelta(minutes=minute_increment)).replace(second=1, microsecond=0)
-            delay = (target - now).total_seconds()
-            logging.info(f"🕰️ Next SoundCloud 5-min check at {target.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-            await asyncio.sleep(delay)
-            # Execute SoundCloud phase
-            logging.info("\n🟠 5-min SoundCloud check starting…")
-            artists = get_all_artists()
-            try:
-                sc_results = await asyncio.wait_for(
-                    check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False),
-                    timeout=PLATFORM_PHASE_TIMEOUT
-                )
-                counts, errors = sc_results
-                logging.info(f"🟠 SoundCloud 5-min check complete: releases={counts['releases']} playlists={counts['playlists']} reposts={counts['reposts']} likes={counts['likes']} errors={len(errors)}")
-            except asyncio.TimeoutError:
-                logging.error(f"⏱️ SoundCloud 5-min phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating key")
-                try:
-                    manual_rotate_soundcloud_key(reason="5min_phase_timeout")
-                except Exception:
-                    pass
-            except Exception as e:
-                logging.error(f"❌ SoundCloud 5-min phase failed: {e}")
-                try:
-                    manual_rotate_soundcloud_key(reason="5min_phase_exception")
-                except Exception:
-                    pass
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logging.error(f"SoundCloud scheduler loop error: {e}")
-            await asyncio.sleep(10)
-
 # --- EVENT HANDLERS ---
 
 @bot.event
@@ -883,15 +893,11 @@ async def on_ready():
         # Mark catch-up as done
         bot.catchup_done = True
 
-    # ✅ Start regular separate schedulers
-    if not hasattr(bot, 'spotify_scheduler_started'):
-        bot.spotify_scheduler_started = True
-        asyncio.create_task(spotify_release_scheduler(bot))
-        logging.info("🚀 Started Spotify hourly scheduler")
-    if not hasattr(bot, 'soundcloud_scheduler_started'):
-        bot.soundcloud_scheduler_started = True
-        asyncio.create_task(soundcloud_release_scheduler(bot))
-        logging.info("🚀 Started SoundCloud 5-min scheduler")
+    # ✅ Start regular scheduler
+    if not hasattr(bot, 'release_checker_started'):
+        bot.release_checker_started = True
+        asyncio.create_task(release_check_scheduler(bot))
+        logging.info("🚀 Started release checker")
     # Start health logger
     await bot.start_health_logger()
 
