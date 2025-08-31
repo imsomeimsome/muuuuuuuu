@@ -23,7 +23,6 @@ SPOTIFY_KEYS = [
     (os.getenv("SPOTIFY_CLIENT_ID"), os.getenv("SPOTIFY_CLIENT_SECRET")),
     (os.getenv("SPOTIFY_CLIENT_ID_2"), os.getenv("SPOTIFY_CLIENT_SECRET_2")),
     (os.getenv("SPOTIFY_CLIENT_ID_3"), os.getenv("SPOTIFY_CLIENT_SECRET_3")),
-    (os.getenv("SPOTIFY_CLIENT_ID_4"), os.getenv("SPOTIFY_CLIENT_SECRET_4")),
 ]
 
 # Filter out incomplete pairs
