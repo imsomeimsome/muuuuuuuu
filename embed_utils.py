@@ -84,37 +84,69 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
 
     return embed
 
-def create_repost_embed(platform, reposted_by, title, artist_name, url, release_date, reposted_date, cover_url, features, track_count, duration, genres):
-    """Create an embed for a reposted track."""
+def create_repost_embed(
+    platform,
+    reposted_by,
+    title,
+    artist_name=None,
+    url=None,
+    release_date=None,
+    reposted_date=None,
+    cover_url=None,
+    features=None,
+    track_count=None,
+    duration=None,
+    genres=None,
+    *,
+    original_artist=None  # keyword-only to avoid positional ambiguity
+):
+    """Create an embed for a reposted track.
+    Supports both artist_name and original_artist (alias)."""
+    display_artist = artist_name or original_artist or "Unknown"
+
     embed = discord.Embed(
         title=f"📢 {reposted_by} reposted a track!",
-        description=f"[{title}]({url})",
+        description=f"[{title}]({url})" if title and url else (title or url or "Repost"),
         color=0xfa5a02
     )
-    
-    embed.set_author(name=f"By {artist_name}")
-    
+
+    embed.set_author(name=f"By {display_artist}")
+
     if cover_url:
         embed.set_thumbnail(url=cover_url)
-        
-    if release_date:
-        embed.add_field(name="Release Date", value=release_date[:10], inline=True)
-        
-    if reposted_date:
-        embed.add_field(name="Reposted Date", value=reposted_date[:10], inline=True)
-        
+
+    # Add dates (support various formats)
+    try:
+        if release_date:
+            rd = str(release_date)
+            if len(rd) >= 10:
+                embed.add_field(name="Release Date", value=rd[:10], inline=True)
+    except Exception as e:
+        logging.debug(f"repost embed release_date parse issue: {e}")
+
+    try:
+        if reposted_date:
+            rpd = str(reposted_date)
+            if len(rpd) >= 10:
+                embed.add_field(name="Reposted Date", value=rpd[:10], inline=True)
+    except Exception as e:
+        logging.debug(f"repost embed reposted_date parse issue: {e}")
+
     embed.add_field(name="Tracks", value=track_count or 1, inline=True)
-    
+
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
-        
+
     if features:
         embed.add_field(name="Features", value=features, inline=False)
-        
-    if genres and len(genres) > 0:
-        embed.add_field(name="Genres", value=", ".join(genres), inline=False)
 
-    return embed 
+    if genres:
+        if isinstance(genres, (list, tuple)) and genres:
+            embed.add_field(name="Genres", value=", ".join(genres), inline=False)
+        elif isinstance(genres, str) and genres.strip():
+            embed.add_field(name="Genres", value=genres, inline=False)
+
+    return embed
 
 def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None, upload_date=None):
     """Create an embed for a liked track."""

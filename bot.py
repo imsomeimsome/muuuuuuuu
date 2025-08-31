@@ -561,6 +561,14 @@ async def check_general_tasks(bot, is_catchup: bool = False):
     return artists, shutdown_time, errors
 
 async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bool = False):
+    def _fmt_dt(dt_obj: datetime | None):
+        if not dt_obj:
+            return "Unknown"
+        # Ensure timezone aware
+        if dt_obj.tzinfo is None:
+            dt_obj = dt_obj.replace(tzinfo=timezone.utc)
+        return dt_obj.astimezone(timezone.utc).strftime('%Y-%m-%d %I:%M:%S %p')
+    # ...existing code before loop...
     try:
         validate_spotify_client()
         if not ping_spotify():
@@ -581,32 +589,43 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         owner_id = artist.get('owner_id')
         guild_id = artist.get('guild_id')
         last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
+        last_release_date_raw = artist.get('last_release_date')
         try:
+            # Parse stored timestamps
+            last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
+            last_check_dt = parse_date(last_release_check) if last_release_check else None
             logging.info(f"🟢 Checking {artist_name}")
+            logging.info("")  # blank line for readability
+            logging.info(f"     Last '{artist_name}' release: {_fmt_dt(last_release_dt)}")
+            logging.info(f"     Last '{artist_name}' release check: {_fmt_dt(last_check_dt)}")
             latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
             if not latest_album_id:
-                logging.info("     ⏳ No releases returned")
+                logging.info("     API returned: None")
+                logging.info("     ⏭️ No releases returned")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             release_info = await run_blocking(get_spotify_release_info, latest_album_id)
             if not release_info:
-                logging.info("     ⚠️ No release info")
+                logging.info("     API returned: None (no release info)")
+                logging.info("     ⏭️ No release info")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             api_release_date = release_info.get('release_date')
             if not api_release_date:
+                logging.info("     API returned: <missing release_date>")
+                logging.info("     ⏭️ Skipping (no release_date)")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             api_dt = parse_date(api_release_date)
-            last_check_dt = parse_date(last_release_check) if last_release_check else None
+            logging.info(f"     API returned: {_fmt_dt(api_dt)}")
             if last_check_dt is None:
-                logging.info("     🆕 Baseline established")
+                logging.info(f"     ⏭️ Baseline established (no previous check)")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
             if api_dt > last_check_dt:
                 cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
                 if get_cache(cache_key):
-                    logging.info("     ⏭️ Duplicate suppressed")
+                    logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
                 else:
                     channel = await get_release_channel(guild_id, 'spotify')
                     if channel:
@@ -627,10 +646,12 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                         set_cache(cache_key, 'posted', ttl=86400)
                         releases += 1
+                        logging.info(f"     ⏭️ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
                     else:
                         logging.warning("     ⚠️ No Spotify channel configured")
+                        logging.info(f"     ⏭️ NEW (not posted - no channel)")
             else:
-                logging.info("     ⏭️ Not newer")
+                logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
             update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
         except Exception as e:
             logging.error(f"     ❌ Error for {artist_name}: {e}")
@@ -826,44 +847,100 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
     return counts, errors
 
 # --- SCHEDULER ---
+# (Deprecated unified scheduler kept for reference; platform-specific schedulers below)
 async def release_check_scheduler(bot):
+    # ...existing code...
+    pass  # deprecated
+
+async def spotify_release_scheduler(bot):
     await bot.wait_until_ready()
-    logging.info("🚀 Release checker started")
-    logging.info("⏳ Release checker initializing...")
-
-    # Run catch-up check immediately after bot starts
-    if not hasattr(bot, 'catchup_done') or not bot.catchup_done:
-        try:
-            logging.info("🔄 Running catch-up check...")
-            is_catchup = await handle_bot_startup_catchup()
-            if is_catchup:
-                await check_for_new_releases(bot, is_catchup=True)
-                logging.info("✅ Catch-up check complete")
-            else:
-                logging.info("⏭️ No catch-up needed")
-        except Exception as e:
-            logging.error(f"❌ Error during catch-up check: {e}")
-
-        # Mark catch-up as done
-        bot.catchup_done = True
-
-    # Schedule normal checks at fixed intervals
+    logging.info("🚀 Spotify scheduler started (hourly at HH:00:01 UTC)")
+    PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
     while not bot.is_closed():
         now = datetime.now(timezone.utc)
-        # Calculate the next run time (round to the nearest 5-minute mark)
-        next_run = now.replace(second=1, microsecond=0) + timedelta(minutes=5 - (now.minute % 5))
-
+        hour_anchor = now.replace(minute=0, second=1, microsecond=0)
+        if now < hour_anchor:
+            next_run = hour_anchor
+        else:
+            next_run = hour_anchor + timedelta(hours=1)
         delay = (next_run - now).total_seconds()
-        logging.info(f"🕰️ Next release check at {next_run.strftime('%H:%M:%S')} UTC (in {delay:.1f}s)")
-        await asyncio.sleep(delay)
-
+        logging.info(f"🕰️ Next Spotify check at {next_run.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {delay/60:.2f} min)")
         try:
-            check_time = datetime.now(timezone.utc).strftime('%H:%M:%S')
-            logging.info(f"🔍 Starting release check at {check_time} UTC...")
-            await check_for_new_releases(bot, is_catchup=False)
-            logging.info("✅ Release check complete")
-        except Exception as e:
-            logging.error(f"❌ Error during release check: {e}")
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            logging.info("🛑 Spotify scheduler cancelled")
+            return
+        try:
+            logging.info("▶️ Spotify scheduled run starting")
+            artists, _, _ = await check_general_tasks(bot, is_catchup=False)
+            if not artists:
+                logging.info("⚠️ No artists to check (Spotify)")
+                continue
+            try:
+                spotify_results = await asyncio.wait_for(
+                    check_spotify_updates(bot, artists, shutdown_time=None, is_catchup=False),
+                    timeout=PLATFORM_PHASE_TIMEOUT
+                )
+                releases, errors = spotify_results
+                logging.info(f"✅ Spotify run complete: releases={releases} errors={len(errors)}")
+            except asyncio.TimeoutError:
+                logging.error(f"⏱️ Spotify phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating key")
+                try:
+                    manual_rotate_spotify_key(reason="scheduler_timeout")
+                except Exception:
+                    pass
+            except Exception as e:
+                logging.error(f"❌ Spotify scheduler run failed: {e}")
+        except Exception as e_outer:
+            logging.error(f"❌ Unexpected Spotify scheduler error: {e_outer}")
+
+async def soundcloud_release_scheduler(bot):
+    await bot.wait_until_ready()
+    logging.info("🚀 SoundCloud scheduler started (every 5 min at mm multiple of 5, second 1 UTC)")
+    PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
+    interval_minutes = 5
+    while not bot.is_closed():
+        now = datetime.now(timezone.utc)
+        midnight = now.replace(hour=0, minute=0, second=1, microsecond=0)
+        if now < midnight:
+            next_run = midnight
+        else:
+            minutes_since_midnight = int((now - midnight).total_seconds() // 60)
+            next_multiple = ((minutes_since_midnight // interval_minutes) + 1) * interval_minutes
+            next_run = midnight + timedelta(minutes=next_multiple)
+        delay = (next_run - now).total_seconds()
+        if delay < 0.5:
+            next_run += timedelta(minutes=interval_minutes)
+            delay = (next_run - now).total_seconds()
+        logging.info(f"🕰️ Next SoundCloud check at {next_run.strftime('%Y-%m-%d %H:%M:%S')} UTC (in {delay/60:.2f} min)")
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            logging.info("🛑 SoundCloud scheduler cancelled")
+            return
+        try:
+            logging.info("▶️ SoundCloud scheduled run starting")
+            artists, _, _ = await check_general_tasks(bot, is_catchup=False)
+            if not artists:
+                logging.info("⚠️ No artists to check (SoundCloud)")
+                continue
+            try:
+                sc_results = await asyncio.wait_for(
+                    check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup=False),
+                    timeout=PLATFORM_PHASE_TIMEOUT
+                )
+                counts, errors = sc_results
+                logging.info(f"✅ SoundCloud run complete: releases={counts['releases']} playlists={counts['playlists']} reposts={counts['reposts']} likes={counts['likes']} errors={len(errors)}")
+            except asyncio.TimeoutError:
+                logging.error(f"⏱️ SoundCloud phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating key")
+                try:
+                    manual_rotate_soundcloud_key(reason="scheduler_timeout")
+                except Exception:
+                    pass
+            except Exception as e:
+                logging.error(f"❌ SoundCloud scheduler run failed: {e}")
+        except Exception as e_outer:
+            logging.error(f"❌ Unexpected SoundCloud scheduler error: {e_outer}")
 
 # --- EVENT HANDLERS ---
 
@@ -871,33 +948,25 @@ async def release_check_scheduler(bot):
 async def on_ready():
     await bot.wait_until_ready()
     logging.info(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
-
-    # ✅ Sync slash commands
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"🌐 Synced {len(synced)} slash commands.")
-    except Exception as e:
-        logging.error(f"❌ Failed to sync slash commands: {e}")
-
+    # ...existing code...
     # ✅ Handle startup catch-up
     if not hasattr(bot, 'catchup_done') or not bot.catchup_done:
         should_catchup = await handle_bot_startup_catchup()
-
-        # ✅ Run catch-up check if needed
         if should_catchup:
             try:
                 await check_for_new_releases(bot, is_catchup=True)
             except Exception as e:
                 logging.error(f"❌ Catch-up failed: {e}")
-
-        # Mark catch-up as done
         bot.catchup_done = True
-
-    # ✅ Start regular scheduler
-    if not hasattr(bot, 'release_checker_started'):
-        bot.release_checker_started = True
-        asyncio.create_task(release_check_scheduler(bot))
-        logging.info("🚀 Started release checker")
+    # Start platform-specific schedulers
+    if not hasattr(bot, 'spotify_scheduler_started'):
+        bot.spotify_scheduler_started = True
+        asyncio.create_task(spotify_release_scheduler(bot))
+        logging.info("🚀 Started Spotify hourly scheduler")
+    if not hasattr(bot, 'soundcloud_scheduler_started'):
+        bot.soundcloud_scheduler_started = True
+        asyncio.create_task(soundcloud_release_scheduler(bot))
+        logging.info("🚀 Started SoundCloud 5-minute scheduler")
     # Start health logger
     await bot.start_health_logger()
 

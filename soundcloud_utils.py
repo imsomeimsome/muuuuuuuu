@@ -41,18 +41,79 @@ CIRCUIT_BREAKER_MIN = timedelta(minutes=10)
 
 # Passive anomaly detection (data truncation / unexpected empties)
 DATA_ANOMALIES = deque(maxlen=50)  # (ts, kind, endpoint, detail)
-DATA_ANOMALY_THRESHOLD = 4  # number of anomalies inside window to trigger rotation
-DATA_ANOMALY_WINDOW_SEC = 120
+# Existing defaults kept but now overridable via env
+DATA_ANOMALY_THRESHOLD = int(os.getenv('SC_DATA_ANOMALY_THRESHOLD', '4'))  # number of anomalies inside window to trigger rotation
+DATA_ANOMALY_WINDOW_SEC = int(os.getenv('SC_DATA_ANOMALY_WINDOW_SEC', '120'))
+ANOMALY_ROTATE_ENABLED = os.getenv('SC_DATA_ANOMALY_ROTATE', 'true').lower() == 'true'
+ANOMALY_ROTATION_COOLDOWN_SEC = int(os.getenv('SC_ANOMALY_ROTATION_COOLDOWN', '300'))  # suppress further anomaly rotations for N sec
+EMPTY_BASELINE_GRACE_SEC = int(os.getenv('SC_EMPTY_COLLECTION_BASELINE_GRACE', '43200'))  # 12h; ignore empty_collection anomalies until we have a baseline
+_LAST_ANOMALY_ROTATION = None  # timestamp of last anomaly-triggered rotation
+_LAST_NONEMPTY_BASELINE = {  # endpoint -> timestamp of last non-empty collection seen
+    'playlists': None,
+    'likes': None,
+    'reposts': None,
+}
+# New configuration for empty collection anomaly handling
+EMPTY_COLLECTION_ROTATE = os.getenv('SC_EMPTY_COLLECTION_ROTATE', 'false').lower() == 'true'  # default off to reduce noise
+EMPTY_COLLECTION_STALE_SEC = int(os.getenv('SC_EMPTY_COLLECTION_STALE_SEC', '3600'))  # ignore empties if last non-empty older than this
+
+def _update_nonempty_baseline(kind: str):
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        if kind in _LAST_NONEMPTY_BASELINE:
+            _LAST_NONEMPTY_BASELINE[kind] = _dt.now(_tz.utc)
+    except Exception:
+        pass
 
 def record_data_anomaly(kind: str, endpoint: str, detail: str = ''):
     """Record an unexpected empty/truncated data response. If too many inside
-    a short window, proactively rotate the key (treat as implicit rate limit)."""
+    a short window, proactively rotate the key (treat as implicit rate limit).
+
+    Improvements:
+    - Configurable thresholds via env vars
+    - Baseline-aware: do not treat initial empty collections as anomalies until a non-empty baseline was observed (avoids false positives for new / inactive users)
+    - Rotation cooldown to avoid rapid churn
+    - Ability to disable anomaly-triggered rotation entirely (SC_DATA_ANOMALY_ROTATE=false)
+    """
+    global _LAST_ANOMALY_ROTATION
     try:
         from datetime import datetime as _dt, timezone as _tz
         now = _dt.now(_tz.utc)
+
+        # Baseline grace & suppression logic for empty collections
+        if kind == 'empty_collection':
+            ep_label = 'playlists' if 'playlist' in detail or 'playlists' in endpoint else (
+                'likes' if 'like' in detail or 'likes' in endpoint else (
+                'reposts' if 'repost' in detail or 'reposts' in endpoint else None))
+            if ep_label:
+                baseline_ts = _LAST_NONEMPTY_BASELINE.get(ep_label)
+                # Suppress until we have a baseline
+                if baseline_ts is None:
+                    logging.debug(f"🟦 Suppressing empty_collection anomaly (no baseline) endpoint={ep_label}")
+                    return
+                # Suppress if baseline is stale (user simply inactive for long time)
+                if (now - baseline_ts).total_seconds() > EMPTY_COLLECTION_STALE_SEC:
+                    logging.debug(f"🟦 Suppressing empty_collection anomaly (baseline stale) endpoint={ep_label}")
+                    return
+                # Optionally suppress rotation impact entirely (still record debug)
+                if not EMPTY_COLLECTION_ROTATE:
+                    logging.debug(f"🟦 Ignoring empty_collection anomaly for rotation endpoint={ep_label}")
+                    return
+        # Deduplicate rapid identical anomalies (same kind+endpoint within 30s)
+        if DATA_ANOMALIES:
+            last_ts, last_kind, last_ep, last_detail = DATA_ANOMALIES[-1]
+            if last_kind == kind and last_ep == endpoint and (now - last_ts).total_seconds() < 30:
+                return
+
         DATA_ANOMALIES.append((now, kind, endpoint, detail))
         recent = [r for r in DATA_ANOMALIES if (now - r[0]).total_seconds() <= DATA_ANOMALY_WINDOW_SEC]
-        if len(recent) >= DATA_ANOMALY_THRESHOLD:
+
+        if ANOMALY_ROTATE_ENABLED and len(recent) >= DATA_ANOMALY_THRESHOLD:
+            # Check rotation cooldown
+            if _LAST_ANOMALY_ROTATION and (now - _LAST_ANOMALY_ROTATION).total_seconds() < ANOMALY_ROTATION_COOLDOWN_SEC:
+                logging.warning("⚠️ Anomaly threshold reached but rotation suppressed (cooldown active)")
+                DATA_ANOMALIES.clear()
+                return
             logging.warning(f"⚠️ Detected {len(recent)} SoundCloud data anomalies in {DATA_ANOMALY_WINDOW_SEC}s; rotating key proactively (kind={kind}).")
             if key_manager:
                 try:
@@ -62,6 +123,7 @@ def record_data_anomaly(kind: str, endpoint: str, detail: str = ''):
                         global CLIENT_ID
                         CLIENT_ID = new_key
                         TELEMETRY['rotations'] += 1
+                        _LAST_ANOMALY_ROTATION = now
                         logging.info("🔄 Proactive SoundCloud key rotation due to anomaly clustering")
                 except Exception as e:
                     logging.error(f"Failed proactive rotation on anomaly: {e}")
@@ -472,6 +534,13 @@ def safe_request(url, headers=None, retries=3, timeout=10):
     timeouts = [5, 10, 15]  # adaptive timeouts
     for attempt in range(retries):
         TELEMETRY['requests'] += 1
+        # Update batch progress timestamp to avoid false watchdog inactivity rotations
+        try:
+            st = globals().get('BATCH_STATE')
+            if isinstance(st, dict):
+                st['last_progress_time'] = time.time()
+        except Exception:
+            pass
         try:
             eff_timeout = timeouts[min(attempt, len(timeouts)-1)]
             url = _ensure_client_id_param(original_url, CLIENT_ID)
@@ -839,9 +908,12 @@ def get_soundcloud_playlist_info(artist_url):
             return None
         playlists = data.get("collection", [])
         if not playlists:
+            # No non-empty baseline yet? The record_data_anomaly logic will decide suppression.
             record_data_anomaly('empty_collection', url, 'playlists')
             logging.debug(f"Empty playlist collection for {artist_url}")
             return None
+        # We have a baseline now
+        _update_nonempty_baseline('playlists')
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
         tracks = []
         for index, track in enumerate(latest_playlist.get("tracks", [])):
@@ -902,6 +974,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
         if not data.get('collection'):
             record_data_anomaly('empty_collection', url, 'likes')
             return []
+        _update_nonempty_baseline('likes')
         likes = []
         playlist_cache = {}
         for item in data.get("collection", []):
@@ -1029,6 +1102,7 @@ def get_soundcloud_reposts_info(artist_url):
         if not coll:
             record_data_anomaly('empty_collection', last_endpoint or 'unknown', 'reposts')
             return []
+        _update_nonempty_baseline('reposts')
         for item in coll:
             try:
                 original = item.get("track") or item.get("playlist")
@@ -1221,11 +1295,6 @@ def get_soundcloud_artist_id(url):
     except Exception as e:
         print(f"Error getting artist ID: {e}")
         return None
-
-# In soundcloud_utils.py
-@lru_cache(maxsize=512)
-def _cached_resolve(url: str):
-    return resolve_url(url)
 
 def get_soundcloud_release_info(url):
     """
