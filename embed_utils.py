@@ -101,50 +101,97 @@ def create_repost_embed(
     original_artist=None  # keyword-only to avoid positional ambiguity
 ):
     """Create an embed for a reposted track.
-    Supports both artist_name and original_artist (alias)."""
+    Updated to match the SoundCloud like embed styling EXACTLY (structure & field order) without modifying the like embed itself."""
     display_artist = artist_name or original_artist or "Unknown"
 
+    # Normalize track_count
+    if not track_count or track_count == 0:
+        track_count = 1
+
+    # Duration formatting (mirror like embed hour support)
+    if duration and ":" in duration:
+        try:
+            parts = duration.split(":")
+            if len(parts) == 2:
+                minutes, seconds = map(int, parts)
+                if minutes >= 60:
+                    hours = minutes // 60
+                    minutes = minutes % 60
+                    duration = f"{hours}:{minutes:02d}:{seconds:02d}"
+                else:
+                    duration = f"{minutes}:{seconds:02d}"
+        except ValueError:
+            pass
+
+    # Parse timestamps -> Discord relative format
+    release_timestamp = None
+    if release_date:
+        rd = str(release_date).replace('Z', '+0000')
+        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+            try:
+                release_timestamp = int(datetime.strptime(rd, fmt).timestamp())
+                break
+            except Exception:
+                continue
+        if release_timestamp is None:
+            # Fallback date-only
+            try:
+                release_timestamp = int(datetime.strptime(str(release_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                release_timestamp = None
+
+    repost_timestamp = None
+    if reposted_date:
+        rpd = str(reposted_date).replace('Z', '+0000')
+        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+            try:
+                repost_timestamp = int(datetime.strptime(rpd, fmt).timestamp())
+                break
+            except Exception:
+                continue
+        if repost_timestamp is None:
+            try:
+                repost_timestamp = int(datetime.strptime(str(reposted_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                repost_timestamp = None
+
+    # Build embed (mirroring like embed style)
     embed = discord.Embed(
-        title=f"📢 {reposted_by} reposted a track!",
+        title=f"📢 __{reposted_by}__ reposted a track!",
         description=f"[{title}]({url})" if title and url else (title or url or "Repost"),
         color=0xfa5a02
     )
 
-    embed.set_author(name=f"By {display_artist}")
-
-    if cover_url:
-        embed.set_thumbnail(url=cover_url)
-
-    # Add dates (support various formats)
-    try:
-        if release_date:
-            rd = str(release_date)
-            if len(rd) >= 10:
-                embed.add_field(name="Release Date", value=rd[:10], inline=True)
-    except Exception as e:
-        logging.debug(f"repost embed release_date parse issue: {e}")
-
-    try:
-        if reposted_date:
-            rpd = str(reposted_date)
-            if len(rpd) >= 10:
-                embed.add_field(name="Reposted Date", value=rpd[:10], inline=True)
-    except Exception as e:
-        logging.debug(f"repost embed reposted_date parse issue: {e}")
-
-    embed.add_field(name="Tracks", value=track_count or 1, inline=True)
-
+    # First row: By, Tracks, Duration
+    embed.add_field(name="By", value=display_artist, inline=True)
+    if track_count:
+        embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    if features:
-        embed.add_field(name="Features", value=features, inline=False)
+    # Second row: Release Date, Reposted (relative times)
+    if release_timestamp:
+        embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+    if repost_timestamp:
+        # Use 'Liked' label to mirror like embed exactly per request
+        embed.add_field(name="Liked", value=f"<t:{repost_timestamp}:R>", inline=True)
 
+    # Always add Genres (even if None)
+    genre_text = "None"
+    genre_name = "Genre"
     if genres:
-        if isinstance(genres, (list, tuple)) and genres:
-            embed.add_field(name="Genres", value=", ".join(genres), inline=False)
+        if isinstance(genres, list) and genres:
+            genre_text = ", ".join(filter(None, genres))
+            if len(genres) > 1:
+                genre_name = "Genres"
         elif isinstance(genres, str) and genres.strip():
-            embed.add_field(name="Genres", value=genres, inline=False)
+            genre_text = genres.strip()
+    embed.add_field(name=genre_name, value=genre_text, inline=True)
+
+    # High-res thumbnail like like embed
+    if cover_url:
+        high_res_cover = get_highest_quality_artwork(cover_url)
+        embed.set_thumbnail(url=high_res_cover or cover_url)
 
     return embed
 
@@ -267,51 +314,23 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
     # Third row: Upload Date (if different from release date)
-    if upload_timestamp: # and upload_timestamp != release_timestamp:
+    if upload_timestamp: # and upload_timestamp != release_timestamp
         embed.add_field(name="Uploaded", value=f"<t:{upload_timestamp}:R>", inline=True)
-    
-    # Always add genres field, even if empty
-    genre_text = "None"
-    genre_name = "Genre"
-    
-    if genres:
-        if isinstance(genres, list) and genres:
-            genre_text = ", ".join(filter(None, genres))  # Filter out None/empty values
-            genre_name = "Genres" if len(genres) > 1 else "Genre"
-        elif isinstance(genres, str):
-            genre_text = genres
-    
-    embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    # High-res thumbnail
+    # Genres (mirror approach used in repost embed but only if provided)
+    if genres:
+        if isinstance(genres, list):
+            genre_text = ', '.join(filter(None, genres))
+        else:
+            genre_text = str(genres)
+        if genre_text and genre_text.lower() != 'none':
+            # Pluralize if multiple genres
+            field_name = 'Genres' if ',' in genre_text else 'Genre'
+            embed.add_field(name=field_name, value=genre_text, inline=True)
+
+    # Thumbnail
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)
 
     return embed
-
-#
-#    # Build embed description
-#    description = f"[{title}]({url})\n\n"
-#    
-#    # ✅ Genres (Always show, or show "None" if empty)
-#    if genres and len(genres) > 0:
-#        description += f"**Genres**\n{', '.join(genres[:3])}\n"
-#    else:
-#        description += f"**Genres**\nNone\n"
-#
-#    description += (
-#        f"**Duration**\n{duration}\n"
-#        f"**Features**\n{features}\n"
-#        f"**Released on** {release_date[:10]}"
-#    )
-#
-#    # Create embed with correct description
-#    embed = discord.Embed(
-#        title=f"{emoji} New {artist_name} Release!",
-#        description=description,
-#        color=embed_color
-#    )
-#
-#    embed.set_thumbnail(url=cover_url)
-#    return embed
