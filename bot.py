@@ -803,7 +803,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     if not repost_id:
                         continue
                     repost_id = str(repost_id)
-                    repost_activity_date = parse_date(repost.get('release_date')) if repost.get('release_date') else None
+                    repost_activity_date = parse_date(repost.get('reposted_date')) if repost.get('reposted_date') else None
                     logging.info(f"          🔄 Repost: {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
                     if not repost_activity_date:
                         continue
@@ -819,7 +819,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 original_artist=repost.get('artist_name'),
                                 title=repost.get('title'),
                                 url=repost.get('url'),
-                                release_date=repost.get('track_release_date'),
+                                release_date=repost.get('release_date'),
+                                reposted_date=repost.get('reposted_date'),
                                 cover_url=repost.get('cover_url'),
                                 features=repost.get('features'),
                                 track_count=repost.get('track_count'),
@@ -828,7 +829,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             )
                             await channel.send(embed=embed)
                             mark_posted_repost(artist_id, guild_id, repost_id)
-                            update_last_repost_date(artist_id, guild_id, repost.get('release_date'))
+                            update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
                             counts['reposts'] += 1
                             logging.info(f"              ✅ NEW (repost_date {_fmt_dt(repost_activity_date)} > last_check {_fmt_dt(last_check_dt)})")
                         else:
