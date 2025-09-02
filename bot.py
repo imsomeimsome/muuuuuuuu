@@ -680,6 +680,19 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
     logging.info(f"\n🟠 CHECKING SOUNDCLOUD{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
 
+    def _is_new_activity(activity_dt, last_check_dt):
+        """
+        Mirror Spotify logic:
+        - If last_check_dt is None -> baseline (do not post; return False)
+        - Post only if activity_dt > last_check_dt
+        - Equal or older -> not new
+        """
+        if last_check_dt is None:
+            return False
+        if not activity_dt:
+            return False
+        return activity_dt > last_check_dt
+
     def _log_header(artist_name, section, last_item_dt, last_check_dt):
         # Standardized header similar to Spotify format
         logging.info(f"     Last '{artist_name}' {section}: {_fmt_dt(last_item_dt)}")
@@ -715,7 +728,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 logging.info(f"     API returned: {_fmt_dt(api_dt)}")
                 if baseline:
                     logging.info("     ⏭️ Baseline established (no previous check)")
-                elif api_dt and last_check_dt and api_dt > last_check_dt:
+                elif api_dt and _is_new_activity(api_dt, last_check_dt):
                     cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
                     if get_cache(cache_key):
                         logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
@@ -726,7 +739,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 platform='soundcloud',
                                 artist_name=artist_name,
                                 title=release_info.get('title','New Release'),
-                                url=release_info.get('url', artist_url),
+                                url=release_info.get('url'),
                                 release_date=api_release_date,
                                 cover_url=release_info.get('cover_url'),
                                 features=release_info.get('features'),
@@ -743,7 +756,10 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                         else:
                             logging.warning("     ⚠️ No SoundCloud channel configured for release")
                 else:
-                    logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                    if api_dt and last_check_dt and api_dt == last_check_dt:
+                        logging.info(f"     ⏭️ Not new (same timestamp)")
+                    else:
+                        logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
             else:
                 _log_header(artist_name, 'release', last_release_dt, last_check_dt)
                 logging.info("     API returned: None")
@@ -765,7 +781,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 logging.info(f"     API returned: {_fmt_dt(playlist_dt)}")
                 if baseline:
                     logging.info("     ⏭️ Baseline established (no previous check)")
-                elif playlist_dt and last_check_dt and playlist_dt > last_check_dt:
+                elif playlist_dt and _is_new_activity(playlist_dt, last_check_dt):
                     if is_already_posted_playlist(artist_id, guild_id, playlist_id):
                         logging.info("     ⏭️ Playlist already posted")
                     else:
@@ -775,11 +791,14 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             mark_posted_playlist(artist_id, guild_id, playlist_id)
                             update_last_playlist_date(artist_id, guild_id, playlist_date)
                             counts['playlists'] += 1
-                            logging.info(f"     ✅ NEW PLAYLIST (playlist_date {_fmt_dt(playlist_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                            logging.info(f"     ✅ NEW (playlist_date {_fmt_dt(playlist_dt)} > last_check {_fmt_dt(last_check_dt)})")
                         else:
                             logging.warning("     ⚠️ No SoundCloud channel configured for playlist")
                 else:
-                    logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                    if playlist_dt and last_check_dt and playlist_dt == last_check_dt:
+                        logging.info(f"     ⏭️ Not new (same timestamp)")
+                    else:
+                        logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
             else:
                 _log_header(artist_name, 'playlist', playlist_dt_stored, last_check_dt)
                 logging.info("     API returned: None")
@@ -810,7 +829,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     if is_already_posted_repost(artist_id, guild_id, repost_id):
                         logging.info("              ⏭️ Already posted")
                         continue
-                    if repost_activity_date > last_check_dt:
+                    if _is_new_activity(repost_activity_date, last_check_dt):
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             embed = create_repost_embed(
@@ -835,7 +854,10 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                         else:
                             logging.warning("              ⚠️ No channel for repost")
                     else:
-                        logging.info(f"              ⏭️ Not new (repost_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
+                        if last_check_dt and repost_activity_date and repost_activity_date == last_check_dt:
+                            logging.info(f"              ⏭️ Not new (same timestamp)")
+                        else:
+                            logging.info(f"              ⏭️ Not new (repost_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
 
             # === LIKES (multiple) ===
             try:
@@ -862,7 +884,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     if is_already_posted_like(artist_id, guild_id, like_id):
                         logging.info("              ⏭️ Already posted")
                         continue
-                    if like_activity_date > last_check_dt:
+                    if _is_new_activity(like_activity_date, last_check_dt):
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             embed = create_like_embed(
@@ -871,8 +893,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 title=like.get('title'),
                                 artist_name=like.get('artist_name'),
                                 url=like.get('url'),
-                                release_date=like.get('release_date'),
-                                liked_date=like.get('liked_date'),
+                                release_date=like.get('release_date'),  # original upload date (for display)
+                                liked_date=like.get('liked_date'),      # activity date (comparison basis)
                                 cover_url=like.get('cover_url'),
                                 features=like.get('features'),
                                 track_count=like.get('track_count'),
@@ -882,13 +904,17 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             )
                             await channel.send(embed=embed)
                             mark_posted_like(artist_id, guild_id, like_id)
-                            update_last_like_date(artist_id, guild_id, like.get('release_date'))
+                            # FIX: store liked_date (activity) not release_date
+                            update_last_like_date(artist_id, guild_id, like.get('liked_date'))
                             counts['likes'] += 1
                             logging.info(f"              ✅ NEW (like_date {_fmt_dt(like_activity_date)} > last_check {_fmt_dt(last_check_dt)})")
                         else:
                             logging.warning("              ⚠️ No channel for like")
                     else:
-                        logging.info(f"              ⏭️ Not new (like_date {_fmt_dt(like_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
+                        if last_check_dt and like_activity_date and like_activity_date == last_check_dt:
+                            logging.info(f"              ⏭️ Not new (same timestamp)")
+                        else:
+                            logging.info(f"              ⏭️ Not new (like_date {_fmt_dt(like_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
 
             # Unified last check update AFTER all comparisons
             update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
