@@ -826,10 +826,31 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     logging.info(f"          🔄 Repost: {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
                     if not repost_activity_date:
                         continue
+                    # NEW baseline & grace logic for reposts
+                    baseline_repost_dt = last_repost_dt_stored  # independent of last_check_dt
+                    GRACE_SECONDS = 90  # allow slight skew before last_check_dt
+                    is_baseline = baseline_repost_dt is None
+                    # A repost is new if:
+                    #  - we have no stored repost date yet (post the freshest ones once)
+                    #  - or its reposted_date > stored repost date
+                    # Additionally, if it failed the above but (repost_date <= last_check_dt) only by a small grace window, still allow once
+                    new_by_repost_clock = (baseline_repost_dt is None) or (repost_activity_date and baseline_repost_dt and repost_activity_date > baseline_repost_dt)
+                    within_grace = False
+                    if (not new_by_repost_clock) and repost_activity_date and last_check_dt and repost_activity_date <= last_check_dt:
+                        if (last_check_dt - repost_activity_date).total_seconds() <= GRACE_SECONDS:
+                            within_grace = True
+
                     if is_already_posted_repost(artist_id, guild_id, repost_id):
                         logging.info("              ⏭️ Already posted")
+                        # Advance stored repost date if this item is newer than stored to prevent repeated scans
+                        if repost_activity_date and (not baseline_repost_dt or repost_activity_date > baseline_repost_dt):
+                            update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
                         continue
-                    if _is_new_activity(repost_activity_date, last_check_dt):
+
+                    if new_by_repost_clock or within_grace:
+                        reason = "baseline (first reposts)" if is_baseline else (
+                            "reposted_date > last_repost_date" if new_by_repost_clock else
+                            f"grace_window ({int((last_check_dt - repost_activity_date).total_seconds())}s ≤ {GRACE_SECONDS}s)")
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             embed = create_repost_embed(
@@ -850,14 +871,17 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             mark_posted_repost(artist_id, guild_id, repost_id)
                             update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
                             counts['reposts'] += 1
-                            logging.info(f"              ✅ NEW (repost_date {_fmt_dt(repost_activity_date)} > last_check {_fmt_dt(last_check_dt)})")
+                            logging.info(f"              ✅ NEW ({reason})")
                         else:
                             logging.warning("              ⚠️ No channel for repost")
                     else:
-                        if last_check_dt and repost_activity_date and repost_activity_date == last_check_dt:
-                            logging.info(f"              ⏭️ Not new (same timestamp)")
+                        # Detailed skip reasons
+                        if baseline_repost_dt and repost_activity_date and repost_activity_date <= baseline_repost_dt:
+                            logging.info(f"              ⏭️ Not new (reposted_date {_fmt_dt(repost_activity_date)} <= last_repost {_fmt_dt(baseline_repost_dt)})")
+                        elif last_check_dt and repost_activity_date and repost_activity_date <= last_check_dt:
+                            logging.info(f"              ⏭️ Not new (reposted_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
                         else:
-                            logging.info(f"              ⏭️ Not new (repost_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
+                            logging.info("              ⏭️ Not new (no qualifying condition)")
 
             # === LIKES (multiple) ===
             try:
