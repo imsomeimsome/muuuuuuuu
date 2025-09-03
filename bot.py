@@ -355,8 +355,7 @@ def get_content_emoji(content_type):
     return emojis.get(content_type, "🎵")
 
 async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.TextChannel]:
-    logging.info(f"🔎 Looking for release channel: Guild ID = {guild_id}, Platform = {platform}")
-
+    logging.info(f"🔎 Looking for release channel: Guild ID={guild_id} Platform={platform}")
     channel_id = get_channel(str(guild_id), platform)
 
     if not channel_id:
@@ -380,32 +379,53 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
 async def handle_release(bot, artist, release_info, release_type):
     guild_id = artist.get('guild_id')
     platform = artist['platform']
-
-    if not guild_id:
-        logging.warning(f"❌ Missing guild_id for artist {artist['artist_name']} — cannot post {release_type}.")
-        return
-
-    channel = await get_release_channel(guild_id=guild_id, platform=platform)
+    channel = await get_release_channel(guild_id, platform)
     if not channel:
-        logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id} — skipping post for {artist['artist_name']}.")
+        logging.warning("⚠️ No channel to post release")
         return
+
+    # Enrich SoundCloud playlist/album info: compute duration & genres if missing
+    if platform == 'soundcloud':
+        # Only for playlist / album / ep classification
+        r_type = (release_info.get('type') or '').lower()
+        tracks = release_info.get('tracks') or []
+        if r_type in ('playlist','album','ep','deluxe') and tracks:
+            # Duration (sum ms) if not already provided
+            if not release_info.get('duration'):
+                total_ms = sum(t.get('duration') or 0 for t in tracks)
+                if total_ms > 0:
+                    seconds = total_ms // 1000
+                    h = seconds // 3600
+                    m = (seconds % 3600) // 60
+                    s = seconds % 60
+                    if h:
+                        release_info['duration'] = f"{h}:{m:02d}:{s:02d}"
+                    else:
+                        release_info['duration'] = f"{m}:{s:02d}"
+            # Genres aggregate if empty
+            existing_genres = release_info.get('genres') or []
+            if not existing_genres:
+                gset = { (t.get('genre') or '').strip() for t in tracks if t.get('genre') }
+                gclean = sorted(g for g in gset if g)
+                if gclean:
+                    release_info['genres'] = gclean
 
     embed = create_music_embed(
         platform=platform,
         artist_name=release_info.get('artist_name', artist['artist_name']),
         title=release_info.get('title', 'New Release'),
         url=release_info.get('url', artist['artist_url']),
-        release_date=release_info.get('release_date')[:10] if release_info.get('release_date') else "Unknown",
+        release_date=release_info.get('release_date'),
         cover_url=release_info.get('cover_url'),
         features=release_info.get('features'),
         track_count=release_info.get('track_count'),
         duration=release_info.get('duration'),
-        repost=release_info.get('repost', False),
-        genres=release_info.get('genres')
+        repost=False,
+        genres=release_info.get('genres'),
+        content_type=release_info.get('type')
     )
-
     await channel.send(embed=embed)
-    logging.info(f"✅ Posted new {release_type} for {artist['artist_name']}")
+
 # --- Playlist changes here ---
 
 async def check_for_playlist_changes(bot, artist, playlist_info):
@@ -637,7 +657,7 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                 else:
                     channel = await get_release_channel(guild_id, 'spotify')
                     if channel:
-                        embed = create_music_embed(
+                        heading_text, release_type_detected, embed = create_music_embed(
                             platform='spotify',
                             artist_name=artist_name,
                             title=release_info.get('title','New Release'),
@@ -648,9 +668,10 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                             track_count=release_info.get('track_count'),
                             duration=release_info.get('duration'),
                             genres=release_info.get('genres',[]),
-                            repost=False
+                            repost=False,
+                            return_heading=True
                         )
-                        await channel.send(embed=embed)
+                        await channel.send(content=f"# {heading_text}", embed=embed)
                         update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                         set_cache(cache_key, 'posted', ttl=86400)
                         releases += 1
@@ -718,15 +739,68 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
         baseline = last_check_dt is None
         try:
             logging.info(f"🟠 Checking {artist_name}")
-            # === RELEASE (latest) ===
+
+            # Fetch both first so we can decide about suppression
             release_info = await run_blocking(get_soundcloud_release_info, artist_url)
+            playlist_info = None
+            try:
+                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url)
+            except Exception as e_pl:
+                playlist_info = None
+                logging.error(f"     ❌ Playlist fetch error: {e_pl}")
+                errors.append({'type':'SoundCloud Playlist','message':str(e_pl)})
+
             last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
-            if release_info:
-                api_release_date = release_info.get('release_date')
-                api_dt = parse_date(api_release_date) if api_release_date else None
-                _log_header(artist_name, 'release', last_release_dt, last_check_dt)
-                logging.info(f"     API returned: {_fmt_dt(api_dt)}")
+            last_playlist_dt = parse_date(last_playlist_date_raw) if last_playlist_date_raw else None
+
+            # Current cycle last_check_dt already parsed above
+            baseline = last_check_dt is None
+
+            # Determine playlist newness first
+            playlist_new = False
+            playlist_dt = None
+            playlist_date_raw = None
+            if playlist_info:
+                playlist_date_raw = playlist_info.get('release_date')
+                playlist_dt = parse_date(playlist_date_raw) if playlist_date_raw else None
+                _log_header(artist_name, 'playlist', last_playlist_dt, last_check_dt)
+                logging.info(f"     API returned (playlist): {_fmt_dt(playlist_dt)}")
                 if baseline:
+                    logging.info("     ⏭️ Baseline established (no previous check)")
+                elif playlist_dt and _is_new_activity(playlist_dt, last_check_dt):
+                    playlist_new = True
+                else:
+                    if playlist_dt and last_check_dt and playlist_dt == last_check_dt:
+                        logging.info("     ⏭️ Not new (same timestamp)")
+                    else:
+                        logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+            else:
+                _log_header(artist_name, 'playlist', last_playlist_dt, last_check_dt)
+                logging.info("     API returned (playlist): None")
+                logging.info("     ⏭️ No playlists returned")
+
+            # Process release (single track) but allow suppression if parent playlist will post
+            api_release_date = release_info.get('release_date') if release_info else None
+            api_dt = parse_date(api_release_date) if api_release_date else None
+            _log_header(artist_name, 'release', last_release_dt, last_check_dt)
+            logging.info(f"     API returned (release): {_fmt_dt(api_dt)}" if api_dt else ("     API returned: None" if release_info is None else "     API returned: <missing release_date>"))
+
+            suppress_track = False
+            if release_info and playlist_new and playlist_info:
+                # Check membership: compare track id against playlist tracks
+                track_id = str(release_info.get('track_id') or release_info.get('id') or '')
+                playlist_track_ids = {str(t.get('id')) for t in (playlist_info.get('tracks') or []) if t.get('id') is not None}
+                if track_id and track_id in playlist_track_ids:
+                    suppress_track = True
+
+            if suppress_track:
+                logging.info("     ⏭️ Suppressing single track (included in NEW playlist/album being posted this cycle)")
+            else:
+                if not release_info:
+                    logging.info("     ⏭️ No releases returned")
+                elif not api_release_date:
+                    logging.info("     ⏭️ Skipping (no release_date)")
+                elif baseline:
                     logging.info("     ⏭️ Baseline established (no previous check)")
                 elif api_dt and _is_new_activity(api_dt, last_check_dt):
                     cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
@@ -735,7 +809,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     else:
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
-                            embed = create_music_embed(
+                            heading_text, release_type_detected, embed = create_music_embed(
                                 platform='soundcloud',
                                 artist_name=artist_name,
                                 title=release_info.get('title','New Release'),
@@ -746,9 +820,15 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=release_info.get('track_count'),
                                 duration=release_info.get('duration'),
                                 genres=release_info.get('genres'),
-                                repost=False
+                                repost=False,
+                                content_type=release_info.get('type'),
+                                return_heading=True
                             )
-                            await channel.send(embed=embed)
+                            # Only big heading if not playlist
+                            if (release_info.get('type') or release_type_detected).lower() == 'playlist':
+                                await channel.send(embed=embed)
+                            else:
+                                await channel.send(content=f"# {heading_text}", embed=embed)
                             update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                             set_cache(cache_key, 'posted', ttl=86400)
                             counts['releases'] += 1
@@ -757,52 +837,25 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             logging.warning("     ⚠️ No SoundCloud channel configured for release")
                 else:
                     if api_dt and last_check_dt and api_dt == last_check_dt:
-                        logging.info(f"     ⏭️ Not new (same timestamp)")
+                        logging.info("     ⏭️ Not new (same timestamp)")
                     else:
                         logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
-            else:
-                _log_header(artist_name, 'release', last_release_dt, last_check_dt)
-                logging.info("     API returned: None")
-                logging.info("     ⏭️ No releases returned")
 
-            # === PLAYLIST (single latest) ===
-            try:
-                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url)
-            except Exception as e_pl:
-                playlist_info = None
-                logging.error(f"     ❌ Playlist fetch error: {e_pl}")
-                errors.append({'type':'SoundCloud Playlist','message':str(e_pl)})
-            playlist_dt_stored = parse_date(last_playlist_date_raw) if last_playlist_date_raw else None
-            if playlist_info:
-                playlist_date = playlist_info.get('release_date')
-                playlist_dt = parse_date(playlist_date) if playlist_date else None
-                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date}"
-                _log_header(artist_name, 'playlist', playlist_dt_stored, last_check_dt)
-                logging.info(f"     API returned: {_fmt_dt(playlist_dt)}")
-                if baseline:
-                    logging.info("     ⏭️ Baseline established (no previous check)")
-                elif playlist_dt and _is_new_activity(playlist_dt, last_check_dt):
-                    if is_already_posted_playlist(artist_id, guild_id, playlist_id):
-                        logging.info("     ⏭️ Playlist already posted")
-                    else:
-                        channel = await get_release_channel(guild_id, 'soundcloud')
-                        if channel:
-                            await handle_release(bot, artist, playlist_info, 'playlist')
-                            mark_posted_playlist(artist_id, guild_id, playlist_id)
-                            update_last_playlist_date(artist_id, guild_id, playlist_date)
-                            counts['playlists'] += 1
-                            logging.info(f"     ✅ NEW (playlist_date {_fmt_dt(playlist_dt)} > last_check {_fmt_dt(last_check_dt)})")
-                        else:
-                            logging.warning("     ⚠️ No SoundCloud channel configured for playlist")
+            # Post playlist if NEW (after potential suppression decision)
+            if playlist_new:
+                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
+                if is_already_posted_playlist(artist_id, guild_id, playlist_id):
+                    logging.info("     ⏭️ Playlist already posted")
                 else:
-                    if playlist_dt and last_check_dt and playlist_dt == last_check_dt:
-                        logging.info(f"     ⏭️ Not new (same timestamp)")
+                    channel = await get_release_channel(guild_id, 'soundcloud')
+                    if channel:
+                        await handle_release(bot, artist, playlist_info, 'playlist')
+                        mark_posted_playlist(artist_id, guild_id, playlist_id)
+                        update_last_playlist_date(artist_id, guild_id, playlist_date_raw)
+                        counts['playlists'] += 1
+                        logging.info(f"     ✅ NEW (playlist_date {_fmt_dt(playlist_dt)} > last_check {_fmt_dt(last_check_dt)})")
                     else:
-                        logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
-            else:
-                _log_header(artist_name, 'playlist', playlist_dt_stored, last_check_dt)
-                logging.info("     API returned: None")
-                logging.info("     ⏭️ No playlists returned")
+                        logging.warning("     ⚠️ No SoundCloud channel configured for playlist")
 
             # === REPOSTS (multiple) ===
             try:
@@ -814,43 +867,78 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
             last_repost_dt_stored = parse_date(last_repost_date_raw) if last_repost_date_raw else None
             logging.info(f"     🔄 Reposts returned: {len(reposts)}")
             _log_header(artist_name, 'repost', last_repost_dt_stored, last_check_dt)
-            if baseline:
-                logging.info("     ⏭️ Baseline established (reposts skipped this cycle)")
-            else:
-                for repost in reposts:
-                    repost_id = repost.get('url') or repost.get('track_id') or repost.get('title')
+
+            # Sort newest first
+            def _rd(r): return r.get('reposted_date') or ''
+            reposts_sorted = sorted(reposts, key=_rd, reverse=True)
+
+            INITIAL_REPOST_LIMIT = 1  # how many to post on very first cycle (baseline)
+            posted_initial = 0
+
+            if last_check_dt is None:
+                logging.info("     🟡 First repost cycle (baseline) — evaluating newest repost(s)")
+                for repost in reposts_sorted:
+                    if posted_initial >= INITIAL_REPOST_LIMIT:
+                        logging.info("          ⏭️ Baseline limit reached")
+                        break
+                    repost_id = (
+                        str(repost.get('track_id') or '') or
+                        (repost.get('url') or '') or
+                        repost.get('title') or ''
+                    )
                     if not repost_id:
                         continue
-                    repost_id = str(repost_id)
+                    repost_activity_date = parse_date(repost.get('reposted_date')) if repost.get('reposted_date') else None
+                    logging.info(f"          🔄 Repost (baseline): {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
+                    if not repost_activity_date:
+                        continue
+                    if is_already_posted_repost(artist_id, guild_id, repost_id):
+                        logging.info("              ⏭️ Already posted (baseline)")
+                        continue
+                    channel = await get_release_channel(guild_id, 'soundcloud')
+                    if channel:
+                        embed = create_repost_embed(
+                            platform=artist.get('platform'),
+                            reposted_by=artist_name,
+                            original_artist=repost.get('artist_name'),
+                            title=repost.get('title'),
+                            url=repost.get('url'),
+                            release_date=repost.get('release_date'),
+                            reposted_date=repost.get('reposted_date'),
+                            cover_url=repost.get('cover_url'),
+                            features=repost.get('features'),
+                            track_count=repost.get('track_count'),
+                            duration=repost.get('duration'),
+                            genres=repost.get('genres'),
+                        )
+                        await channel.send(embed=embed)
+                        mark_posted_repost(artist_id, guild_id, repost_id)
+                        update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
+                        counts['reposts'] += 1
+                        posted_initial += 1
+                        logging.info("              ✅ NEW (baseline repost posted)")
+                    else:
+                        logging.warning("              ⚠️ No channel for repost (baseline)")
+                if posted_initial == 0:
+                    logging.info("     ⏭️ Baseline established (no repost posted)")
+            else:
+                # Regular cycle (compare reposted_date > last_check_dt)
+                for repost in reposts_sorted:
+                    repost_id = (
+                        str(repost.get('track_id') or '') or
+                        (repost.get('url') or '') or
+                        repost.get('title') or ''
+                    )
+                    if not repost_id:
+                        continue
                     repost_activity_date = parse_date(repost.get('reposted_date')) if repost.get('reposted_date') else None
                     logging.info(f"          🔄 Repost: {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
                     if not repost_activity_date:
                         continue
-                    # NEW baseline & grace logic for reposts
-                    baseline_repost_dt = last_repost_dt_stored  # independent of last_check_dt
-                    GRACE_SECONDS = 90  # allow slight skew before last_check_dt
-                    is_baseline = baseline_repost_dt is None
-                    # A repost is new if:
-                    #  - we have no stored repost date yet (post the freshest ones once)
-                    #  - or its reposted_date > stored repost date
-                    # Additionally, if it failed the above but (repost_date <= last_check_dt) only by a small grace window, still allow once
-                    new_by_repost_clock = (baseline_repost_dt is None) or (repost_activity_date and baseline_repost_dt and repost_activity_date > baseline_repost_dt)
-                    within_grace = False
-                    if (not new_by_repost_clock) and repost_activity_date and last_check_dt and repost_activity_date <= last_check_dt:
-                        if (last_check_dt - repost_activity_date).total_seconds() <= GRACE_SECONDS:
-                            within_grace = True
-
                     if is_already_posted_repost(artist_id, guild_id, repost_id):
                         logging.info("              ⏭️ Already posted")
-                        # Advance stored repost date if this item is newer than stored to prevent repeated scans
-                        if repost_activity_date and (not baseline_repost_dt or repost_activity_date > baseline_repost_dt):
-                            update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
                         continue
-
-                    if new_by_repost_clock or within_grace:
-                        reason = "baseline (first reposts)" if is_baseline else (
-                            "reposted_date > last_repost_date" if new_by_repost_clock else
-                            f"grace_window ({int((last_check_dt - repost_activity_date).total_seconds())}s ≤ {GRACE_SECONDS}s)")
+                    if _is_new_activity(repost_activity_date, last_check_dt):
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             embed = create_repost_embed(
@@ -871,17 +959,14 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             mark_posted_repost(artist_id, guild_id, repost_id)
                             update_last_repost_date(artist_id, guild_id, repost.get('reposted_date'))
                             counts['reposts'] += 1
-                            logging.info(f"              ✅ NEW ({reason})")
+                            logging.info(f"              ✅ NEW (repost_date {_fmt_dt(repost_activity_date)} > last_check {_fmt_dt(last_check_dt)})")
                         else:
                             logging.warning("              ⚠️ No channel for repost")
                     else:
-                        # Detailed skip reasons
-                        if baseline_repost_dt and repost_activity_date and repost_activity_date <= baseline_repost_dt:
-                            logging.info(f"              ⏭️ Not new (reposted_date {_fmt_dt(repost_activity_date)} <= last_repost {_fmt_dt(baseline_repost_dt)})")
-                        elif last_check_dt and repost_activity_date and repost_activity_date <= last_check_dt:
-                            logging.info(f"              ⏭️ Not new (reposted_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
+                        if repost_activity_date and repost_activity_date == last_check_dt:
+                            logging.info("              ⏭️ Not new (same timestamp)")
                         else:
-                            logging.info("              ⏭️ Not new (no qualifying condition)")
+                            logging.info(f"              ⏭️ Not new (repost_date {_fmt_dt(repost_activity_date)} <= last_check {_fmt_dt(last_check_dt)})")
 
             # === LIKES (multiple) ===
             try:
@@ -1328,78 +1413,53 @@ async def untrack_command(interaction: discord.Interaction, artist_identifier: s
 @bot.tree.command(name="list", description="List your tracked artists.")
 @require_registration
 async def list_command(interaction: discord.Interaction):
-        user_id = interaction.user.id
-        artists = get_artists_by_owner(user_id)
-        if not artists:
-            await interaction.response.send_message("No artists tracked.")
-            return
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for artist in artists:
-            grouped[artist['artist_name'].lower()].append(artist)
-        merged = []
-        for name_lower, group in grouped.items():
-            # Prefer Spotify case if available
-            display_name = next((a['artist_name'] for a in group if a['platform']=='spotify'), group[0]['artist_name'])
-            platforms = sorted({a['platform'] for a in group})
-            merged.append((display_name, ", ".join(p.capitalize() for p in platforms)))
-        merged.sort(key=lambda x: x[0].lower())
-        lines = [f"• {name} ({plats})" for name, plats in merged]
-        msg = "**🎧 Tracked Artists:**\n" + "\n".join(lines[:50])
-        if len(lines) > 50:
-            msg += f"\n…and {len(lines)-50} more"
-        await interaction.response.send_message(msg, ephemeral=True)
+    user_id = interaction.user.id
+    artists = get_artists_by_owner(user_id)
+    if not artists:
+        await interaction.response.send_message("You aren't tracking any artists yet.", ephemeral=True)
+        return
 
-# ...existing code...
-@bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
-@app_commands.checks.has_permissions(administrator=True)
-async def rotatekeys_command(interaction: discord.Interaction, platform: Literal["spotify", "soundcloud"]):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        if platform == "spotify":
-            result = manual_rotate_spotify_key(reason="manual_command")
-            if not result.get("rotated"):
-                msg = f"⚠️ Spotify rotation not performed: {result.get('error','unknown')}"
-            else:
-                msg = f"🔄 Spotify key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
-            status_lines = []
-            for row in result.get('keys', []):
-                status_lines.append(f"K{row['index']+1}: {row['state']} ({row.get('client_id_preview','')})")
-            if status_lines:
-                msg += "\n" + "\n".join(status_lines)
-            await interaction.followup.send(msg, ephemeral=True)
-        else:  # soundcloud
-            result = manual_rotate_soundcloud_key(reason="manual_command")
-            if not result.get("rotated"):
-                msg = f"⚠️ SoundCloud rotation not performed: {result.get('error','unknown')}"
-            else:
-                msg = f"🔄 SoundCloud key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
-            status_lines = []
-            for row in result.get('keys', []):
-                preview = row.get('key_preview','')
-                status_lines.append(f"K{row['index']+1}: {row['state']} ({preview})")
-            if status_lines:
-                msg += "\n" + "\n".join(status_lines)
-            await interaction.followup.send(msg, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error rotating keys: {e}", ephemeral=True)
-# ...existing code...
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for artist in artists:
+        grouped[artist['artist_name'].lower()].append(artist)
 
-# === Entry Point ===
-if __name__ == "__main__":
-    if not TOKEN:
-        logging.error("❌ DISCORD_TOKEN not set. Bot will not start.")
-        raise SystemExit(1)
-    try:
-        # Optional keep-alive (only if hosted on services requiring a ping)
-        try:
-            keep_alive()
-        except Exception as e:
-            logging.warning(f"Keep-alive server failed to start: {e}")
-        logging.info("🚀 Starting Discord bot run loop…")
-        bot.run(TOKEN)
-    except KeyboardInterrupt:
-        logging.info("🛑 Interrupted by user")
-    except Exception as e:
-        logging.error(f"❌ Unhandled exception in bot run: {e}")
-        raise
+    lines = []
+    for _, group in sorted(grouped.items()):
+        # Prefer Spotify casing if available
+        display_name = next(
+            (a['artist_name'] for a in group if a['platform'] == 'spotify'),
+            group[0]['artist_name']
+        )
+        platforms = sorted({a['platform'] for a in group})
+        # Collect per-platform IDs
+        id_parts = []
+        for plat in platforms:
+            plat_ids = sorted({a['artist_id'] for a in group if a['platform'] == plat})
+            id_parts.append(f"{plat[:2].upper()}:{'/'.join(plat_ids)}")
+        lines.append(f"{display_name} — {', '.join(platforms)} ({'; '.join(id_parts)})")
+
+    header = f"📋 Tracked Artists ({len(grouped)} unique):"
+    output = header + "\n" + "\n".join(lines)
+
+    # Discord message length safety
+    if len(output) > 1900:
+        chunks = []
+        current = header
+        for line in lines:
+            if len(current) + len(line) + 1 > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += "\n" + line
+        if current:
+            chunks.append(current)
+        await interaction.response.send_message(chunks[0], ephemeral=True)
+        for extra in chunks[1:]:
+            await interaction.followup.send(extra, ephemeral=True)
+    else:
+        await interaction.response.send_message(output, ephemeral=True)
+
+# --- Main Bot Execution ---
+keep_alive()
+bot.run(TOKEN)

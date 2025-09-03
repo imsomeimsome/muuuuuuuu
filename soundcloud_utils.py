@@ -990,7 +990,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                     if (playlist_url not in playlist_cache):
                         playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
                         playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
-                        if playlist_response:
+                        if (playlist_response):
                             try:
                                 playlist_cache[playlist_url] = playlist_response.json()
                             except Exception:
@@ -999,17 +999,14 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                         else:
                             playlist_cache[playlist_url] = None
                     playlist_data = playlist_cache.get(playlist_url)
-                    if playlist_data:
+                    if (playlist_data):
                         tracks_data = playlist_data.get('tracks', [])
                         title_lower = (original.get('title') or '').lower()
                         track_count = len(tracks_data)
-                        if any(kw in title_lower for kw in ['album', 'lp', 'record']):
+                        # NEW: Do not classify purely by track count.
+                        if any(kw in title_lower for kw in ['album',' lp',' record']):
                             content_type = 'album'
-                        elif any(kw in title_lower for kw in ['ep', 'extended play']):
-                            content_type = 'EP'
-                        elif track_count >= 7:
-                            content_type = 'album'
-                        elif track_count >= 2:
+                        elif any(kw in title_lower for kw in [' ep','extended play']):
                             content_type = 'EP'
                         else:
                             content_type = 'playlist'
@@ -1108,6 +1105,15 @@ def get_soundcloud_reposts_info(artist_url):
                 original = item.get("track") or item.get("playlist")
                 if not original:
                     continue
+                content_type = 'track'
+                if original.get('kind') == 'playlist':
+                    title_lower = (original.get('title') or '').lower()
+                    if any(k in title_lower for k in ['album',' lp',' record']):
+                        content_type = 'album'
+                    elif any(k in title_lower for k in [' ep','extended play']):
+                        content_type = 'EP'
+                    else:
+                        content_type = 'playlist'
                 repost_date = item.get("created_at")
                 if not repost_date:
                     continue
@@ -1122,7 +1128,8 @@ def get_soundcloud_reposts_info(artist_url):
                     "features": extract_features(original.get("title", "")),
                     "track_count": original.get("track_count", 1),
                     "duration": format_duration(original.get("duration", 0)),
-                    "genres": [original.get("genre")] if original.get("genre") else []
+                    "genres": [original.get("genre")] if original.get("genre") else [],
+                    "content_type": content_type
                 })
             except Exception as e:
                 logging.warning(f"Error processing repost: {e}")
@@ -1190,7 +1197,7 @@ def process_playlist(playlist_data):
     genres.discard('')
 
     return {
-        'type': 'playlist',
+        'type': 'playlist',  # Do not auto-upgrade; semantic distinction preserved
         'artist_name': playlist_data['user']['username'],
         'title': playlist_data['title'],
         'url': playlist_data['permalink_url'],

@@ -4,80 +4,98 @@ from datetime import datetime, timezone, timedelta
 from utils import get_highest_quality_artwork
 import logging
 
-def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features, track_count, duration, repost, genres=None, content_type=None, custom_color=None):
-    """Create an embed for a music release."""
-    
-    # Determine release type based on track count and title
-    release_type = "track"
-    if content_type:
-        release_type = content_type
-    else:
-        if track_count:
-            if track_count >= 7:
-                release_type = "deluxe" if "deluxe" in title.lower() else "album"
-            elif track_count >= 2:
-                release_type = "EP"
-    
-    # Create base embed
-    if platform.lower() == "spotify":
-        embed = discord.Embed(
-            title=f"# 🎵 {artist_name} released a {release_type}!",
-            # Emphasize title (Discord headings inside embeds are not larger; using bold+underline for emphasis)
-            description=f"__**{title}**__\n[{title}]({url})",
-            color=0x1DB954  # Spotify green
-        )
-    else:
-        # Keep existing SoundCloud embed format
-        embed = discord.Embed(
-            title=f"# 🎵 {artist_name} released a {release_type}!",
-            description=f"[{title}]({url})",
-            color=0xfa5a02  # SoundCloud orange
-        )
+def _indef_article(word: str) -> str:
+    if not word:
+        return "a"
+    return "an" if word[0].lower() in "aeiou" else "a"
 
-    # Add fields in consistent order
+def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features,
+                       track_count, duration, repost, genres=None, content_type=None, custom_color=None):
+    """Create an embed for a music release (Spotify or SoundCloud) with correct playlist vs album/EP labeling."""
+    release_type = "track"
+    title_lower = (title or "").lower()
+    is_sc = platform.lower() == "soundcloud"
+    is_playlist_url = bool(url and "/sets/" in url)
+    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
+    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+    is_deluxe = "deluxe" in title_lower
+
+    if content_type == "playlist" or (is_sc and is_playlist_url):
+        if explicit_album:
+            release_type = "album"
+        elif explicit_ep:
+            release_type = "ep"
+        else:
+            release_type = "playlist"
+    else:
+        if is_deluxe:
+            release_type = "deluxe"
+        elif explicit_album:
+            release_type = "album"
+        elif explicit_ep:
+            release_type = "ep"
+        else:
+            if not is_sc:
+                if track_count:
+                    if track_count >= 7:
+                        release_type = "album"
+                    elif track_count >= 2:
+                        release_type = "ep"
+                    else:
+                        release_type = "track"
+                else:
+                    release_type = content_type or "track"
+            else:
+                release_type = content_type or "track"
+
+    color = custom_color if custom_color is not None else (0x1DB954 if platform.lower() == "spotify" else 0xfa5a02)
+    embed = discord.Embed(
+        title=f"🎵 {artist_name} released {_indef_article(release_type)} {release_type}!",
+        description=f"[{title}]({url})" if title and url else (title or url or "Release"),
+        color=color
+    )
+
     embed.add_field(name="By", value=artist_name, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Add release date
+    # Release date handling (avoid misleading relative for date-only)
     try:
-        release_timestamp = None
         if release_date:
-            rd = release_date
-            try:
-                # Standard full datetime
-                if 'T' in rd:
-                    rd_norm = rd.replace('Z', '+0000')
-                    for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-                        try:
-                            release_timestamp = int(datetime.strptime(rd_norm, fmt).timestamp())
-                            break
-                        except ValueError:
-                            continue
-                if release_timestamp is None:
-                    # Date-only fallback
-                    dt = datetime.strptime(rd[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-                    release_timestamp = int(dt.timestamp())
-            except Exception as e:
-                logging.warning(f"Error parsing release date '{release_date}': {e}")
-                release_timestamp = None
-        if release_timestamp:
-            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+            rd = release_date.strip()
+            date_only = 'T' not in rd
+            release_timestamp = None
+            if not date_only:
+                rd_norm = rd.replace('Z', '+0000')
+                for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
+                    try:
+                        release_timestamp = int(datetime.strptime(rd_norm, fmt).timestamp())
+                        break
+                    except ValueError:
+                        continue
+            if release_timestamp and not date_only:
+                embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+            else:
+                # Show literal calendar date (prevents timezone shift confusion)
+                embed.add_field(name="Release Date", value=rd[:10], inline=True)
     except Exception as e:
-        logging.error(f"Error parsing release date: {e}")
+        logging.debug(f"Release date parse issue ({release_date}): {e}")
 
-    # Add genre if available
+    # Genres (with plural & truncation safety)
     if genres:
         if isinstance(genres, list):
-            genre_text = ', '.join(filter(None, genres))
+            clean = [g for g in genres if g]
+            if clean:
+                text = ', '.join(clean)
+                field = "Genres" if len(clean) > 1 else "Genre"
+                embed.add_field(name=field, value=text[:1024], inline=True)
         else:
-            genre_text = str(genres)
-        if genre_text and genre_text.lower() != "none":
-            embed.add_field(name="Genre", value=genre_text, inline=True)
+            gtxt = str(genres).strip()
+            if gtxt and gtxt.lower() != "none":
+                embed.add_field(name="Genre", value=gtxt[:1024], inline=True)
 
-    # Set thumbnail if available
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)
@@ -155,9 +173,30 @@ def create_repost_embed(
             except Exception:
                 repost_timestamp = None
 
-    # Build embed (mirroring like embed style)
+    # Determine repost type
+    title_lower = (title or "").lower()
+    is_playlist_url = bool(url and "/sets/" in url)
+    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
+    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+    repost_type = "track"
+    if is_playlist_url:
+        if explicit_album:
+            repost_type = "album"
+        elif explicit_ep:
+            repost_type = "ep"
+        else:
+            repost_type = "playlist"
+    else:
+        # Do NOT promote to album/EP solely by track_count for SoundCloud reposts
+        if explicit_album:
+            repost_type = "album"
+        elif explicit_ep:
+            repost_type = "ep"
+        else:
+            repost_type = "track"
+
     embed = discord.Embed(
-        title=f"📢 __{reposted_by}__ reposted a track!",
+        title=f"📢 {reposted_by} reposted {_indef_article(repost_type)} {repost_type}!",
         description=f"[{title}]({url})" if title and url else (title or url or "Repost"),
         color=0xfa5a02
     )
@@ -174,7 +213,7 @@ def create_repost_embed(
         embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if repost_timestamp:
         # Use 'Liked' label to mirror like embed exactly per request
-        embed.add_field(name="Liked", value=f"<t:{repost_timestamp}:R>", inline=True)
+        embed.add_field(name="Reposted", value=f"<t:{repost_timestamp}:R>", inline=True)
 
     # Always add Genres (even if None)
     genre_text = "None"
@@ -199,52 +238,27 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     """Create an embed for a liked track."""
     
     # Enhanced release type detection
-    def determine_release_type(content_type, title, track_count, tracks_data=None):
-        # 1. Check for playlist type from API
-        if content_type == "playlist":
-            # Common keywords indicating type in title
-            title_lower = title.lower()
-            type_keywords = {
-                "album": ["album", "lp", "record"],
-                "EP": ["ep", "extended play"],
-                "mixtape": ["mixtape", "mix tape"],
-                "compilation": ["compilation", "various artists", "various", "va"],
-                "playlist": ["playlist", "mix", "selection", "picks", "favorites"]
-            }
-            
-            # Check title for type indicators
-            for type_name, keywords in type_keywords.items():
-                if any(keyword in title_lower for keyword in keywords):
-                    return type_name.lower()
-            
-            # 2. Check for multiple artists if tracks data available
-            if tracks_data:
-                artists = set(track.get('artist_name') for track in tracks_data)
-                if len(artists) > 1:
-                    return "playlist"
-            
-            # 3. Fallback to track count logic
-            if track_count:
-                if track_count >= 7:
-                    return "deluxe" if "deluxe" in title_lower else "album"
-                elif track_count >= 2:
-                    return "EP"
-                
-        return "track"
+    title_lower = (title or "").lower()
+    is_playlist_url = bool(url and "/sets/" in url)
+    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
+    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+    is_playlist = (content_type == "playlist") or is_playlist_url
 
-    # Get release type
-    release_type = determine_release_type(content_type, title, track_count)
-
-    # Determine release type based on track count
-    if content_type == "playlist":
-        release_type = "playlist"
+    if is_playlist:
+        if explicit_album:
+            release_type = "album"
+        elif explicit_ep:
+            release_type = "ep"
+        else:
+            release_type = "playlist"
     else:
-        release_type = "track"
-        if track_count:
-            if track_count >= 7:
-                release_type = "deluxe" if "deluxe" in title.lower() else "album"
-            elif track_count >= 2:
-                release_type = "EP"
+        # Track logic only; do not auto promote by track_count for SC likes
+        if explicit_album:
+            release_type = "album"
+        elif explicit_ep:
+            release_type = "ep"
+        else:
+            release_type = "track"
 
     # Format duration to include hours if needed
     if duration and ":" in duration:
@@ -295,7 +309,7 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
         like_timestamp = None
 
     embed = discord.Embed(
-        title=f"❤️ __{liked_by}__ liked a{release_type.startswith(('a','e','i','o','u')) and 'n' or ''} {release_type}!",
+        title=f"❤️ __{liked_by}__ liked {_indef_article(release_type)} {release_type}!",
         description=f"[{title}]({url})",
         color=0xfa5a02
     )
