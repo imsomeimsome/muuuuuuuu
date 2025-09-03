@@ -458,9 +458,6 @@ async def check_for_playlist_changes(bot, artist, playlist_info):
         if channel:
             await channel.send(embed=embed)
 
-        # Update stored state
-        store_playlist_state(artist_id, guild_id, playlist_id, current_tracks)
-
 # --- MAIN RELEASE CHECK FUNCTION WITH CATCH-UP ---
 ########## NEW CHECK FOR NEW RELEASES IDK IF IT WORKS #########################################
 
@@ -688,6 +685,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
     logging.info(f"\n🟠 CHECKING SOUNDCLOUD{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
 
+    FRESH_SKEW_HOURS = int(os.getenv('SC_FRESH_SKEW_HOURS', '12'))
+
     def _is_new_activity(activity_dt, last_check_dt):
         """
         Mirror Spotify logic:
@@ -789,38 +788,52 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     logging.info("     ⏭️ Skipping (no release_date)")
                 elif baseline:
                     logging.info("     ⏭️ Baseline established (no previous check)")
-                elif api_dt and _is_new_activity(api_dt, last_check_dt):
-                    cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
-                    if get_cache(cache_key):
-                        logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                elif api_dt:
+                    is_new = False
+                    reason = None
+                    if _is_new_activity(api_dt, last_check_dt):
+                        is_new = True
+                        reason = "api_release_date > last_check"
                     else:
-                        channel = await get_release_channel(guild_id, 'soundcloud')
-                        if channel:
-                            embed = create_music_embed(
-                                platform='soundcloud',
-                                artist_name=artist_name,
-                                title=release_info.get('title','New Release'),
-                                url=release_info.get('url'),
-                                release_date=api_release_date,
-                                cover_url=release_info.get('cover_url'),
-                                features=release_info.get('features'),
-                                track_count=release_info.get('track_count'),
-                                duration=release_info.get('duration'),
-                                genres=release_info.get('genres'),
-                                repost=False
-                            )
-                            await channel.send(embed=embed)
-                            update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
-                            set_cache(cache_key, 'posted', ttl=86400)
-                            counts['releases'] += 1
-                            logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                        # Skew fallback: created_at earlier than last_check but still newer than last_release
+                        if (last_release_dt is None or api_dt > last_release_dt):
+                            now_utc = datetime.now(timezone.utc)
+                            age = now_utc - api_dt if api_dt.tzinfo else now_utc - api_dt.replace(tzinfo=timezone.utc)
+                            if age < timedelta(hours=FRESH_SKEW_HOURS):
+                                is_new = True
+                                reason = f"fresh_skew_window (<{FRESH_SKEW_HOURS}h & > last_release)"
+                    if is_new:
+                        cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
+                        if get_cache(cache_key):
+                            logging.info(f"     ⏭️ Duplicate suppressed ({reason})")
                         else:
-                            logging.warning("     ⚠️ No SoundCloud channel configured for release")
-                else:
-                    if api_dt and last_check_dt and api_dt == last_check_dt:
-                        logging.info("     ⏭️ Not new (same timestamp)")
+                            channel = await get_release_channel(guild_id, 'soundcloud')
+                            if channel:
+                                embed = create_music_embed(
+                                    platform='soundcloud',
+                                    artist_name=artist_name,
+                                    title=release_info.get('title','New Release'),
+                                    url=release_info.get('url'),
+                                    release_date=api_release_date,
+                                    cover_url=release_info.get('cover_url'),
+                                    features=release_info.get('features'),
+                                    track_count=release_info.get('track_count'),
+                                    duration=release_info.get('duration'),
+                                    genres=release_info.get('genres'),
+                                    repost=False
+                                )
+                                await channel.send(embed=embed)
+                                update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
+                                set_cache(cache_key, 'posted', ttl=86400)
+                                counts['releases'] += 1
+                                logging.info(f"     ✅ NEW ({reason}; api_release_date {_fmt_dt(api_dt)} vs last_check {_fmt_dt(last_check_dt)})")
+                            else:
+                                logging.warning("     ⚠️ No SoundCloud channel configured for release")
                     else:
-                        logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                        if api_dt and last_check_dt and api_dt == last_check_dt:
+                            logging.info("     ⏭️ Not new (same timestamp)")
+                        else:
+                            logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
 
             # Post playlist if NEW (after potential suppression decision)
             if playlist_new:
