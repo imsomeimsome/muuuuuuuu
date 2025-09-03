@@ -1057,13 +1057,15 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
         logging.error(f"Error fetching likes for {artist_url}: {e}")
         return []
 
-def get_soundcloud_reposts_info(artist_url):
-    """Fetch and process reposts from a SoundCloud user with anomaly detection."""
+def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
+    """Fetch and process reposts from a SoundCloud user with anomaly detection.
+    force_refresh=True bypasses the cache to avoid 2-cycle delays."""
     try:
         cache_key = f"reposts:{artist_url}"
-        cached = get_cache(cache_key)
-        if cached:
-            return json.loads(cached)
+        if not force_refresh:
+            cached = get_cache(cache_key)
+            if cached:
+                return json.loads(cached)
         resolved = resolve_url(artist_url)
         if not resolved or "id" not in resolved:
             logging.warning(f"⚠️ Could not resolve SoundCloud user ID from {artist_url}")
@@ -1134,7 +1136,9 @@ def get_soundcloud_reposts_info(artist_url):
             except Exception as e:
                 logging.warning(f"Error processing repost: {e}")
                 continue
-        set_cache(cache_key, json.dumps(reposts), ttl=300)
+        # Short adaptive TTL (mirror likes ~60s) to reduce repost lag
+        ttl = _jittered_ttl(60, 15) if 'playlist' not in artist_url else _jittered_ttl(70, 20)
+        set_cache(cache_key, json.dumps(reposts), ttl=ttl)
         return reposts
     except Exception as e:
         logging.error(f"Error fetching reposts for {artist_url}: {e}")

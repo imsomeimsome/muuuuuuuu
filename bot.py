@@ -379,53 +379,40 @@ async def get_release_channel(guild_id: str, platform: str) -> Optional[discord.
 async def handle_release(bot, artist, release_info, release_type):
     guild_id = artist.get('guild_id')
     platform = artist['platform']
-    channel = await get_release_channel(guild_id, platform)
-    if not channel:
-        logging.warning("⚠️ No channel to post release")
+
+    if not guild_id:
+        logging.warning(f"❌ Missing guild_id for artist {artist['artist_name']} — cannot post {release_type}.")
         return
 
-    # Enrich SoundCloud playlist/album info: compute duration & genres if missing
-    if platform == 'soundcloud':
-        # Only for playlist / album / ep classification
-        r_type = (release_info.get('type') or '').lower()
-        tracks = release_info.get('tracks') or []
-        if r_type in ('playlist','album','ep','deluxe') and tracks:
-            # Duration (sum ms) if not already provided
-            if not release_info.get('duration'):
-                total_ms = sum(t.get('duration') or 0 for t in tracks)
-                if total_ms > 0:
-                    seconds = total_ms // 1000
-                    h = seconds // 3600
-                    m = (seconds % 3600) // 60
-                    s = seconds % 60
-                    if h:
-                        release_info['duration'] = f"{h}:{m:02d}:{s:02d}"
-                    else:
-                        release_info['duration'] = f"{m}:{s:02d}"
-            # Genres aggregate if empty
-            existing_genres = release_info.get('genres') or []
-            if not existing_genres:
-                gset = { (t.get('genre') or '').strip() for t in tracks if t.get('genre') }
-                gclean = sorted(g for g in gset if g)
-                if gclean:
-                    release_info['genres'] = gclean
+    channel = await get_release_channel(guild_id=guild_id, platform=platform)
+    if not channel:
+        logging.warning(f"⚠️ No channel configured for {platform} in guild {guild_id} — skipping post for {artist['artist_name']}.")
+        return
 
-    embed = create_music_embed(
+    heading_result = create_music_embed(
         platform=platform,
         artist_name=release_info.get('artist_name', artist['artist_name']),
         title=release_info.get('title', 'New Release'),
         url=release_info.get('url', artist['artist_url']),
-        release_date=release_info.get('release_date'),
+        release_date=release_info.get('release_date') if release_info.get('release_date') else "Unknown",
         cover_url=release_info.get('cover_url'),
         features=release_info.get('features'),
         track_count=release_info.get('track_count'),
         duration=release_info.get('duration'),
         repost=False,
         genres=release_info.get('genres'),
-        content_type=release_info.get('type')
+        content_type=release_info.get('type'),
+        return_heading=True
     )
-    await channel.send(embed=embed)
+    heading_text, release_type_detected, embed = heading_result
 
+    # Only make a big heading for non-playlist releases (tracks/albums/EPs/deluxe)
+    if (release_info.get('type') or release_type_detected).lower() == 'playlist':
+        await channel.send(embed=embed)
+    else:
+        await channel.send(content=f"# {heading_text}", embed=embed)
+
+    logging.info(f"✅ Posted new {release_type} for {artist['artist_name']}")
 # --- Playlist changes here ---
 
 async def check_for_playlist_changes(bot, artist, playlist_info):
@@ -809,7 +796,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     else:
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
-                            heading_text, release_type_detected, embed = create_music_embed(
+                            embed = create_music_embed(
                                 platform='soundcloud',
                                 artist_name=artist_name,
                                 title=release_info.get('title','New Release'),
@@ -820,15 +807,9 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=release_info.get('track_count'),
                                 duration=release_info.get('duration'),
                                 genres=release_info.get('genres'),
-                                repost=False,
-                                content_type=release_info.get('type'),
-                                return_heading=True
+                                repost=False
                             )
-                            # Only big heading if not playlist
-                            if (release_info.get('type') or release_type_detected).lower() == 'playlist':
-                                await channel.send(embed=embed)
-                            else:
-                                await channel.send(content=f"# {heading_text}", embed=embed)
+                            await channel.send(embed=embed)
                             update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
                             set_cache(cache_key, 'posted', ttl=86400)
                             counts['releases'] += 1
@@ -859,7 +840,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
             # === REPOSTS (multiple) ===
             try:
-                reposts = await run_blocking(get_soundcloud_reposts_info, artist_url)
+                # Force refresh to avoid stale 5‑minute cache causing 2-cycle delay
+                reposts = await run_blocking(get_soundcloud_reposts_info, artist_url, True)
             except Exception as e_repost:
                 reposts = []
                 logging.error(f"     ❌ Error processing reposts for {artist_name}: {e_repost}")
