@@ -181,7 +181,7 @@ def _next_hour_boundary(second: int = 1) -> datetime:
     """
     Next hourly boundary at HH:00:01 UTC anchored from today's 00:00:01.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     anchor = now.replace(hour=0, minute=0, second=second, microsecond=0)  # 00:00:01 today
     if now < anchor:
         return anchor
@@ -197,7 +197,7 @@ def _next_5min_boundary(second: int = 1) -> datetime:
     Next 5‑minute boundary at mm divisible by 5 with :01 seconds,
     anchored from today's 00:00:01 UTC.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     anchor = now.replace(hour=0, minute=0, second=second, microsecond=0)  # 00:00:01 today
     if now < anchor:
         return anchor
@@ -523,7 +523,7 @@ async def check_for_new_releases(bot, is_catchup=False):
     """Coordinate all platform checks with per-platform timeout watchdog."""
     PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
 
-    now_utc = datetime.utcnow()
+    now_utc = datetime.now(timezone.utc)
     run_spotify = (now_utc.minute == 0)  # only at HH:00:01
     logging.info(f"\n🚀 Starting check for new releases (UTC {now_utc:%Y-%m-%d %H:%M:%S})")
     if is_catchup:
@@ -1067,7 +1067,7 @@ async def _before_release_checker():
     await bot.wait_until_ready()
     target = _next_5min_boundary(second=1)
     while True:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         delta = (target - now).total_seconds()
         if delta <= 0:
             break
