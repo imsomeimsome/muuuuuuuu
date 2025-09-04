@@ -519,18 +519,17 @@ async def check_for_playlist_changes(bot, artist, playlist_info):
             await channel.send(embed=embed)
 
 # --- MAIN RELEASE CHECK FUNCTION WITH CATCH-UP ---
-########## NEW CHECK FOR NEW RELEASES IDK IF IT WORKS #########################################
-
 async def check_for_new_releases(bot, is_catchup=False):
-    """Coordinate all platform checks with per-platform timeout watchdog.
-    If a platform phase exceeds PLATFORM_PHASE_TIMEOUT seconds, rotate that
-    platform's key and abort the current cycle (next run will occur on schedule).
-    """
+    """Coordinate all platform checks with per-platform timeout watchdog."""
     PLATFORM_PHASE_TIMEOUT = int(os.getenv('PLATFORM_PHASE_TIMEOUT', '120'))
 
-    logging.info("\n🚀 Starting check for new releases")
+    now_utc = datetime.utcnow()
+    run_spotify = (now_utc.minute == 0)  # only at HH:00:01
+    logging.info(f"\n🚀 Starting check for new releases (UTC {now_utc:%Y-%m-%d %H:%M:%S})")
     if is_catchup:
         logging.info("(Catch-up mode)")
+    if not run_spotify:
+        logging.info("⏭️ Skipping Spotify this cycle (hourly cadence)")
 
     # General tasks
     artists, shutdown_time, general_errors = await check_general_tasks(bot, is_catchup)
@@ -538,40 +537,40 @@ async def check_for_new_releases(bot, is_catchup=False):
         logging.warning("No artists available; aborting cycle early.")
         return
 
-    # --- Spotify Phase ---
-    logging.info("▶️ Starting Spotify phase")
-    # Added explicit debug of active Spotify credentials
-    try: 
-        if getattr(spotify_utils, 'spotify_key_manager', None) and spotify_utils.spotify_key_manager.keys:
-            _cid, _sec = spotify_utils.spotify_key_manager.get_current_key()
-            logging.warning("Starting Spotify Phase using....\nclient_id: %s\nclient_secret: %s" % (_cid, _sec))  # INTENTIONAL FULL OUTPUT FOR DEBUG
-        else:
-            logging.warning("Starting Spotify Phase using....\nclient_id: <unavailable>\nclient_secret: <unavailable> (manager not initialized)")
-    except Exception as _cred_e:
-        logging.error(f"Failed retrieving current Spotify credentials for debug: {_cred_e}")
-    try:
-        spotify_results = await asyncio.wait_for(
-            check_spotify_updates(bot, artists, shutdown_time, is_catchup),
-            timeout=PLATFORM_PHASE_TIMEOUT
-        )
-        logging.info("✅ Spotify phase finished")
-    except asyncio.TimeoutError:
-        logging.error(f"⏱️ Spotify phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating Spotify API key and aborting cycle")
+    spotify_releases, spotify_errors = 0, []
+    if run_spotify:
+        logging.info("▶️ Starting Spotify phase")
         try:
-            manual_rotate_spotify_key(reason="phase_timeout")
+            if getattr(spotify_utils, 'spotify_key_manager', None) and spotify_utils.spotify_key_manager.keys:
+                _cid, _sec = spotify_utils.spotify_key_manager.get_current_key()
+                logging.warning("Starting Spotify Phase using....\nclient_id: %s\nclient_secret: %s" % (_cid, _sec))
+            else:
+                logging.warning("Starting Spotify Phase using....\nclient_id: <unavailable>\nclient_secret: <unavailable> (manager not initialized)")
+        except Exception as _cred_e:
+            logging.error(f"Failed retrieving current Spotify credentials for debug: {_cred_e}")
+        try:
+            spotify_results = await asyncio.wait_for(
+                check_spotify_updates(bot, artists, shutdown_time, is_catchup),
+                timeout=PLATFORM_PHASE_TIMEOUT
+            )
+            logging.info("✅ Spotify phase finished")
+            spotify_releases, spotify_errors = spotify_results
+        except asyncio.TimeoutError:
+            logging.error(f"⏱️ Spotify phase exceeded {PLATFORM_PHASE_TIMEOUT}s; rotating Spotify API key and aborting cycle")
+            try:
+                manual_rotate_spotify_key(reason="phase_timeout")
+            except Exception as e:
+                logging.error(f"Failed rotating Spotify key after timeout: {e}")
+            return
         except Exception as e:
-            logging.error(f"Failed rotating Spotify key after timeout: {e}")
-        return
-    except Exception as e:
-        logging.error(f"❌ Spotify phase failed unexpectedly: {e}")
-        try:
-            manual_rotate_spotify_key(reason="phase_exception")
-        except Exception:
-            pass
-        return
-    spotify_releases, spotify_errors = spotify_results
+            logging.error(f"❌ Spotify phase failed unexpectedly: {e}")
+            try:
+                manual_rotate_spotify_key(reason="phase_exception")
+            except Exception:
+                pass
+            return
 
-    # --- SoundCloud Phase ---
+    # --- SoundCloud Phase (always every 5m) ---
     logging.info("▶️ Starting SoundCloud phase")
     try:
         soundcloud_results = await asyncio.wait_for(
@@ -595,10 +594,8 @@ async def check_for_new_releases(bot, is_catchup=False):
         return
     soundcloud_counts, soundcloud_errors = soundcloud_results
 
-    # Compile results only if both phases finished
     total_releases = spotify_releases + sum(soundcloud_counts.values())
     all_errors = (general_errors or []) + spotify_errors + soundcloud_errors
-
     logging.info("🎯 All platform checks finished successfully!")
     await log_summary(len(artists), total_releases, all_errors)
 
@@ -1068,8 +1065,14 @@ async def release_checker():
 @release_checker.before_loop
 async def _before_release_checker():
     await bot.wait_until_ready()
-    # Small delay to let caches / key managers finish init
-    await asyncio.sleep(3)
+    target = _next_5min_boundary(second=1)
+    while True:
+        now = datetime.utcnow()
+        delta = (target - now).total_seconds()
+        if delta <= 0:
+            break
+        await asyncio.sleep(min(delta, 30))
+    logging.info(f"⏱️ Aligned release checker to first run at {target.isoformat()}Z (then every {CHECK_INTERVAL_MIN}m)")
 
 @bot.event
 async def on_ready():
