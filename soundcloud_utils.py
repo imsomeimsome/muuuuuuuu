@@ -908,22 +908,50 @@ def get_soundcloud_playlist_info(artist_url):
             return None
         playlists = data.get("collection", [])
         if not playlists:
-            # No non-empty baseline yet? The record_data_anomaly logic will decide suppression.
             record_data_anomaly('empty_collection', url, 'playlists')
             logging.debug(f"Empty playlist collection for {artist_url}")
             return None
-        # We have a baseline now
         _update_nonempty_baseline('playlists')
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
+
         tracks = []
+        genre_set = set()
+        total_duration_ms = 0
+
         for index, track in enumerate(latest_playlist.get("tracks", [])):
             if isinstance(track, dict):
+                tid = str(track.get("id"))
+                ttitle = str(track.get("title"))
+                tdur = track.get("duration") or 0
+                tgenre = (track.get("genre") or "").strip()
+                if tgenre:
+                    genre_set.add(tgenre)
+                total_duration_ms += tdur
                 tracks.append({
-                    "id": str(track.get("id")),
-                    "title": str(track.get("title")),
-                    "duration": track.get("duration"),
+                    "id": tid,
+                    "title": ttitle,
+                    "duration": tdur,
+                    "genre": tgenre,
                     "order": index
                 })
+
+        # Format cumulative duration
+        playlist_duration = None
+        if total_duration_ms > 0:
+            playlist_duration = format_duration(total_duration_ms)
+
+        # Fallback: if duration still missing but we have tracks, compute again (defensive)
+        if not playlist_duration and tracks:
+            try:
+                total_ms_fallback = sum(int(t.get("duration") or 0) for t in latest_playlist.get("tracks", []))
+                if total_ms_fallback > 0:
+                    playlist_duration = format_duration(total_ms_fallback)
+                else:
+                    playlist_duration = "0:00"
+            except Exception as e:
+                logging.debug(f"Playlist duration fallback failed: {e}")
+                playlist_duration = None
+
         result = {
             "title": latest_playlist.get("title"),
             "artist_name": latest_playlist.get("user", {}).get("username"),
@@ -931,7 +959,11 @@ def get_soundcloud_playlist_info(artist_url):
             "release_date": latest_playlist.get("created_at"),
             "cover_url": latest_playlist.get("artwork_url"),
             "track_count": len(tracks),
-            "tracks": tracks
+            "tracks": tracks,
+            "type": "playlist",
+            "genres": sorted(genre_set),
+            "duration": playlist_duration,  # ensured non-empty if any track durations exist
+            "features": None
         }
         if not result.get('url'):
             record_data_anomaly('missing_field', url, 'playlist_url')
@@ -1206,7 +1238,7 @@ def process_playlist(playlist_data):
         'title': playlist_data['title'],
         'url': playlist_data['permalink_url'],
         'release_date': playlist_data.get('created_at', ''),
-        'cover_url': playlist_data.get('artwork_url') or playlist_data['user'].get('avatar_url', ''),
+        'cover_url': playlist_data.get('artwork_url') or playlist_data.get('avatar_url', ''),
         'duration': format_duration(total_duration),
         'features': ', '.join(sorted(features)) if features else None,
         'genres': sorted(list(genres)) if genres else ['Unknown'],  # Return list of genres or ['Unknown']

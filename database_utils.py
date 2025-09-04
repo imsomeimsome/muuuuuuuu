@@ -324,9 +324,14 @@ def mark_posted_playlist(artist_id, guild_id, playlist_id):
         conn.execute("REPLACE INTO posted_playlists(artist_id, guild_id, playlist_id) VALUES (?,?,?)", (artist_id, str(guild_id), playlist_id))
 
 
-def store_playlist_state(artist_id, guild_id, playlist_id, tracks):
+def store_playlist_state(artist_id, guild_id, playlist_id, tracks, title=None):
+    """Persist playlist state. If title provided, store structured state (title + tracks) for change detection."""
+    state_obj = {'title': title, 'tracks': tracks} if title else tracks
     with get_connection() as conn:
-        conn.execute("REPLACE INTO playlist_states(artist_id, guild_id, playlist_id, tracks) VALUES (?,?,?,?)", (artist_id, str(guild_id), playlist_id, json.dumps(tracks)))
+        conn.execute(
+            "REPLACE INTO playlist_states(artist_id, guild_id, playlist_id, tracks) VALUES (?,?,?,?)",
+            (artist_id, str(guild_id), playlist_id, json.dumps(state_obj))
+        )
 
 
 def get_playlist_state(artist_id, guild_id, playlist_id):

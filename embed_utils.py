@@ -68,17 +68,26 @@ def create_music_embed(
                 release_type = content_type or "track"
 
     color = custom_color if custom_color is not None else (0x1DB954 if platform.lower() == "spotify" else 0xfa5a02)
-    heading = f"🎵 {artist_name} released {_indef_article(release_type)} {release_type}!"
+
+    # Ensure emoji map & duration field logic (re‑add or reinforce)
+    emoji_map = {
+        "playlist": "📂",
+        "album": "💿",
+        "ep": "🎶",
+        "deluxe": "💿",
+        "track": "🎵"
+    }
+    heading_emoji = emoji_map.get(release_type, "🎵")
+    heading = f"{heading_emoji} {artist_name} released {_indef_article(release_type)} {release_type}!"
     embed = discord.Embed(
         title=heading,
         description=f"[{title}]({url})" if title and url else (title or url or "Release"),
         color=color
     )
-
-    embed.add_field(name="By", value=artist_name, inline=True)
+    # Add duration if non-empty string (including '0:00')
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
-    if duration:
+    if isinstance(duration, str) and duration.strip():
         embed.add_field(name="Duration", value=duration, inline=True)
 
     # Release date (show raw date for date-only strings)
@@ -111,7 +120,12 @@ def create_music_embed(
                 embed.add_field(name="Genre", value=gtxt[:1024], inline=True)
 
     if cover_url:
-        embed.set_thumbnail(url=cover_url)
+        try:
+            # Upgrade to highest quality (handles SoundCloud -large -> -original/-t500x500, Spotify sizes, etc.)
+            high_res = get_highest_quality_artwork(cover_url)
+            embed.set_thumbnail(url=high_res or cover_url)
+        except Exception:
+            embed.set_thumbnail(url=cover_url)
 
     if return_heading:
         return heading, release_type, embed
