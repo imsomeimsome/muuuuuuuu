@@ -744,6 +744,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
             # Determine playlist newness first
             playlist_new = False
+            playlist_reason = None
             playlist_dt = None
             playlist_date_raw = None
             if playlist_info:
@@ -753,17 +754,46 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 logging.info(f"     API returned (playlist): {_fmt_dt(playlist_dt)}")
                 if baseline:
                     logging.info("     ⏭️ Baseline established (no previous check)")
-                elif playlist_dt and _is_new_activity(playlist_dt, last_check_dt):
-                    playlist_new = True
-                else:
-                    if playlist_dt and last_check_dt and playlist_dt == last_check_dt:
-                        logging.info("     ⏭️ Not new (same timestamp)")
+                elif playlist_dt:
+                    # Primary comparison vs last check
+                    if _is_new_activity(playlist_dt, last_check_dt):
+                        playlist_new = True
+                        playlist_reason = "playlist_date > last_check"
                     else:
-                        logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                        # Skew fallback: newer than last stored playlist but backdated <= last_check
+                        if (last_playlist_dt is None or playlist_dt > last_playlist_dt):
+                            now_utc = datetime.now(timezone.utc)
+                            age = now_utc - (playlist_dt if playlist_dt.tzinfo else playlist_dt.replace(tzinfo=timezone.utc))
+                            if age < timedelta(hours=FRESH_SKEW_HOURS):
+                                playlist_new = True
+                                playlist_reason = f"fresh_skew_window (<{FRESH_SKEW_HOURS}h & > last_playlist)"
+                    if not playlist_new:
+                        if last_check_dt and playlist_dt == last_check_dt:
+                            logging.info("     ⏭️ Not new (same timestamp)")
+                        else:
+                            logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                else:
+                    logging.info("     ⏭️ No playlist date present")
             else:
                 _log_header(artist_name, 'playlist', last_playlist_dt, last_check_dt)
                 logging.info("     API returned (playlist): None")
                 logging.info("     ⏭️ No playlists returned")
+
+            # Post playlist if NEW (after potential suppression decision)
+            if playlist_new:
+                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
+                if is_already_posted_playlist(artist_id, guild_id, playlist_id):
+                    logging.info("     ⏭️ Playlist already posted")
+                else:
+                    channel = await get_release_channel(guild_id, 'soundcloud')
+                    if channel:
+                        await handle_release(bot, artist, playlist_info, 'playlist')
+                        mark_posted_playlist(artist_id, guild_id, playlist_id)
+                        update_last_playlist_date(artist_id, guild_id, playlist_date_raw)
+                        counts['playlists'] += 1
+                        logging.info(f"     ✅ NEW ({playlist_reason}; playlist_date {_fmt_dt(playlist_dt)} vs last_check {_fmt_dt(last_check_dt)})")
+                    else:
+                        logging.warning("     ⚠️ No SoundCloud channel configured for playlist")
 
             # Process release (single track) but allow suppression if parent playlist will post
             api_release_date = release_info.get('release_date') if release_info else None
@@ -834,22 +864,6 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                             logging.info("     ⏭️ Not new (same timestamp)")
                         else:
                             logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
-
-            # Post playlist if NEW (after potential suppression decision)
-            if playlist_new:
-                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
-                if is_already_posted_playlist(artist_id, guild_id, playlist_id):
-                    logging.info("     ⏭️ Playlist already posted")
-                else:
-                    channel = await get_release_channel(guild_id, 'soundcloud')
-                    if channel:
-                        await handle_release(bot, artist, playlist_info, 'playlist')
-                        mark_posted_playlist(artist_id, guild_id, playlist_id)
-                        update_last_playlist_date(artist_id, guild_id, playlist_date_raw)
-                        counts['playlists'] += 1
-                        logging.info(f"     ✅ NEW (playlist_date {_fmt_dt(playlist_dt)} > last_check {_fmt_dt(last_check_dt)})")
-                    else:
-                        logging.warning("     ⚠️ No SoundCloud channel configured for playlist")
 
             # === REPOSTS (multiple) ===
             try:
