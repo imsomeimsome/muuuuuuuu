@@ -177,6 +177,40 @@ def _fmt_dt(dt_obj: datetime | None):
         dt_obj = dt_obj.replace(tzinfo=timezone.utc)
     return dt_obj.astimezone(timezone.utc).strftime('%Y-%m-%d %I:%M:%S %p')
 
+def _next_hour_boundary(second: int = 1) -> datetime:
+    """
+    Next hourly boundary at HH:00:01 UTC anchored from today's 00:00:01.
+    """
+    now = datetime.utcnow()
+    anchor = now.replace(hour=0, minute=0, second=second, microsecond=0)  # 00:00:01 today
+    if now < anchor:
+        return anchor
+    hours_since_anchor = (now - anchor).seconds // 3600
+    # If we're before the :second inside this hour (e.g. 12:00:00.500 and second=1), stay on current upcoming boundary
+    if now.minute == 0 and now.second < second:
+        return now.replace(minute=0, second=second, microsecond=0)
+    next_hour_index = hours_since_anchor + 1
+    return anchor + timedelta(hours=next_hour_index)
+
+def _next_5min_boundary(second: int = 1) -> datetime:
+    """
+    Next 5‑minute boundary at mm divisible by 5 with :01 seconds,
+    anchored from today's 00:00:01 UTC.
+    """
+    now = datetime.utcnow()
+    anchor = now.replace(hour=0, minute=0, second=second, microsecond=0)  # 00:00:01 today
+    if now < anchor:
+        return anchor
+    elapsed = now - anchor
+    elapsed_minutes = int(elapsed.total_seconds() // 60)
+    current_slot_min = (elapsed_minutes // 5) * 5
+    current_boundary = anchor + timedelta(minutes=current_slot_min)
+    # If we are in the exact slot minute but before the target second, use this boundary
+    if (elapsed_minutes % 5 == 0) and now.second < second:
+        return current_boundary
+    # Otherwise move to the next slot
+    return current_boundary + timedelta(minutes=5)
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 TEST_GUILD_ID = os.getenv("TEST_GUILD_ID")
