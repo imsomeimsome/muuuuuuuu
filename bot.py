@@ -1021,3 +1021,46 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 pass
             continue
     return counts, errors
+
+CHECK_INTERVAL_MIN = int(os.getenv("CHECK_INTERVAL_MIN", "5"))
+
+@tasks.loop(minutes=CHECK_INTERVAL_MIN)
+async def release_checker():
+    try:
+        await check_for_new_releases(bot)
+    except Exception as e:
+        logging.error(f"Release checker loop error: {e}")
+
+@release_checker.before_loop
+async def _before_release_checker():
+    await bot.wait_until_ready()
+    # Small delay to let caches / key managers finish init
+    await asyncio.sleep(3)
+
+@bot.event
+async def on_ready():
+    if not getattr(bot, "release_checker_started", False):
+        logging.info(f"🤖 Logged in as {bot.user} (starting release checker every {CHECK_INTERVAL_MIN} min)")
+        try:
+            catchup = await handle_bot_startup_catchup()
+        except Exception as e:
+            logging.error(f"Catch-up init failed: {e}")
+            catchup = False
+        await bot.start_health_logger()
+        # Immediate first cycle (normal)
+        try:
+            await check_for_new_releases(bot, is_catchup=False)
+        except Exception as e:
+            logging.error(f"Initial release check failed: {e}")
+        # Optional catch-up pass
+        if (catchup):
+            try:
+                await check_for_new_releases(bot, is_catchup=True)
+            except Exception as e:
+                logging.error(f"Catch-up cycle failed: {e}")
+        release_checker.start()
+        bot.release_checker_started = True
+        logging.info("✅ Release checker loop started")
+
+# (Ensure bot.run(TOKEN) remains at bottom)
+bot.run(TOKEN)
