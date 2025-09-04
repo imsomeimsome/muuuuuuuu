@@ -9,15 +9,30 @@ def _indef_article(word: str) -> str:
         return "a"
     return "an" if word[0].lower() in "aeiou" else "a"
 
-def create_music_embed(platform, artist_name, title, url, release_date, cover_url, features,
-                       track_count, duration, repost, genres=None, content_type=None, custom_color=None):
-    """Create an embed for a music release (Spotify or SoundCloud) with correct playlist vs album/EP labeling."""
+def create_music_embed(
+    platform,
+    artist_name,
+    title,
+    url,
+    release_date,
+    cover_url,
+    features,
+    track_count,
+    duration,
+    repost,
+    genres=None,
+    content_type=None,
+    custom_color=None,
+    return_heading: bool = False
+):
+    """Create an embed for a music release (Spotify or SoundCloud) with correct playlist vs album/EP labeling.
+       If return_heading=True returns (heading_text, release_type, embed)."""
     release_type = "track"
     title_lower = (title or "").lower()
     is_sc = platform.lower() == "soundcloud"
     is_playlist_url = bool(url and "/sets/" in url)
-    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
-    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+    explicit_album = any(k in title_lower for k in ["album", " lp", " record"])
+    explicit_ep = any(k in title_lower for k in [" ep", "extended play"])
     is_deluxe = "deluxe" in title_lower
 
     if content_type == "playlist" or (is_sc and is_playlist_url):
@@ -37,11 +52,15 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
         else:
             if not is_sc:
                 if track_count:
-                    if track_count >= 7:
-                        release_type = "album"
-                    elif track_count >= 2:
-                        release_type = "ep"
-                    else:
+                    try:
+                        tc = int(track_count)
+                        if tc >= 7:
+                            release_type = "album"
+                        elif tc >= 2:
+                            release_type = "ep"
+                        else:
+                            release_type = "track"
+                    except Exception:
                         release_type = "track"
                 else:
                     release_type = content_type or "track"
@@ -49,8 +68,9 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
                 release_type = content_type or "track"
 
     color = custom_color if custom_color is not None else (0x1DB954 if platform.lower() == "spotify" else 0xfa5a02)
+    heading = f"🎵 {artist_name} released {_indef_article(release_type)} {release_type}!"
     embed = discord.Embed(
-        title=f"🎵 {artist_name} released {_indef_article(release_type)} {release_type}!",
+        title=heading,
         description=f"[{title}]({url})" if title and url else (title or url or "Release"),
         color=color
     )
@@ -61,45 +81,40 @@ def create_music_embed(platform, artist_name, title, url, release_date, cover_ur
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Release date handling (avoid misleading relative for date-only)
-    try:
-        if release_date:
-            rd = release_date.strip()
-            date_only = 'T' not in rd
-            release_timestamp = None
-            if not date_only:
-                rd_norm = rd.replace('Z', '+0000')
-                for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
-                    try:
-                        release_timestamp = int(datetime.strptime(rd_norm, fmt).timestamp())
-                        break
-                    except ValueError:
-                        continue
-            if release_timestamp and not date_only:
-                embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+    # Release date (show raw date for date-only strings)
+    if release_date:
+        rd = str(release_date).strip()
+        if 'T' in rd:
+            rd_norm = rd.replace('Z', '+0000')
+            ts = None
+            for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+                try:
+                    ts = int(datetime.strptime(rd_norm, fmt).timestamp())
+                    break
+                except Exception:
+                    continue
+            if ts:
+                embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
             else:
-                # Show literal calendar date (prevents timezone shift confusion)
                 embed.add_field(name="Release Date", value=rd[:10], inline=True)
-    except Exception as e:
-        logging.debug(f"Release date parse issue ({release_date}): {e}")
+        else:
+            embed.add_field(name="Release Date", value=rd[:10], inline=True)
 
-    # Genres (with plural & truncation safety)
     if genres:
         if isinstance(genres, list):
             clean = [g for g in genres if g]
             if clean:
-                text = ', '.join(clean)
-                field = "Genres" if len(clean) > 1 else "Genre"
-                embed.add_field(name=field, value=text[:1024], inline=True)
+                embed.add_field(name="Genres" if len(clean) > 1 else "Genre", value=', '.join(clean)[:1024], inline=True)
         else:
             gtxt = str(genres).strip()
             if gtxt and gtxt.lower() != "none":
                 embed.add_field(name="Genre", value=gtxt[:1024], inline=True)
 
     if cover_url:
-        high_res_cover = get_highest_quality_artwork(cover_url)
-        embed.set_thumbnail(url=high_res_cover or cover_url)
+        embed.set_thumbnail(url=cover_url)
 
+    if return_heading:
+        return heading, release_type, embed
     return embed
 
 def create_repost_embed(
