@@ -1270,6 +1270,35 @@ async def stats(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"/stats error: {e}")
         await interaction.response.send_message("❌ Failed to fetch stats.", ephemeral=True)
+
+@bot.tree.command(name="list", description="List your tracked artists")
+async def list_artists(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if not is_user_registered(user_id):
+        await interaction.response.send_message("🚫 Use /register first.", ephemeral=True)
+        return
+    try:
+        records = get_artists_by_owner(user_id)
+    except Exception as e:
+        logging.error(f"/list fetch error: {e}")
+        await interaction.response.send_message("❌ Failed to load your artists.", ephemeral=True)
+        return
+    if not records:
+        await interaction.response.send_message("You are not tracking any artists.", ephemeral=True)
+        return
+    lines = []
+    for r in records:
+        platform = r.get('platform') or 'unknown'
+        name = r.get('artist_name') or 'Unknown'
+        lines.append(f"{get_platform_emoji(platform)} {name} ({platform})")
+    lines.sort()
+    max_lines = 25
+    shown = lines[:max_lines]
+    more = len(lines) - max_lines
+    msg = "🎧 Your tracked artists (" + str(len(lines)) + "):\n" + "\n".join(shown)
+    if more > 0:
+        msg += f"\n…and {more} more."
+    await interaction.response.send_message(msg, ephemeral=True)
         
 # (Ensure bot.run(TOKEN) remains at bottom)
 bot.run(TOKEN)
