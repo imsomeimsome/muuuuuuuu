@@ -273,9 +273,9 @@ def create_like_embed(
     platform,
     liked_by,
     title,
-    artist_name,
-    url,
-    release_date,
+    artist_name=None,
+    url=None,
+    release_date=None,
     liked_date=None,
     cover_url=None,
     features=None,
@@ -283,117 +283,119 @@ def create_like_embed(
     duration=None,
     genres=None,
     content_type=None,
-    upload_date=None,
-    original_artist=None  # NEW (optional; matches create_repost_embed usage)
+    upload_date=None,      # kept (not shown; reserved for future diff logic)
+    original_artist=None
 ):
-    """Create an embed for a liked track."""
-    # Enhanced release type detection
-    title_lower = (title or "").lower()
-    is_playlist_url = bool(url and "/sets/" in url)
-    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
-    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
-    is_playlist = (content_type == "playlist") or is_playlist_url
+    """Create an embed for a liked item (track / album / ep / playlist) mirroring repost embed styling."""
+    display_artist = artist_name or original_artist or "Unknown"
 
-    if is_playlist:
-        if explicit_album:
-            release_type = "album"
-        elif explicit_ep:
-            release_type = "ep"
-        else:
-            release_type = "playlist"
-    else:
-        # Track logic only; do not auto promote by track_count for SC likes
-        if explicit_album:
-            release_type = "album"
-        elif explicit_ep:
-            release_type = "ep"
-        else:
-            release_type = "track"
+    # Normalize track_count
+    if not track_count or track_count == 0:
+        track_count = 1
 
-    # Format duration to include hours if needed
+    # Duration formatting (mirror repost embed hour support)
     if duration and ":" in duration:
         try:
-            minutes, seconds = map(int, duration.split(":"))
-            if minutes >= 60:
-                hours = minutes // 60
-                minutes = minutes % 60
-                duration = f"{hours}:{minutes:02d}:{seconds:02d}"
-            else:
-                duration = f"{minutes}:{seconds:02d}"
+            parts = duration.split(":")
+            if len(parts) == 2:
+                minutes, seconds = map(int, parts)
+                if minutes >= 60:
+                    hours = minutes // 60
+                    minutes = minutes % 60
+                    duration = f"{hours}:{minutes:02d}:{seconds:02d}"
+                else:
+                    duration = f"{minutes}:{seconds:02d}"
+            elif len(parts) == 3:
+                # Already H:MM:SS
+                pass
         except ValueError:
-            # Keep original duration if parsing fails
             pass
-    
-    # Convert timestamps
-    try:
-        release_timestamp = None
-        if release_date:
-            release_timestamp = int(datetime.strptime(
-                release_date.replace('Z', '+0000'), 
-                '%Y-%m-%dT%H:%M:%S%z'
-            ).timestamp())
-    except Exception as e:
-        print(f"Error parsing release date: {e}")
-        release_timestamp = None
 
-    try:
-        upload_timestamp = None
-        if upload_date:
-            upload_timestamp = int(datetime.strptime(
-                upload_date.replace('Z', '+0000'), 
-                '%Y-%m-%dT%H:%M:%S%z'
-            ).timestamp())
-    except Exception as e:
-        print(f"Error parsing upload date: {e}")
-        upload_timestamp = None
-        
-    try:
-        like_timestamp = None
-        if liked_date:
-            like_timestamp = int(datetime.strptime(
-                liked_date.replace('Z', '+0000'),
-                '%Y-%m-%dT%H:%M:%S%z'
-            ).timestamp())
-    except Exception as e:
-        print(f"Error parsing like date: {e}")
-        like_timestamp = None
+    # Parse timestamps -> Discord relative format
+    release_timestamp = None
+    if release_date:
+        rd = str(release_date).replace('Z', '+0000')
+        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+            try:
+                release_timestamp = int(datetime.strptime(rd, fmt).timestamp())
+                break
+            except Exception:
+                continue
+        if release_timestamp is None:
+            try:
+                release_timestamp = int(datetime.strptime(str(release_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                release_timestamp = None
+
+    like_timestamp = None
+    if liked_date:
+        ld = str(liked_date).replace('Z', '+0000')
+        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
+            try:
+                like_timestamp = int(datetime.strptime(ld, fmt).timestamp())
+                break
+            except Exception:
+                continue
+        if like_timestamp is None:
+            try:
+                like_timestamp = int(datetime.strptime(str(liked_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                like_timestamp = None
+
+    # Determine type (prefer upstream classification)
+    like_type = (content_type or "").lower()
+    if like_type not in ("album", "ep", "playlist", "track"):
+        title_lower = (title or "").lower()
+        is_playlist_url = bool(url and "/sets/" in url)
+        explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
+        explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+        if is_playlist_url:
+            if explicit_album:
+                like_type = "album"
+            elif explicit_ep:
+                like_type = "ep"
+            else:
+                like_type = "playlist"
+        else:
+            if explicit_album:
+                like_type = "album"
+            elif explicit_ep:
+                like_type = "ep"
+            else:
+                like_type = "track"
 
     embed = discord.Embed(
-        title=f"❤️ __{liked_by}__ liked {_indef_article(release_type)} {release_type}!",
-        description=f"[{title}]({url})",
+        title=f"❤️ {liked_by} liked {_indef_article(like_type)} {like_type}!",
+        description=f"[{title}]({url})" if title and url else (title or url or "Like"),
         color=0xfa5a02
     )
 
     # First row: By, Tracks, Duration
-    display_artist = artist_name or original_artist or "Unknown"
     embed.add_field(name="By", value=display_artist, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Second row: Release Date, Like Date
+    # Second row: Release Date, Liked
     if release_timestamp:
         embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
-    # Third row: Upload Date (if different from release date)
-    if upload_timestamp: # and upload_timestamp != release_timestamp
-        embed.add_field(name="Uploaded", value=f"<t:{upload_timestamp}:R>", inline=True)
-
-    # Genres (mirror approach used in repost embed but only if provided)
+    # Always add Genre(s) (even if None) to mirror repost embed
+    genre_text = "None"
+    genre_name = "Genre"
     if genres:
-        if isinstance(genres, list):
-            genre_text = ', '.join(filter(None, genres))
-        else:
-            genre_text = str(genres)
-        if genre_text and genre_text.lower() != 'none':
-            # Pluralize if multiple genres
-            field_name = 'Genres' if ',' in genre_text else 'Genre'
-            embed.add_field(name=field_name, value=genre_text, inline=True)
+        if isinstance(genres, list) and genres:
+            genre_text = ", ".join(filter(None, genres))
+            if len(genres) > 1:
+                genre_name = "Genres"
+        elif isinstance(genres, str) and genres.strip():
+            genre_text = genres.strip()
+    embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    # Thumbnail
+    # High-res thumbnail
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)

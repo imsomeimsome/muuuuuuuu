@@ -1069,14 +1069,15 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "artist_name": original.get("user", {}).get("username"),
                 "url": original.get("permalink_url"),
                 "upload_date": original.get("created_at"),
-                "release_date": original.get("display_date") or original.get("created_at"),
+                # Use created_at (same as reposts) so Release Date matches repost behavior
+                "release_date": original.get("created_at"),
                 "liked_date": like_date,
                 "cover_url": original.get("artwork_url"),
                 "features": extract_features(original.get("title", "")),
                 "track_count": original.get("track_count", 1),
                 "duration": duration,
                 "genres": genres,
-                "content_type": content_type  # now reliably album / ep / playlist / track
+                "content_type": content_type  # album / ep / playlist / track
             })
         set_cache(cache_key, json.dumps(likes), ttl=_jittered_ttl(60, 15))
         return likes
