@@ -1415,6 +1415,245 @@ async def rotatekeys_command(interaction: discord.Interaction, platform: Literal
             await interaction.followup.send(msg, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Error rotating keys: {e}", ephemeral=True)
-        
+
+
+@bot.tree.command(name="setchannel")
+@app_commands.checks.has_permissions(administrator=True)
+async def setchannel_command(interaction: discord.Interaction, 
+                            type: Literal["spotify", "soundcloud", "logs", "commands"],
+                            channel: discord.TextChannel):
+    set_channel(str(interaction.guild.id), type, str(channel.id))
+    await bot.log_event(f"Channel set: {type} => #{channel.name}")
+    await interaction.response.send_message(
+        f"✅ {type.capitalize()} messages to {channel.mention}", ephemeral=True)
+
+@bot.tree.command(name="trackchange")
+@require_registration
+async def trackchange_command(interaction: discord.Interaction,
+                            artist_identifier: str,
+                            release_type: Literal["album", "single", "ep", "repost"],
+                            state: Literal["on", "off"]):
+    user_id = interaction.user.id
+    artist = get_artist_by_identifier(artist_identifier, user_id)
+
+    if not artist:
+        await interaction.response.send_message("❌ Artist not found", ephemeral=True)
+        return
+
+    set_release_prefs(user_id, artist['artist_id'], release_type, state)
+    await interaction.response.send_message(
+        f"✅ {artist['artist_name']} will {'now' if state == 'on' else 'no longer'} track {release_type}s",
+        ephemeral=True)
+
+@bot.tree.command(name="info", description="Show bot info and stats.")
+@require_registration
+async def info_command(interaction: discord.Interaction):
+    total_artists = get_global_artist_count()
+    stats = get_release_stats()
+    message = (
+        f"**ℹ️ Bot Info**\n"
+        f"Artists Tracked: **{total_artists}**\n"
+        f"Releases: **{stats['total']}**\n"
+        f"💿 Albums: {stats['albums']}\n"
+        f"🎶 EPs: {stats['eps']}\n"
+        f"🎵 Singles: {stats['singles']}\n"
+        f"📀 Deluxes: {stats['deluxes']}\n"
+    )
+    await interaction.response.send_message(message)
+
+@bot.tree.command(name="key", description="Show release tracking key for what the bot posts.")
+async def key_command(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📚 Release Key",
+        description="Here's what each release type and field means:",
+        color=0x7289DA
+    )
+
+    embed.add_field(name="💿 Album", value="7 or more tracks released together or marked as album/mixtape.", inline=False)
+    embed.add_field(name="🎶 EP", value="2 to 6 tracks released together or marked as EP.", inline=False)
+    embed.add_field(name="🎵 Single", value="Only 1 track released.", inline=False)
+    embed.add_field(name="📑 Playlist", value="Newly posted playlist by artist.", inline=False)
+    embed.add_field(name="❤️ Like", value="Track liked by the artist.", inline=False)
+    embed.add_field(name="📢 Repost", value="Release reposted by the artist (not uploaded by them).", inline=False)
+    embed.add_field(name="Features", value="Artists featured in the release, if detected.", inline=False)
+    embed.add_field(name="Genres", value="Genres of the release if available.", inline=False)
+    embed.add_field(name="Tracks", value="Total tracks in release/playlist.", inline=False)
+    embed.add_field(name="Released on", value="Release date from SoundCloud or Spotify.", inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="channels", description="Show the current channels for releases, logs, and commands.")
+@require_registration
+@app_commands.checks.has_permissions(manage_guild=True)
+async def channels_command(interaction: discord.Interaction):
+    guild = interaction.guild
+    guild_id = str(guild.id)
+
+    platforms = {
+        "spotify": "🟢 Spotify",
+        "soundcloud": "🎧 SoundCloud",
+        "logs": "🪵 Logs",
+        "commands": "💬 Commands"
+    }
+
+    lines = []
+    for key, label in platforms.items():
+        channel_id = get_channel(guild_id, key)
+        if channel_id:
+            channel = bot.get_channel(int(channel_id))
+            channel_mention = channel.mention if channel else f"`{channel_id}`"
+        else:
+            channel_mention = "*Not Set*"
+        lines.append(f"{label} — {channel_mention}")
+
+    embed = discord.Embed(
+        title="📡 Configured Channels",
+        description="\n".join(lines),
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="resetbot", description="Reset all bot data and state.")
+@app_commands.checks.has_permissions(administrator=True)
+async def reset_bot_command(interaction: discord.Interaction):
+    try:
+        # Clear cache
+        clear_all_cache()
+        initialize_fresh_database()
+
+        # Reset activity tracking
+        from database_utils import reset_activity_tracking
+        reset_activity_tracking()
+
+        # Reset bot state
+        await reset_bot_state()
+
+        await interaction.response.send_message("✅ Bot data and state reset successfully.")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Failed to reset bot: {e}")
+
+@bot.tree.command(name="testcache", description="Test SQLite cache.")
+async def test_cache_command(interaction: discord.Interaction):
+    try:
+        set_cache("test_key", "test_value", ttl=60)
+        value = get_cache("test_key")
+        await interaction.response.send_message(f"✅ Cache is working. Test value: {value}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Cache error: {e}")
+    
+@bot.tree.command(name="checkscid", description="Verify SoundCloud client ID is valid")
+@require_registration
+async def check_scid_command(interaction: discord.Interaction):
+    from soundcloud_utils import verify_client_id, refresh_client_id
+    await interaction.response.defer(ephemeral=True)
+    if verify_client_id():
+        await interaction.followup.send("✅ SoundCloud client ID appears valid.")
+    else:
+        new_client_id = refresh_client_id()
+        if new_client_id:
+            await interaction.followup.send(f"✅ Refreshed SoundCloud client ID: `{new_client_id}`")
+        else:
+            await interaction.followup.send("❌ Failed to refresh SoundCloud client ID. Verify the ID manually.")
+
+@bot.tree.command(name="import", description="Import previously exported tracked artists")
+@app_commands.describe(file="Upload a previously exported JSON file")
+async def import_command(interaction: discord.Interaction, file: discord.Attachment):
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        if not file.filename.endswith(".json"):
+            await interaction.followup.send("❌ File must be a `.json` export.")
+            return
+
+        contents = await file.read()
+        data = json.loads(contents.decode())
+
+        owner_id = interaction.user.id
+        guild_id = str(interaction.guild.id) if interaction.guild else None
+
+        added_count = import_artists_from_json(data, owner_id, guild_id)
+        await interaction.followup.send(f"✅ Imported {added_count} artists.")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to import: {e}")
+
+@bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually.")
+@app_commands.describe(url="A SoundCloud artist or release URL")
+@require_registration
+async def debug_soundcloud(interaction: discord.Interaction, url: str):
+    from soundcloud_utils import get_soundcloud_release_info
+    await interaction.response.defer()
+
+    try:
+        info = get_soundcloud_release_info(url)
+        if info is None:
+            await interaction.followup.send("❌ Could not fetch release info. Check the URL or client ID.")
+            return
+
+        embed = discord.Embed(
+            title=info["title"],
+            description=f"By {info['artist_name']}\nReleased: {info['release_date']}\nTracks: {info['track_count']}",
+            color=discord.Color.orange()
+        )
+        embed.set_thumbnail(url=info["cover_url"])
+        embed.add_field(name="Duration", value=info["duration"], inline=True)
+        embed.add_field(name="Features", value=info["features"], inline=True)
+        embed.add_field(name="Genres", value=", ".join(info["genres"]) or "None", inline=False)
+        embed.add_field(name="Repost?", value="📌 Yes" if info.get("repost") else "No", inline=True)
+        embed.url = info["url"]
+
+        await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+@bot.tree.command(name="export", description="Export your list of tracked artists.")
+@require_registration
+async def export_command(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    artists = get_artists_by_owner(user_id)
+    if not artists:
+        await interaction.response.send_message("📭 You aren't currently tracking any artists.")
+        return
+    # Build CSV lines
+    lines = ["Platform,Artist Name,Artist ID,Artist URL,Last Release"]
+    for artist in artists:
+        lines.append(f"{artist['platform']},{artist['artist_name']},{artist['artist_id']},{artist['artist_url']},{artist['last_release_date']}")
+    content = "\n".join(lines)
+    # Save to file
+    filename = f"tracked_artists_{user_id}.csv"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(content)
+    file = discord.File(filename, filename=filename)
+    await interaction.response.send_message("📤 Here's your exported list of tracked artists:", file=file)
+
+@bot.tree.command(name="userinfo", description="Show your or another user's stats.")
+@app_commands.describe(user="Optional: another user")
+@require_registration
+async def userinfo_command(interaction: discord.Interaction, user: typing.Optional[discord.User] = None):
+    await interaction.response.defer()
+    target = user or interaction.user
+    requester = interaction.user
+    if user and user != requester and not requester.guild_permissions.administrator:
+        await interaction.followup.send("❌ Admins only.")
+        return
+    if not is_user_registered(target.id):
+        await interaction.followup.send(f"❌ {target.mention} isn't registered.")
+        return
+    username = get_username(target.id)
+    tracked = len(get_artists_by_owner(target.id))
+    untracked = get_untrack_count(target.id)
+    registered_at = get_user_registered_at(target.id) or "Unknown"
+    embed = discord.Embed(title=f"📊 {username}'s Stats", color=discord.Color.blurple())
+    embed.add_field(name="User", value=f"{target.mention}", inline=True)
+    embed.add_field(name="Registered", value=registered_at, inline=True)
+    embed.add_field(name="Tracked Artists", value=tracked, inline=True)
+    embed.add_field(name="Untracked Artists", value=untracked, inline=True)
+    if user is None and requester.guild_permissions.administrator:
+        total_artists = get_global_artist_count()
+        embed.add_field(name="🌐 Server Total Artists", value=total_artists, inline=False)
+    await interaction.followup.send(embed=embed)
+
+
 # (Ensure bot.run(TOKEN) remains at bottom)
 bot.run(TOKEN)
