@@ -971,28 +971,25 @@ def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
 
 def classify_sc_playlist(original: dict) -> str:
     """
-    Classify a SoundCloud playlist object as album / ep / playlist using:
-    1. set_type / playlist_type field (authoritative)
-    2. title keyword heuristics
-    3. track_count fallback
+    Classify a SoundCloud playlist strictly by SoundCloud's own type:
+    - If set_type/playlist_type is 'album' or 'ep' -> return that
+    - Otherwise treat as a regular 'playlist'
+    Never infer album/ep by track count or title to avoid mislabeling.
     """
-    set_type = (original.get('set_type') or original.get('playlist_type') or '').strip().lower()
-    if set_type in ('album', 'ep'):
-        return set_type
-    title_lower = (original.get('title') or '').lower()
-    # Keyword heuristics
-    if any(k in title_lower for k in [' album', ' lp', ' record']) or title_lower.startswith('album '):
-        return 'album'
-    if any(k in title_lower for k in [' ep', 'extended play']) or title_lower.startswith('ep '):
-        return 'ep'
-    # Track count heuristic (only if we have a count)
-    tc = original.get('track_count') or len(original.get('tracks') or [])
-    if isinstance(tc, int):
-        if tc >= 7:
-            return 'album'
-        if 2 <= tc <= 6:
-            return 'ep'
-    return 'playlist'
+    try:
+        if (original.get('kind') or '').lower() != 'playlist':
+            return 'track'
+        set_type = (original.get('set_type') or original.get('playlist_type') or '').strip().lower()
+        # Map known set types; default to playlist
+        mapping = {
+            'album': 'album',
+            'ep': 'ep',
+            'single': 'track',        # rare on playlists; map to track if encountered
+            'compilation': 'album'    # treat compilation as album for embeds
+        }
+        return mapping.get(set_type, 'playlist')
+    except Exception:
+        return 'playlist'
 
 def get_soundcloud_likes_info(artist_url, force_refresh=False):
     """Fetch and process liked tracks/playlists from a SoundCloud user with playlist resolve batching.
@@ -1036,8 +1033,8 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 continue
             content_type = "track"
             tracks_data = None
-            # Batch resolve for playlists
             if original.get('kind') == 'playlist':
+                # STRICT classification: only use SoundCloud's set_type/playlist_type
                 content_type = classify_sc_playlist(original)
             like_date = item.get("created_at")
             if not like_date:
@@ -1137,7 +1134,8 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     continue
                 content_type = 'track'
                 if original.get('kind') == 'playlist':
-                    content_type = classify_sc_playlist(original)  # NEW robust classification
+                    # STRICT classification: only use SoundCloud's set_type/playlist_type
+                    content_type = classify_sc_playlist(original)
                 repost_date = item.get("created_at")
                 if not repost_date:
                     continue
