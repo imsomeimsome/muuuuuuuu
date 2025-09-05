@@ -1147,12 +1147,18 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
         except Exception as e:
             logging.error(f"     ❌ Unhandled SoundCloud artist error for {artist_name}: {e}")
             errors.append({'type':'SoundCloud Artist','message':f'{artist_name}: {e}'})
-            # Ensure we still advance the release check timestamp to avoid re-looping this broken artist every cycle
+            # keep existing best-effort update (ok to keep)
             try:
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
             except Exception:
                 pass
             continue
+        finally:
+            # ALWAYS mark the check time for this artist (success or not)
+            try:
+                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+            except Exception as up_e:
+                logging.debug(f"update_last_release_check failed for {artist_name}: {up_e}")
     return counts, errors
 
 CHECK_INTERVAL_MIN = int(os.getenv("CHECK_INTERVAL_MIN", "5"))
