@@ -1546,14 +1546,18 @@ async def test_cache_command(interaction: discord.Interaction):
 async def check_scid_command(interaction: discord.Interaction):
     from soundcloud_utils import verify_client_id, refresh_client_id
     await interaction.response.defer(ephemeral=True)
-    if verify_client_id():
-        await interaction.followup.send("✅ SoundCloud client ID appears valid.")
-    else:
+    try:
+        if verify_client_id():
+            await interaction.followup.send("✅ SoundCloud client ID appears valid.")
+            return
         new_client_id = refresh_client_id()
         if new_client_id:
             await interaction.followup.send(f"✅ Refreshed SoundCloud client ID: `{new_client_id}`")
         else:
-            await interaction.followup.send("❌ Failed to refresh SoundCloud client ID. Verify the ID manually.")
+            await interaction.followup.send("❌ Failed to refresh SoundCloud client ID. Try again later or set it manually.")
+    except Exception as e:
+        # Ensure the command never raises
+        await interaction.followup.send(f"❌ Check failed: {e}")
 
 @bot.tree.command(name="import", description="Import previously exported tracked artists")
 @app_commands.describe(file="Upload a previously exported JSON file")
@@ -1615,17 +1619,25 @@ async def export_command(interaction: discord.Interaction):
     if not artists:
         await interaction.response.send_message("📭 You aren't currently tracking any artists.")
         return
-    # Build CSV lines
-    lines = ["Platform,Artist Name,Artist ID,Artist URL,Last Release"]
-    for artist in artists:
-        lines.append(f"{artist['platform']},{artist['artist_name']},{artist['artist_id']},{artist['artist_url']},{artist['last_release_date']}")
-    content = "\n".join(lines)
-    # Save to file
-    filename = f"tracked_artists_{user_id}.csv"
+
+    # Build JSON payload compatible with /import (database_utils.import_artists_from_json)
+    payload = []
+    for a in artists:
+        payload.append({
+            "platform": a.get("platform"),
+            "artist_id": a.get("artist_id"),
+            "artist_name": a.get("artist_name"),
+            "artist_url": a.get("artist_url"),
+            "genres": a.get("genres") or [],
+            "last_release_date": a.get("last_release_date"),
+        })
+
+    filename = f"tracked_artists_{user_id}.json"
     with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+
     file = discord.File(filename, filename=filename)
-    await interaction.response.send_message("📤 Here's your exported list of tracked artists:", file=file)
+    await interaction.response.send_message("📤 Here's your exported list (JSON):", file=file)
 
 @bot.tree.command(name="userinfo", description="Show your or another user's stats.")
 @app_commands.describe(user="Optional: another user")

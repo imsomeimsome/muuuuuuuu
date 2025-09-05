@@ -279,8 +279,15 @@ def get_global_artist_count():
 
 def set_channel(guild_id, platform, channel_id):
     with get_connection() as conn:
-        conn.execute("REPLACE INTO channels(guild_id, platform, channel_id) VALUES (?,?,?)", (str(guild_id), platform, str(channel_id)))
-
+        conn.execute(
+            """
+            INSERT INTO channels (guild_id, platform, channel_id, created_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_id, platform) DO UPDATE SET
+                channel_id = excluded.channel_id
+            """,
+            (str(guild_id), platform, str(channel_id)),
+        )
 
 def get_channel(guild_id, platform):
     with get_connection() as conn:
@@ -371,10 +378,51 @@ def add_release(user_id, artist_id, release_type, release_date):
 
 # ---------- Activity Logging ----------
 
-def log_activity(user_id, action, details=None, guild_id=None):
-    with get_connection() as conn:
-        conn.execute("INSERT INTO activity_logs(user_id, action, timestamp, details) VALUES (?,?,?,?)", (str(user_id), action, datetime.now(timezone.utc).isoformat(), json.dumps({"details":details, "guild_id":guild_id})))
+def _ensure_activity_logs_allows_pref_change():
+    """Make sure activity_logs.action CHECK includes 'pref_change' (SQLite requires table rebuild)."""
+    try:
+        with get_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='activity_logs'")
+            row = cur.fetchone()
+            ddl = (row[0] or "") if row else ""
+            if "pref_change" in ddl:
+                return  # already OK
 
+            logging.info("Migrating activity_logs to allow 'pref_change' action…")
+            cur.execute("PRAGMA foreign_keys=OFF;")
+            cur.execute("BEGIN;")
+            cur.execute("""
+                CREATE TABLE activity_logs_new (
+                    user_id   TEXT NOT NULL,
+                    action    TEXT NOT NULL CHECK (action IN (
+                        'track','untrack','register','channel_set',
+                        'import','export','bot_startup','bot_shutdown','pref_change'
+                    )),
+                    timestamp TEXT NOT NULL,
+                    details   TEXT
+                );
+            """)
+            cur.execute("""
+                INSERT INTO activity_logs_new (user_id, action, timestamp, details)
+                SELECT user_id, action, timestamp, details FROM activity_logs;
+            """)
+            cur.execute("DROP TABLE activity_logs;")
+            cur.execute("ALTER TABLE activity_logs_new RENAME TO activity_logs;")
+            cur.execute("COMMIT;")
+            cur.execute("PRAGMA foreign_keys=ON;")
+            logging.info("✅ activity_logs migration complete.")
+    except Exception as e:
+        logging.error(f"activity_logs migration failed: {e}")
+
+def log_activity(user_id, action, details=None, guild_id=None):
+    _ensure_activity_logs_allows_pref_change()  # NEW: ensure schema supports 'pref_change'
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO activity_logs(user_id, action, timestamp, details) VALUES (?,?,?,?)",
+            (str(user_id), action, datetime.now(timezone.utc).isoformat(),
+             json.dumps({"details": details, "guild_id": guild_id}))
+        )
 
 def get_untrack_count(user_id):
     with get_connection() as conn:

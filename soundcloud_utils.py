@@ -627,43 +627,76 @@ HEADERS = {
 
 # Try to refresh client_id automatically when unauthorized
 def refresh_client_id():
-    """Attempt to fetch a working SoundCloud client ID."""
+    """Attempt to fetch a working SoundCloud client ID by scanning asset scripts. Returns new id or None."""
     global CLIENT_ID
     try:
-        for attempt in range(3):  # Retry up to 3 times
-            logging.info(f"🔄 Attempting to refresh SoundCloud client ID (Attempt {attempt + 1})...")
-            html = requests.get("https://soundcloud.com", headers=HEADERS, timeout=10).text
-            match = re.search(r"client_id\s*:\s*\"([a-zA-Z0-9_-]{32})\"", html)
-            if match:
-                CLIENT_ID = match.group(1)
-                logging.info(f"✅ Refreshed SoundCloud client ID: {CLIENT_ID}")
-                return CLIENT_ID
-            logging.warning(f"⚠️ Attempt {attempt + 1}: Failed to find a new SoundCloud client ID.")
-            time.sleep(2)  # Wait before retrying
-        logging.error("❌ Failed to find a new SoundCloud client ID after multiple attempts.")
-        raise ValueError("Failed to refresh SoundCloud client ID.")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Error refreshing SoundCloud client ID: {e}")
-        raise ValueError("Error during client ID refresh.")
+        logging.info("🔄 Attempting to refresh SoundCloud client ID…")
+        html = requests.get("https://soundcloud.com", headers=HEADERS, timeout=10).text
+        # Collect candidate asset script URLs
+        script_urls = set(re.findall(r'src="(https://[^"]+sndcdn\.com/[^"]+\.js)"', html))
+        # Also check inline HTML for client_id
+        patterns = [
+            r'client_id\s*[:=]\s*"([A-Za-z0-9]{32})"',
+            r'clientId\s*[:=]\s*"([A-Za-z0-9]{32})"',
+            r'"client_id"\s*:\s*"([A-Za-z0-9]{32})"',
+            r'"clientId"\s*:\s*"([A-Za-z0-9]{32})"',
+        ]
+        def _find_in_text(text: str):
+            for pat in patterns:
+                m = re.search(pat, text)
+                if m:
+                    return m.group(1)
+            return None
 
-# Quick helper to verify the configured client ID works
-def verify_client_id():
-    """Verify if the SoundCloud CLIENT_ID is valid."""
-    test_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com&client_id={CLIENT_ID}"
-    try:
-        response = requests.get(test_url, headers=HEADERS, timeout=10)
-        if response.status_code == 200:
-            logging.info("✅ SoundCloud CLIENT_ID is valid.")
-            return True
-        elif response.status_code == 403:
-            logging.warning("⚠️ SoundCloud CLIENT_ID is forbidden (403).")
-            return False
-        else:
-            logging.error(f"❌ SoundCloud CLIENT_ID verification failed with status code {response.status_code}.")
-            return False
+        cid = _find_in_text(html)
+        if cid:
+            CLIENT_ID = cid
+            logging.info(f"✅ Refreshed SoundCloud client ID: {CLIENT_ID}")
+            return CLIENT_ID
+
+        # Scan up to first 8 asset scripts for client_id
+        for i, js_url in enumerate(list(script_urls)[:8], start=1):
+            try:
+                js = requests.get(js_url, headers=HEADERS, timeout=10).text
+                cid = _find_in_text(js)
+                if cid:
+                    CLIENT_ID = cid
+                    logging.info(f"✅ Refreshed SoundCloud client ID (from asset {i}): {CLIENT_ID}")
+                    return CLIENT_ID
+            except requests.RequestException:
+                continue
+
+        logging.error("❌ Failed to find a new SoundCloud client ID after scanning assets.")
+        return None
     except requests.RequestException as e:
-        logging.error(f"❌ Error verifying SoundCloud CLIENT_ID: {e}")
+        logging.error(f"❌ Error refreshing SoundCloud client ID: {e}")
+        return None
+
+def verify_client_id():
+    """Verify if the SoundCloud CLIENT_ID is valid by hitting a stable API endpoint."""
+    global CLIENT_ID
+    if not CLIENT_ID:
+        logging.warning("⚠️ No SoundCloud CLIENT_ID configured.")
         return False
+    test_urls = [
+        f"https://api-v2.soundcloud.com/search/tracks?q=hello&limit=1&client_id={CLIENT_ID}",
+        f"https://api-v2.soundcloud.com/search/users?q=hello&limit=1&client_id={CLIENT_ID}",
+    ]
+    for url in test_urls:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                logging.info("✅ SoundCloud CLIENT_ID is valid.")
+                return True
+            if resp.status_code in (401, 403):
+                logging.warning(f"⚠️ SoundCloud CLIENT_ID unauthorized (HTTP {resp.status_code}).")
+                return False
+            # 404 and others can be endpoint-related; try next
+            logging.debug(f"Client ID check got HTTP {resp.status_code} for {url}, retrying alternative endpoint…")
+        except requests.RequestException as e:
+            logging.debug(f"Client ID check error on {url}: {e}")
+    logging.error("❌ SoundCloud CLIENT_ID verification failed on all test endpoints.")
+    return False
 
 # --- Core URL Handling ---
 
