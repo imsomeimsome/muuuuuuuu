@@ -1229,7 +1229,7 @@ async def track(interaction: discord.Interaction, artist_url: str):
             await interaction.response.send_message("❌ Could not resolve that artist.", ephemeral=True)
             return
         artist_id = str(artist_info.get("id"))
-        if artist_exists(artist_id, platform):
+        if artist_exists(platform, artist_id, user_id):
             await interaction.response.send_message("ℹ️ Already tracking that artist.", ephemeral=True)
             return
         add_artist(
