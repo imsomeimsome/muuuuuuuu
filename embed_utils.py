@@ -269,9 +269,24 @@ def create_repost_embed(
 
     return embed
 
-def create_like_embed(platform, liked_by, title, artist_name, url, release_date, liked_date=None, cover_url=None, features=None, track_count=None, duration=None, genres=None, content_type=None, upload_date=None):
+def create_like_embed(
+    platform,
+    liked_by,
+    title,
+    artist_name,
+    url,
+    release_date,
+    liked_date=None,
+    cover_url=None,
+    features=None,
+    track_count=None,
+    duration=None,
+    genres=None,
+    content_type=None,
+    upload_date=None,
+    original_artist=None  # NEW (optional; matches create_repost_embed usage)
+):
     """Create an embed for a liked track."""
-    
     # Enhanced release type detection
     title_lower = (title or "").lower()
     is_playlist_url = bool(url and "/sets/" in url)
@@ -350,7 +365,8 @@ def create_like_embed(platform, liked_by, title, artist_name, url, release_date,
     )
 
     # First row: By, Tracks, Duration
-    embed.add_field(name="By", value=artist_name, inline=True)
+    display_artist = artist_name or original_artist or "Unknown"
+    embed.add_field(name="By", value=display_artist, inline=True)
     if track_count:
         embed.add_field(name="Tracks", value=track_count, inline=True)
     if duration:
