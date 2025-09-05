@@ -886,12 +886,15 @@ def get_release_info(url):
     except Exception as e:
         raise ValueError(f"Release info fetch failed: {e}")
 
-def get_soundcloud_playlist_info(artist_url):
+def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
     try:
         cache_key = f"playlists:{artist_url}"
-        cached = get_cache(cache_key)
-        if cached:
-            return json.loads(cached) if isinstance(cached, str) else cached
+        if not force_refresh:
+            cached = get_cache(cache_key)
+            if cached:
+                return json.loads(cached) if isinstance(cached, str) else cached
+        else:
+            logging.debug(f"[SC] force_refresh=True bypassing playlist cache for {artist_url}")
         resolved = get_artist_info(artist_url)
         user_id = resolved.get("id")
         if not user_id:
@@ -913,11 +916,9 @@ def get_soundcloud_playlist_info(artist_url):
             return None
         _update_nonempty_baseline('playlists')
         latest_playlist = max(playlists, key=lambda p: p.get("created_at", ""))
-
         tracks = []
         genre_set = set()
         total_duration_ms = 0
-
         for index, track in enumerate(latest_playlist.get("tracks", [])):
             if isinstance(track, dict):
                 tid = str(track.get("id"))
@@ -934,24 +935,18 @@ def get_soundcloud_playlist_info(artist_url):
                     "genre": tgenre,
                     "order": index
                 })
-
-        # Format cumulative duration
         playlist_duration = None
         if total_duration_ms > 0:
             playlist_duration = format_duration(total_duration_ms)
-
-        # Fallback: if duration still missing but we have tracks, compute again (defensive)
         if not playlist_duration and tracks:
             try:
-                total_ms_fallback = sum(int(t.get("duration") or 0) for t in latest_playlist.get("tracks", []))
-                if total_ms_fallback > 0:
-                    playlist_duration = format_duration(total_ms_fallback)
+                fallback_ms = sum(int(t.get("duration") or 0) for t in latest_playlist.get("tracks", []))
+                if fallback_ms > 0:
+                    playlist_duration = format_duration(fallback_ms)
                 else:
                     playlist_duration = "0:00"
-            except Exception as e:
-                logging.debug(f"Playlist duration fallback failed: {e}")
+            except Exception:
                 playlist_duration = None
-
         result = {
             "title": latest_playlist.get("title"),
             "artist_name": latest_playlist.get("user", {}).get("username"),
@@ -960,18 +955,44 @@ def get_soundcloud_playlist_info(artist_url):
             "cover_url": latest_playlist.get("artwork_url"),
             "track_count": len(tracks),
             "tracks": tracks,
-            "type": "playlist",
+            "type": classify_sc_playlist(latest_playlist) if 'classify_sc_playlist' in globals() else "playlist",
             "genres": sorted(genre_set),
-            "duration": playlist_duration,  # ensured non-empty if any track durations exist
+            "duration": playlist_duration,
             "features": None
         }
         if not result.get('url'):
             record_data_anomaly('missing_field', url, 'playlist_url')
-        set_cache(cache_key, json.dumps(result), ttl=300)
+        # Short TTL (~60s ± jitter) to prevent 2-cycle detection lag
+        set_cache(cache_key, json.dumps(result), ttl=_jittered_ttl(60, 15))
         return result
     except Exception as e:
         logging.error(f"Error checking playlists: {e}")
         return None
+
+def classify_sc_playlist(original: dict) -> str:
+    """
+    Classify a SoundCloud playlist object as album / ep / playlist using:
+    1. set_type / playlist_type field (authoritative)
+    2. title keyword heuristics
+    3. track_count fallback
+    """
+    set_type = (original.get('set_type') or original.get('playlist_type') or '').strip().lower()
+    if set_type in ('album', 'ep'):
+        return set_type
+    title_lower = (original.get('title') or '').lower()
+    # Keyword heuristics
+    if any(k in title_lower for k in [' album', ' lp', ' record']) or title_lower.startswith('album '):
+        return 'album'
+    if any(k in title_lower for k in [' ep', 'extended play']) or title_lower.startswith('ep '):
+        return 'ep'
+    # Track count heuristic (only if we have a count)
+    tc = original.get('track_count') or len(original.get('tracks') or [])
+    if isinstance(tc, int):
+        if tc >= 7:
+            return 'album'
+        if 2 <= tc <= 6:
+            return 'ep'
+    return 'playlist'
 
 def get_soundcloud_likes_info(artist_url, force_refresh=False):
     """Fetch and process liked tracks/playlists from a SoundCloud user with playlist resolve batching.
@@ -1017,31 +1038,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
             tracks_data = None
             # Batch resolve for playlists
             if original.get('kind') == 'playlist':
-                playlist_url = original.get('permalink_url')
-                if playlist_url:
-                    if (playlist_url not in playlist_cache):
-                        playlist_resolve_url = f"https://api-v2.soundcloud.com/resolve?url={playlist_url}&client_id={CLIENT_ID}"
-                        playlist_response = safe_request(playlist_resolve_url, headers=HEADERS)
-                        if (playlist_response):
-                            try:
-                                playlist_cache[playlist_url] = playlist_response.json()
-                            except Exception:
-                                record_data_anomaly('playlist_invalid_json', playlist_resolve_url, 'like_playlist_resolve')
-                                playlist_cache[playlist_url] = None
-                        else:
-                            playlist_cache[playlist_url] = None
-                    playlist_data = playlist_cache.get(playlist_url)
-                    if (playlist_data):
-                        tracks_data = playlist_data.get('tracks', [])
-                        title_lower = (original.get('title') or '').lower()
-                        track_count = len(tracks_data)
-                        # NEW: Do not classify purely by track count.
-                        if any(kw in title_lower for kw in ['album',' lp',' record']):
-                            content_type = 'album'
-                        elif any(kw in title_lower for kw in [' ep','extended play']):
-                            content_type = 'EP'
-                        else:
-                            content_type = 'playlist'
+                content_type = classify_sc_playlist(original)
             like_date = item.get("created_at")
             if not like_date:
                 continue
@@ -1079,9 +1076,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "track_count": original.get("track_count", 1),
                 "duration": duration,
                 "genres": genres,
-                "content_type": content_type,
-                "tracks_data": tracks_data,
-                "liked": True
+                "content_type": content_type  # now reliably album / ep / playlist / track
             })
         set_cache(cache_key, json.dumps(likes), ttl=_jittered_ttl(60, 15))
         return likes
@@ -1141,13 +1136,7 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     continue
                 content_type = 'track'
                 if original.get('kind') == 'playlist':
-                    title_lower = (original.get('title') or '').lower()
-                    if any(k in title_lower for k in ['album',' lp',' record']):
-                        content_type = 'album'
-                    elif any(k in title_lower for k in [' ep','extended play']):
-                        content_type = 'EP'
-                    else:
-                        content_type = 'playlist'
+                    content_type = classify_sc_playlist(original)  # NEW robust classification
                 repost_date = item.get("created_at")
                 if not repost_date:
                     continue
@@ -1163,7 +1152,7 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     "track_count": original.get("track_count", 1),
                     "duration": format_duration(original.get("duration", 0)),
                     "genres": [original.get("genre")] if original.get("genre") else [],
-                    "content_type": content_type
+                    "content_type": content_type  # album / ep / playlist / track
                 })
             except Exception as e:
                 logging.warning(f"Error processing repost: {e}")

@@ -35,37 +35,41 @@ def create_music_embed(
     explicit_ep = any(k in title_lower for k in [" ep", "extended play"])
     is_deluxe = "deluxe" in title_lower
 
-    if content_type == "playlist" or (is_sc and is_playlist_url):
-        if explicit_album:
-            release_type = "album"
-        elif explicit_ep:
-            release_type = "ep"
-        else:
-            release_type = "playlist"
+    if is_sc and content_type in ("album", "ep"):
+        # Trust upstream classification (set_type) even if URL looks like a playlist
+        release_type = content_type
     else:
-        if is_deluxe:
-            release_type = "deluxe"
-        elif explicit_album:
-            release_type = "album"
-        elif explicit_ep:
-            release_type = "ep"
+        if content_type == "playlist" or (is_sc and is_playlist_url):
+            if explicit_album:
+                release_type = "album"
+            elif explicit_ep:
+                release_type = "ep"
+            else:
+                release_type = "playlist"
         else:
-            if not is_sc:
-                if track_count:
-                    try:
-                        tc = int(track_count)
-                        if tc >= 7:
-                            release_type = "album"
-                        elif tc >= 2:
-                            release_type = "ep"
-                        else:
+            if is_deluxe:
+                release_type = "deluxe"
+            elif explicit_album:
+                release_type = "album"
+            elif explicit_ep:
+                release_type = "ep"
+            else:
+                if not is_sc:
+                    if track_count:
+                        try:
+                            tc = int(track_count)
+                            if tc >= 7:
+                                release_type = "album"
+                            elif tc >= 2:
+                                release_type = "ep"
+                            else:
+                                release_type = "track"
+                        except Exception:
                             release_type = "track"
-                    except Exception:
-                        release_type = "track"
+                    else:
+                        release_type = content_type or "track"
                 else:
                     release_type = content_type or "track"
-            else:
-                release_type = content_type or "track"
 
     color = custom_color if custom_color is not None else (0x1DB954 if platform.lower() == "spotify" else 0xfa5a02)
 
@@ -144,8 +148,9 @@ def create_repost_embed(
     track_count=None,
     duration=None,
     genres=None,
+    content_type=None,          # <--- ADDED
     *,
-    original_artist=None  # keyword-only to avoid positional ambiguity
+    original_artist=None
 ):
     """Create an embed for a reposted track.
     Updated to match the SoundCloud like embed styling EXACTLY (structure & field order) without modifying the like embed itself."""
@@ -202,27 +207,28 @@ def create_repost_embed(
             except Exception:
                 repost_timestamp = None
 
-    # Determine repost type
-    title_lower = (title or "").lower()
-    is_playlist_url = bool(url and "/sets/" in url)
-    explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
-    explicit_ep = any(k in title_lower for k in [" ep","extended play"])
-    repost_type = "track"
-    if is_playlist_url:
-        if explicit_album:
-            repost_type = "album"
-        elif explicit_ep:
-            repost_type = "ep"
+    # Determine repost type (prefer explicit content_type from SC classification)
+    repost_type = (content_type or "").lower()
+    if repost_type not in ("album","ep","playlist","track"):
+        # Fallback to prior heuristics
+        title_lower = (title or "").lower()
+        is_playlist_url = bool(url and "/sets/" in url)
+        explicit_album = any(k in title_lower for k in ["album"," lp"," record"])
+        explicit_ep = any(k in title_lower for k in [" ep","extended play"])
+        if is_playlist_url:
+            if explicit_album:
+                repost_type = "album"
+            elif explicit_ep:
+                repost_type = "ep"
+            else:
+                repost_type = "playlist"
         else:
-            repost_type = "playlist"
-    else:
-        # Do NOT promote to album/EP solely by track_count for SoundCloud reposts
-        if explicit_album:
-            repost_type = "album"
-        elif explicit_ep:
-            repost_type = "ep"
-        else:
-            repost_type = "track"
+            if explicit_album:
+                repost_type = "album"
+            elif explicit_ep:
+                repost_type = "ep"
+            else:
+                repost_type = "track"
 
     embed = discord.Embed(
         title=f"📢 {reposted_by} reposted {_indef_article(repost_type)} {repost_type}!",
