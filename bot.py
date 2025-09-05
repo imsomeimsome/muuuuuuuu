@@ -1339,22 +1339,42 @@ async def list_command(interaction: discord.Interaction):
         if not artists:
             await interaction.response.send_message("No artists tracked.")
             return
+
+        # Group artists by name (case-insensitive)
         from collections import defaultdict
+
         grouped = defaultdict(list)
         for artist in artists:
             grouped[artist['artist_name'].lower()].append(artist)
-        merged = []
+
+        merged_artists = []
         for name_lower, group in grouped.items():
-            # Prefer Spotify case if available
-            display_name = next((a['artist_name'] for a in group if a['platform']=='spotify'), group[0]['artist_name'])
-            platforms = sorted({a['platform'] for a in group})
-            merged.append((display_name, ", ".join(p.capitalize() for p in platforms)))
-        merged.sort(key=lambda x: x[0].lower())
-        lines = [f"• {name} ({plats})" for name, plats in merged]
-        msg = "**🎧 Tracked Artists:**\n" + "\n".join(lines[:50])
-        if len(lines) > 50:
-            msg += f"\n…and {len(lines)-50} more"
-        await interaction.response.send_message(msg, ephemeral=True)
+            # Prefer Spotify casing for display name
+            spotify_names = [a['artist_name'] for a in group if a['platform'] == 'spotify']
+            if spotify_names:
+                display_name = spotify_names[0]
+            else:
+                # fallback: use first artist's name with title case
+                display_name = group[0]['artist_name'].title()
+
+            # Emoji order: Spotify first, then SoundCloud
+            platforms = set(a['platform'] for a in group)
+            emojis = []
+            if 'spotify' in platforms:
+                emojis.append('🟢')
+            if 'soundcloud' in platforms:
+                emojis.append('🟠')
+
+            merged_artists.append({'name': display_name, 'emojis': emojis})
+
+        # Sort alphabetically by display name (case-insensitive)
+        merged_artists.sort(key=lambda x: x['name'].lower())
+
+        # Build the message
+        message_lines = [f"{' '.join(artist['emojis'])} {artist['name']}" for artist in merged_artists]
+        message = "**🎵 Your Artists:**\n" + "\n".join(message_lines)
+
+        await interaction.response.send_message(message)
 
 # ...existing code...
 @bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
