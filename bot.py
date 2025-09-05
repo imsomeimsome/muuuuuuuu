@@ -1201,104 +1201,194 @@ async def on_ready():
         bot.release_checker_started = True
         logging.info("✅ Release checker loop started")
 
-@bot.tree.command(name="register", description="Register yourself with the bot")
-async def register(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
+@bot.tree.command(name="register", description="Register yourself to use the bot and track your own artists.")
+async def register_command(interaction: discord.Interaction):
+    user_id = interaction.user.id
+    username = interaction.user.name
     if is_user_registered(user_id):
-        await interaction.response.send_message("✅ You are already registered.", ephemeral=True)
+        await interaction.response.send_message(f"✅ You're already registered as **{username}**!")
         return
-    add_user(user_id, interaction.user.name)
-    await interaction.response.send_message("✅ Registered successfully.", ephemeral=True)
+    if add_user(user_id, username):
+        await interaction.response.send_message(f"🎉 Registered successfully as **{username}**!")
+    else:
+        await interaction.response.send_message("❌ Registration failed. Try again.")
 
-@bot.tree.command(name="track", description="Track a Spotify or SoundCloud artist by URL")
-async def track(interaction: discord.Interaction, artist_url: str):
-    user_id = str(interaction.user.id)
-    if not is_user_registered(user_id):
-        await interaction.response.send_message("🚫 Use /register first.", ephemeral=True)
+@bot.tree.command(name="help", description="Show all available commands.")
+@require_registration
+async def help_command(interaction: discord.Interaction):
+    help_text = (
+        "**📜 Available Commands:**\n"
+        "🟢 `/track` — Start tracking an artist by link\n"
+        "🔴 `/untrack` — Stop tracking an artist\n"
+        "📋 `/list` — Show all tracked artists\n"
+        "📦 `/export` — Export your tracked artists list\n"
+        "🧪 `/testembed` — Preview a release embed using a link\n"
+        "🧪 `/testrelease` — Preview a release using tracked artist ID\n"
+        "🛰 `/setchannel` — Set notification channels for releases/logs\n"
+        "🔁 `/trackchange` — Toggle tracking of specific release types\n"
+        "📡 `/channels` — View which channels are configured\n"
+        "🔍 `/debugsoundcloud` — Manually fetch SoundCloud release info\n"
+        "📊 `/info` — Show general bot usage stats\n"
+        "🎨 `/key` — Emoji and color key for releases\n"
+        "👤 `/userinfo` — Show your bot stats\n"
+        "👤 `/userinfo other` — Admins: Check someone else's stats\n"
+        "🌐 `/ping` — Check if the bot is responsive\n"
+        "🧾 `/register` — Register yourself to start tracking"
+    )
+    await interaction.response.send_message(help_text, ephemeral=True)
+
+
+@bot.tree.command(name="ping", description="Pong!")
+@require_registration
+async def ping_command(interaction: discord.Interaction):
+    await interaction.response.send_message("🏓 Pong!")
+
+@bot.tree.command(name="track", description="Track a new artist from Spotify or SoundCloud")
+@require_registration
+@app_commands.describe(link="A Spotify or SoundCloud artist URL")
+async def track_command(interaction: discord.Interaction, link: str):
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    guild_id = str(interaction.guild.id) if interaction.guild else None
+
+    print(f"📥 /track called by {interaction.user.name} in guild: {guild_id}")
+
+    # Detect platform
+    if "spotify.com" in link:
+        platform = "spotify"
+        artist_id = extract_spotify_id(link)
+        artist_name = await run_blocking(get_spotify_artist_name, artist_id)
+        artist_url = f"https://open.spotify.com/artist/{artist_id}"
+        artist_info = await run_blocking(get_spotify_artist_info, artist_id)
+        genres = artist_info.get("genres", []) if artist_info else []
+
+    elif "soundcloud.com" in link:
+        platform = "soundcloud"
+        # Expand short Smart Link if needed (on.soundcloud.com/...)
+        try:
+            expanded_link = await run_blocking(expand_soundcloud_short_url, link)
+        except Exception:
+            expanded_link = link  # fallback silently
+        try:
+            artist_id = extract_soundcloud_id(expanded_link)
+            artist_info = await run_blocking(get_artist_info, expanded_link)
+        except Exception:
+            await interaction.followup.send("❌ Invalid SoundCloud artist URL. Provide a profile like https://soundcloud.com/artistname", ephemeral=True)
+            return
+        artist_name = artist_info.get("name", artist_id)
+        artist_url = artist_info.get("url", f"https://soundcloud.com/{artist_id}")
+        genres = []
+    else:
+        await interaction.followup.send("❌ Link must be a valid Spotify or SoundCloud artist URL.")
         return
-    platform = "spotify" if "spotify.com" in artist_url.lower() else ("soundcloud" if "soundcloud.com" in artist_url.lower() else None)
-    if not platform:
-        await interaction.response.send_message("⚠️ Unsupported URL (must be Spotify or SoundCloud).", ephemeral=True)
+
+    # Already tracked?
+    if artist_exists(platform, artist_id, user_id):
+        await interaction.followup.send("⚠️ You're already tracking this artist.")
         return
+
+    from datetime import datetime, timezone
+    current_time = datetime.now(timezone.utc).isoformat()
+
+    add_artist(
+        platform=platform,
+        artist_id=artist_id,
+        artist_name=artist_name,
+        artist_url=artist_url,
+        owner_id=user_id,
+        guild_id=guild_id,
+        genres=genres,
+        last_release_date=current_time
+    )
+
+    print(f"✅ Added artist '{artist_name}' ({platform}) with guild_id: {guild_id}")
+
+    await interaction.followup.send(f"✅ Now tracking **{artist_name}** on {platform.capitalize()}.")
+
+@bot.tree.command(name="untrack", description="Stop tracking an artist.")
+@app_commands.describe(artist_identifier="Spotify/SoundCloud artist link or artist ID")
+@require_registration
+async def untrack_command(interaction: discord.Interaction, artist_identifier: str):
+    user_id = interaction.user.id
+    await interaction.response.defer()
+    try:
+        if "spotify.com/artist" in artist_identifier:
+            artist_id = extract_spotify_id(artist_identifier)
+        elif "soundcloud.com" in artist_identifier:
+            artist_id = extract_soundcloud_id(artist_identifier)
+        else:
+            artist_id = artist_identifier.strip()
+        guild_id = str(interaction.guild.id)
+        artist = get_artist_by_id(artist_id, user_id, guild_id)
+        if not artist:
+            await interaction.followup.send(f"❌ No artist found.")
+            return
+        remove_artist(artist_id, user_id)
+        log_untrack(user_id, artist_id)
+        await bot.log_event(f"➖ {interaction.user.name} stopped tracking **{artist['artist_name']}**.")
+        await interaction.followup.send(f"✅ Untracked **{artist['artist_name']}**.")
+    except Exception as e:
+        await bot.log_event(f"❌ Error: {str(e)}")
+        await interaction.followup.send(f"❌ Error: `{str(e)}`")
+
+@bot.tree.command(name="list", description="List your tracked artists.")
+@require_registration
+async def list_command(interaction: discord.Interaction):
+        user_id = interaction.user.id
+        artists = get_artists_by_owner(user_id)
+        if not artists:
+            await interaction.response.send_message("No artists tracked.")
+            return
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for artist in artists:
+            grouped[artist['artist_name'].lower()].append(artist)
+        merged = []
+        for name_lower, group in grouped.items():
+            # Prefer Spotify case if available
+            display_name = next((a['artist_name'] for a in group if a['platform']=='spotify'), group[0]['artist_name'])
+            platforms = sorted({a['platform'] for a in group})
+            merged.append((display_name, ", ".join(p.capitalize() for p in platforms)))
+        merged.sort(key=lambda x: x[0].lower())
+        lines = [f"• {name} ({plats})" for name, plats in merged]
+        msg = "**🎧 Tracked Artists:**\n" + "\n".join(lines[:50])
+        if len(lines) > 50:
+            msg += f"\n…and {len(lines)-50} more"
+        await interaction.response.send_message(msg, ephemeral=True)
+
+# ...existing code...
+@bot.tree.command(name="rotatekeys", description="Force rotate API key for a platform (admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def rotatekeys_command(interaction: discord.Interaction, platform: Literal["spotify", "soundcloud"]):
+    await interaction.response.defer(ephemeral=True)
     try:
         if platform == "spotify":
-            artist_info = await run_blocking(get_spotify_artist_info, artist_url)
-        else:
-            artist_info = await run_blocking(get_artist_info, artist_url)
-        if not artist_info:
-            await interaction.response.send_message("❌ Could not resolve that artist.", ephemeral=True)
-            return
-        artist_id = str(artist_info.get("id"))
-        if artist_exists(platform, artist_id, user_id):
-            await interaction.response.send_message("ℹ️ Already tracking that artist.", ephemeral=True)
-            return
-        add_artist(
-            artist_id=artist_id,
-            artist_name=artist_info.get("name") or artist_info.get("username") or "Unknown",
-            platform=platform,
-            owner_id=user_id,
-            guild_id=str(interaction.guild_id),
-            artist_url=artist_url
-        )
-        await interaction.response.send_message(f"✅ Now tracking: {artist_info.get('name') or artist_info.get('username')}", ephemeral=True)
+            result = manual_rotate_spotify_key(reason="manual_command")
+            if not result.get("rotated"):
+                msg = f"⚠️ Spotify rotation not performed: {result.get('error','unknown')}"
+            else:
+                msg = f"🔄 Spotify key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
+            status_lines = []
+            for row in result.get('keys', []):
+                status_lines.append(f"K{row['index']+1}: {row['state']} ({row.get('client_id_preview','')})")
+            if status_lines:
+                msg += "\n" + "\n".join(status_lines)
+            await interaction.followup.send(msg, ephemeral=True)
+        else:  # soundcloud
+            result = manual_rotate_soundcloud_key(reason="manual_command")
+            if not result.get("rotated"):
+                msg = f"⚠️ SoundCloud rotation not performed: {result.get('error','unknown')}"
+            else:
+                msg = f"🔄 SoundCloud key rotated (Key {result['old_index']+1} ➜ {result['active_index']+1})."
+            status_lines = []
+            for row in result.get('keys', []):
+                preview = row.get('key_preview','')
+                status_lines.append(f"K{row['index']+1}: {row['state']} ({preview})")
+            if status_lines:
+                msg += "\n" + "\n".join(status_lines)
+            await interaction.followup.send(msg, ephemeral=True)
     except Exception as e:
-        logging.error(f"/track error: {e}")
-        await interaction.response.send_message("❌ Failed to track artist.", ephemeral=True)
-
-@bot.tree.command(name="untrack", description="Stop tracking an artist by ID or URL fragment")
-async def untrack(interaction: discord.Interaction, identifier: str):
-    user_id = str(interaction.user.id)
-    try:
-        rec = get_artist_by_identifier(identifier, user_id)
-        if not rec:
-            await interaction.response.send_message("⚠️ Artist not found for you.", ephemeral=True)
-            return
-        remove_artist(rec['artist_id'], rec['platform'])
-        log_untrack(user_id, rec['artist_id'])
-        await interaction.response.send_message(f"✅ Untracked {rec['artist_name']}", ephemeral=True)
-    except Exception as e:
-        logging.error(f"/untrack error: {e}")
-        await interaction.response.send_message("❌ Failed to untrack.", ephemeral=True)
-
-@bot.tree.command(name="stats", description="Show tracked artist stats")
-async def stats(interaction: discord.Interaction):
-    try:
-        rs = get_release_stats()
-        total = sum(v for v in rs.values())
-        msg = "📊 Release Stats:\n" + "\n".join([f"- {k}: {v}" for k,v in rs.items()]) + f"\nTotal: {total}"
-        await interaction.response.send_message(msg, ephemeral=True)
-    except Exception as e:
-        logging.error(f"/stats error: {e}")
-        await interaction.response.send_message("❌ Failed to fetch stats.", ephemeral=True)
-
-@bot.tree.command(name="list", description="List your tracked artists")
-async def list_artists(interaction: discord.Interaction):
-    user_id = str(interaction.user.id)
-    if not is_user_registered(user_id):
-        await interaction.response.send_message("🚫 Use /register first.", ephemeral=True)
-        return
-    try:
-        records = get_artists_by_owner(user_id)
-    except Exception as e:
-        logging.error(f"/list fetch error: {e}")
-        await interaction.response.send_message("❌ Failed to load your artists.", ephemeral=True)
-        return
-    if not records:
-        await interaction.response.send_message("You are not tracking any artists.", ephemeral=True)
-        return
-    lines = []
-    for r in records:
-        platform = r.get('platform') or 'unknown'
-        name = r.get('artist_name') or 'Unknown'
-        lines.append(f"{get_platform_emoji(platform)} {name} ({platform})")
-    lines.sort()
-    max_lines = 25
-    shown = lines[:max_lines]
-    more = len(lines) - max_lines
-    msg = "🎧 Your tracked artists (" + str(len(lines)) + "):\n" + "\n".join(shown)
-    if more > 0:
-        msg += f"\n…and {more} more."
-    await interaction.response.send_message(msg, ephemeral=True)
+        await interaction.followup.send(f"❌ Error rotating keys: {e}", ephemeral=True)
         
 # (Ensure bot.run(TOKEN) remains at bottom)
 bot.run(TOKEN)
