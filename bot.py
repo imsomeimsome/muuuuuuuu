@@ -1201,5 +1201,75 @@ async def on_ready():
         bot.release_checker_started = True
         logging.info("✅ Release checker loop started")
 
+@bot.tree.command(name="register", description="Register yourself with the bot")
+async def register(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    if is_user_registered(user_id):
+        await interaction.response.send_message("✅ You are already registered.", ephemeral=True)
+        return
+    add_user(user_id, interaction.user.name)
+    await interaction.response.send_message("✅ Registered successfully.", ephemeral=True)
+
+@bot.tree.command(name="track", description="Track a Spotify or SoundCloud artist by URL")
+async def track(interaction: discord.Interaction, artist_url: str):
+    user_id = str(interaction.user.id)
+    if not is_user_registered(user_id):
+        await interaction.response.send_message("🚫 Use /register first.", ephemeral=True)
+        return
+    platform = "spotify" if "spotify.com" in artist_url.lower() else ("soundcloud" if "soundcloud.com" in artist_url.lower() else None)
+    if not platform:
+        await interaction.response.send_message("⚠️ Unsupported URL (must be Spotify or SoundCloud).", ephemeral=True)
+        return
+    try:
+        if platform == "spotify":
+            artist_info = await run_blocking(get_spotify_artist_info, artist_url)
+        else:
+            artist_info = await run_blocking(get_artist_info, artist_url)
+        if not artist_info:
+            await interaction.response.send_message("❌ Could not resolve that artist.", ephemeral=True)
+            return
+        artist_id = str(artist_info.get("id"))
+        if artist_exists(artist_id, platform):
+            await interaction.response.send_message("ℹ️ Already tracking that artist.", ephemeral=True)
+            return
+        add_artist(
+            artist_id=artist_id,
+            artist_name=artist_info.get("name") or artist_info.get("username") or "Unknown",
+            platform=platform,
+            owner_id=user_id,
+            guild_id=str(interaction.guild_id),
+            artist_url=artist_url
+        )
+        await interaction.response.send_message(f"✅ Now tracking: {artist_info.get('name') or artist_info.get('username')}", ephemeral=True)
+    except Exception as e:
+        logging.error(f"/track error: {e}")
+        await interaction.response.send_message("❌ Failed to track artist.", ephemeral=True)
+
+@bot.tree.command(name="untrack", description="Stop tracking an artist by ID or URL fragment")
+async def untrack(interaction: discord.Interaction, identifier: str):
+    user_id = str(interaction.user.id)
+    try:
+        rec = get_artist_by_identifier(identifier, user_id)
+        if not rec:
+            await interaction.response.send_message("⚠️ Artist not found for you.", ephemeral=True)
+            return
+        remove_artist(rec['artist_id'], rec['platform'])
+        log_untrack(user_id, rec['artist_id'])
+        await interaction.response.send_message(f"✅ Untracked {rec['artist_name']}", ephemeral=True)
+    except Exception as e:
+        logging.error(f"/untrack error: {e}")
+        await interaction.response.send_message("❌ Failed to untrack.", ephemeral=True)
+
+@bot.tree.command(name="stats", description="Show tracked artist stats")
+async def stats(interaction: discord.Interaction):
+    try:
+        rs = get_release_stats()
+        total = sum(v for v in rs.values())
+        msg = "📊 Release Stats:\n" + "\n".join([f"- {k}: {v}" for k,v in rs.items()]) + f"\nTotal: {total}"
+        await interaction.response.send_message(msg, ephemeral=True)
+    except Exception as e:
+        logging.error(f"/stats error: {e}")
+        await interaction.response.send_message("❌ Failed to fetch stats.", ephemeral=True)
+        
 # (Ensure bot.run(TOKEN) remains at bottom)
 bot.run(TOKEN)

@@ -41,18 +41,18 @@ def create_music_embed(
     else:
         if content_type == "playlist" or (is_sc and is_playlist_url):
             if explicit_album:
-                release_type = "album"
+                release_type = "Album"
             elif explicit_ep:
-                release_type = "ep"
+                release_type = "EP"
             else:
-                release_type = "playlist"
+                release_type = "Playlist"
         else:
             if is_deluxe:
-                release_type = "deluxe"
+                release_type = "Deluxe"
             elif explicit_album:
-                release_type = "album"
+                release_type = "Album"
             elif explicit_ep:
-                release_type = "ep"
+                release_type = "EP"
             else:
                 if not is_sc:
                     if track_count:
