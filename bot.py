@@ -597,7 +597,8 @@ async def check_for_new_releases(bot, is_catchup=False):
     total_releases = spotify_releases + sum(soundcloud_counts.values())
     all_errors = (general_errors or []) + spotify_errors + soundcloud_errors
     logging.info("🎯 All platform checks finished successfully!")
-    await log_summary(len(artists), total_releases, all_errors)
+    unique_checked = len({(a.get('platform'), a.get('artist_id')) for a in (artists or [])})
+    await log_summary(unique_checked, total_releases, all_errors)
 
 # === Helper platform check functions (added) ===
 async def check_general_tasks(bot, is_catchup: bool = False):
