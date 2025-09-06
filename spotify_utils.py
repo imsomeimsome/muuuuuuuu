@@ -719,6 +719,152 @@ def get_release_info(release_id):
         print(f"Error fetching release info for {release_id}: {str(e)}")
         return None
 
+def _parse_spotify_date_str(s: str) -> str:
+    # Normalize Spotify release_date to YYYY-MM-DD (fills month/day when missing)
+    if not s:
+        return None
+    s = str(s)
+    try:
+        if len(s) == 4:
+            return f"{s}-01-01"
+        if len(s) == 7:
+            return f"{s}-01"
+        if len(s) >= 10:
+            return s[:10]
+        return s
+    except Exception:
+        return s
+
+def get_latest_featured_release(artist_id: str):
+    """
+    Find the latest release where this artist appears as a feature (not the main album artist).
+    Returns a dict similar to get_release_info with extra keys:
+      - main_artist_name
+      - album_id
+      - type ('single'|'ep'|'album')
+      - features (string with tracked artist underlined first)
+    """
+    try:
+        # Fetch recent albums/singles this artist appears on
+        albums_resp = safe_spotify_call(
+            spotify.artist_albums,
+            artist_id,
+            include_groups="appears_on,single,album,compilation",
+            limit=20
+        )
+        if not albums_resp or not albums_resp.get('items'):
+            return None
+
+        candidates = []
+        for alb in albums_resp['items']:
+            alb_id = alb['id']
+            album_artists = alb.get('artists') or []
+            main_album_artist_id = album_artists[0]['id'] if album_artists else None
+            # Skip if this is primarily the tracked artist (we only want external features)
+            if main_album_artist_id == artist_id:
+                continue
+            # Quick normalized date
+            rel_date_norm = _parse_spotify_date_str(alb.get('release_date'))
+            candidates.append((rel_date_norm or "0000-00-00", alb_id))
+
+        if not candidates:
+            return None
+
+        # Sort newest first
+        candidates.sort(key=lambda x: x[0], reverse=True)
+
+        # Inspect candidates to confirm the tracked artist appears on any track
+        for _, album_id in candidates[:10]:
+            album = safe_spotify_call(spotify.album, album_id)
+            if not album:
+                continue
+
+            tracks_resp = album.get('tracks') or {}
+            items = tracks_resp.get('items') or []
+            appears_on_any_track = False
+            all_artists_set = set()
+            for tr in items:
+                for a in tr.get('artists', []):
+                    all_artists_set.add(a['name'])
+                    if a.get('id') == artist_id:
+                        appears_on_any_track = True
+            if not appears_on_any_track:
+                continue
+
+            # Compute duration and track count
+            total_ms = sum(t.get('duration_ms', 0) for t in items)
+            minutes, seconds = divmod(total_ms // 1000, 60)
+            duration_min = f"{minutes}:{seconds:02d}"
+            track_count = album.get('total_tracks', len(items))
+
+            # Determine release type
+            if track_count == 1:
+                release_type = 'single'
+            elif track_count <= 6:
+                release_type = 'ep'
+            else:
+                release_type = 'album'
+
+            # Main artist displayed for "By"
+            main_artists = [a['name'] for a in (album.get('artists') or [])]
+            main_artist_name = ", ".join(main_artists) if main_artists else "Unknown"
+
+            # Build features text with tracked artist first and underlined
+            tracked_name = None
+            # Try to resolve tracked artist name via artist() endpoint
+            try:
+                ar_info = safe_spotify_call(spotify.artist, artist_id)
+                if ar_info and ar_info.get('name'):
+                    tracked_name = ar_info['name']
+            except Exception:
+                pass
+            # Create features list (exclude main artists to avoid duplication)
+            features_names = sorted(list(all_artists_set - set(main_artists)))
+            if tracked_name and tracked_name not in features_names:
+                features_names.insert(0, tracked_name)
+            elif tracked_name:
+                # Ensure tracked is first
+                features_names = [n for n in features_names if n != tracked_name]
+                features_names.insert(0, tracked_name)
+            # Underline tracked artist in output
+            features_text = None
+            if features_names:
+                features_text = ", ".join([f"__{features_names[0]}__"] + features_names[1:])
+
+            # Genres: combine album + main artist genres
+            genres = album.get('genres', []) or []
+            for a in (album.get('artists') or []):
+                try:
+                    ai = safe_spotify_call(spotify.artist, a['id'])
+                    if ai:
+                        genres.extend(ai.get('genres', []))
+                except Exception:
+                    continue
+            genres = list(sorted(set(g for g in genres if g)))
+
+            cover_url = album['images'][0]['url'] if album.get('images') else None
+
+            return {
+                "album_id": album_id,
+                "artist_name": main_artist_name,     # used for "By" field
+                "title": album.get('name'),
+                "url": album['external_urls']['spotify'],
+                "release_date": _parse_spotify_date_str(album.get('release_date')),
+                "cover_url": cover_url,
+                "track_count": track_count,
+                "duration": duration_min,
+                "features": features_text,           # pre-formatted with tracked underlined
+                "genres": genres,
+                "repost": False,
+                "type": release_type,
+                "main_artist_name": main_artist_name
+            }
+
+        return None
+    except Exception as e:
+        logging.error(f"Error fetching latest featured release for artist {artist_id}: {e}")
+        return None
+
 import logging
 
 # Custom logging formatter for Railway logs

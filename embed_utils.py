@@ -23,7 +23,8 @@ def create_music_embed(
     genres=None,
     content_type=None,
     custom_color=None,
-    return_heading: bool = False
+    return_heading: bool = False,
+    upload_date=None  # NEW: SoundCloud only
 ):
     """Create an embed for a music release (Spotify or SoundCloud) with correct playlist vs album/EP labeling.
        If return_heading=True returns (heading_text, release_type, embed)."""
@@ -41,18 +42,18 @@ def create_music_embed(
     else:
         if content_type == "playlist" or (is_sc and is_playlist_url):
             if explicit_album:
-                release_type = "Album"
+                release_type = "album"
             elif explicit_ep:
-                release_type = "EP"
+                release_type = "ep" 
             else:
-                release_type = "Playlist"
+                release_type = "playlist"
         else:
             if is_deluxe:
-                release_type = "Deluxe"
+                release_type = "deluxe"
             elif explicit_album:
-                release_type = "Album"
+                release_type = "album"
             elif explicit_ep:
-                release_type = "EP"
+                release_type = "ep"
             else:
                 if not is_sc:
                     if track_count:
@@ -81,11 +82,27 @@ def create_music_embed(
         "deluxe": "💿",
         "track": "🎵"
     }
+
+    # Build "(Feat. X)" suffix for title if any features present
+    def _first_feat_name(f):
+        if not f:
+            return None
+        if isinstance(f, list):
+            for n in f:
+                if n:
+                    return str(n).strip()
+            return None
+        s = str(f).strip()
+        return s.split(",")[0].strip() if s else None
+
     heading_emoji = emoji_map.get(release_type, "🎵")
     heading = f"{heading_emoji} {artist_name} released {_indef_article(release_type)} {release_type}!"
+    feat_in_title = _first_feat_name(features)
+    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+
     embed = discord.Embed(
         title=heading,
-        description=f"[{title}]({url})" if title and url else (title or url or "Release"),
+        description=f"[{title_for_desc}]({url})" if title_for_desc and url else (title_for_desc or url or "Release"),
         color=color
     )
     # Add duration if non-empty string (including '0:00')
@@ -111,7 +128,26 @@ def create_music_embed(
             else:
                 embed.add_field(name="Release Date", value=rd[:10], inline=True)
         else:
-            embed.add_field(name="Release Date", value=rd[:10], inline=True)
+            # Parse date-only and render as relative time
+            ts = None
+            try:
+                if len(rd) >= 10:
+                    dt = datetime.strptime(rd[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc)
+                    ts = int(dt.timestamp())
+                elif len(rd) == 7:
+                    # YYYY-MM -> assume first of month
+                    dt = datetime.strptime(rd, '%Y-%m').replace(day=1, tzinfo=timezone.utc)
+                    ts = int(dt.timestamp())
+                elif len(rd) == 4:
+                    # YYYY -> assume Jan 1st
+                    dt = datetime.strptime(rd, '%Y').replace(tzinfo=timezone.utc)
+                    ts = int(dt.timestamp())
+            except Exception:
+                ts = None
+            if ts is not None:
+                embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
+            else:
+                embed.add_field(name="Release Date", value=rd[:10], inline=True)
 
     if genres:
         if isinstance(genres, list):
@@ -122,6 +158,35 @@ def create_music_embed(
             gtxt = str(genres).strip()
             if gtxt and gtxt.lower() != "none":
                 embed.add_field(name="Genre", value=gtxt[:1024], inline=True)
+
+    # Features (now for all platforms, next to Genres)
+    feat_text = None
+    if isinstance(features, list):
+        feat_text = ", ".join([f for f in features if f]) if features else None
+    elif isinstance(features, str):
+        s = features.strip()
+        if s and s.lower() != "none":
+            feat_text = s
+    if feat_text:
+        embed.add_field(name="Features", value=feat_text[:1024], inline=True)
+
+    # Upload Date (SoundCloud only), only if present and different from Release Date
+    if platform.lower() == "soundcloud" and upload_date:
+        def _to_ts(s):
+            try:
+                s2 = str(s).replace('Z', '+0000')
+                for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
+                    try:
+                        return int(datetime.strptime(s2, fmt).timestamp())
+                    except Exception:
+                        continue
+                return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+            except Exception:
+                return None
+        rd_ts = _to_ts(release_date) if release_date else None
+        up_ts = _to_ts(upload_date)
+        if up_ts and (not rd_ts or up_ts != rd_ts):
+            embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
 
     if cover_url:
         try:
@@ -149,6 +214,7 @@ def create_repost_embed(
     duration=None,
     genres=None,
     content_type=None,          # <--- ADDED
+    upload_date=None,  # NEW
     *,
     original_artist=None
 ):
@@ -230,10 +296,24 @@ def create_repost_embed(
             else:
                 repost_type = "track"
 
+    # Append (Feat. X) to description title if available
+    def _first_feat_name(f):
+        if not f:
+            return None
+        if isinstance(f, list):
+            for n in f:
+                if n:
+                    return str(n).strip()
+            return None
+        s = str(f).strip()
+        return s.split(",")[0].strip() if s else None
+    feat_in_title = _first_feat_name(features)
+    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+
     embed = discord.Embed(
         title=f"📢 {reposted_by} reposted {_indef_article(repost_type)} {repost_type}!",
-        description=f"[{title}]({url})" if title and url else (title or url or "Repost"),
-        color=0xfa5a02
+        description=f"[{title_for_desc}]({url})" if title_for_desc and url else (title_for_desc or url or "Repost"),
+        color=0xfa502
     )
 
     # First row: By, Tracks, Duration
@@ -262,6 +342,30 @@ def create_repost_embed(
             genre_text = genres.strip()
     embed.add_field(name=genre_name, value=genre_text, inline=True)
 
+    # Row 3: Upload Date (only if different), Features (only if present)
+    def _to_ts(s):
+        try:
+            s2 = str(s).replace('Z', '+0000')
+            for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
+                try:
+                    return int(datetime.strptime(s2, fmt).timestamp())
+                except Exception:
+                    continue
+            return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            return None
+    up_ts = _to_ts(upload_date) if upload_date else None
+    if up_ts and (not release_timestamp or up_ts != release_timestamp):
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
+
+    if features:
+        if isinstance(features, list):
+            ftxt = ", ".join([f for f in features if f])
+        else:
+            ftxt = str(features).strip()
+        if ftxt and ftxt.lower() != "none":
+            embed.add_field(name="Features", value=ftxt[:1024], inline=True)
+
     # High-res thumbnail like like embed
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
@@ -283,7 +387,7 @@ def create_like_embed(
     duration=None,
     genres=None,
     content_type=None,
-    upload_date=None,      # kept (not shown; reserved for future diff logic)
+    upload_date=None,  # NEW (now used)
     original_artist=None
 ):
     """Create an embed for a liked item (track / album / ep / playlist) mirroring repost embed styling."""
@@ -364,9 +468,23 @@ def create_like_embed(
             else:
                 like_type = "track"
 
+    # Append (Feat. X) to description title if available
+    def _first_feat_name(f):
+        if not f:
+            return None
+        if isinstance(f, list):
+            for n in f:
+                if n:
+                    return str(n).strip()
+            return None
+        s = str(f).strip()
+        return s.split(",")[0].strip() if s else None
+    feat_in_title = _first_feat_name(features)
+    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+
     embed = discord.Embed(
         title=f"❤️ {liked_by} liked {_indef_article(like_type)} {like_type}!",
-        description=f"[{title}]({url})" if title and url else (title or url or "Like"),
+        description=f"[{title_for_desc}]({url})" if title_for_desc and url else (title_for_desc or url or "Like"),
         color=0xfa5a02
     )
 
@@ -395,7 +513,30 @@ def create_like_embed(
             genre_text = genres.strip()
     embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    # High-res thumbnail
+    # Row 3: Upload Date (only if different), Features (only if present)
+    def _to_ts(s):
+        try:
+            s2 = str(s).replace('Z', '+0000')
+            for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
+                try:
+                    return int(datetime.strptime(s2, fmt).timestamp())
+                except Exception:
+                    continue
+            return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+        except Exception:
+            return None
+    up_ts = _to_ts(upload_date) if upload_date else None
+    if up_ts and (not release_timestamp or up_ts != release_timestamp):
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
+
+    if features:
+        if isinstance(features, list):
+            ftxt = ", ".join([f for f in features if f])
+        else:
+            ftxt = str(features).strip()
+        if ftxt and ftxt.lower() != "none":
+            embed.add_field(name="Features", value=ftxt[:1024], inline=True)
+
     if cover_url:
         high_res_cover = get_highest_quality_artwork(cover_url)
         embed.set_thumbnail(url=high_res_cover or cover_url)

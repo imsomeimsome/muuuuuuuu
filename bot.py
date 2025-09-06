@@ -38,9 +38,10 @@ from spotify_utils import (
     get_latest_album_id as get_spotify_latest_album_id,
     init_spotify_key_manager,
     manual_rotate_spotify_key,
-    get_spotify_key_status,  # <-- added
-    validate_spotify_client,  # <-- added
-    ping_spotify  # <-- added
+    get_spotify_key_status,
+    validate_spotify_client,
+    ping_spotify,
+    get_latest_featured_release as get_spotify_latest_featured_release  # NEW
 )
 import spotify_utils  # added for dynamic key manager access
 
@@ -694,14 +695,11 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
             logging.info(f"     API returned: {_fmt_dt(api_dt)}")
             if last_check_dt is None:
                 logging.info(f"     ⏭️ Baseline established (no previous check)")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue
             if api_dt > last_check_dt:
                 cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
                 if get_cache(cache_key):
                     logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
                 else:
-                    # Build once then broadcast to all guilds tracking this artist
                     heading_text, _, embed = create_music_embed(
                         platform='spotify',
                         artist_name=artist_name,
@@ -731,6 +729,60 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                     logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
             else:
                 logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+
+            # === NEW: Featured-on detection (one fetch, broadcast per guild) ===
+            try:
+                feat_info = await run_blocking(get_spotify_latest_featured_release, artist_id)
+            except Exception as e_feat:
+                feat_info = None
+                logging.debug(f"     (feature) fetch skipped/failed: {e_feat}")
+
+            if feat_info and feat_info.get('release_date'):
+                feat_dt = parse_date(feat_info['release_date'])
+                logging.info(f"     (feature) API returned: {_fmt_dt(feat_dt)}")
+                # Fan-out per guild using each guild's last_check
+                found_any = False
+                for sub in _subscribers_for(artists, 'spotify', artist_id):
+                    sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                    sub_last = get_last_release_check(artist_id, sub_oid, sub_gid)
+                    sub_last_dt = parse_date(sub_last) if sub_last else None
+                    if sub_last_dt is None or not feat_dt or feat_dt <= sub_last_dt:
+                        continue
+                    cache_key_feat = f"posted_spotify_feature:{sub_gid}:{artist_id}:{feat_info.get('album_id')}:{feat_info['release_date']}"
+                    if get_cache(cache_key_feat):
+                        continue
+                    channel = await get_release_channel(sub_gid, 'spotify')
+                    if not channel:
+                        continue
+                    # Build base embed then override heading and add "By"
+                    heading_text, release_type, embed = create_music_embed(
+                        platform='spotify',
+                        artist_name=artist_name,  # tracked artist
+                        title=feat_info.get('title','New Release'),
+                        url=feat_info.get('url'),
+                        release_date=feat_info.get('release_date'),
+                        cover_url=feat_info.get('cover_url'),
+                        features=feat_info.get('features'),   # already formatted with __Tracked__
+                        track_count=feat_info.get('track_count'),
+                        duration=feat_info.get('duration'),
+                        genres=feat_info.get('genres',[]),
+                        repost=False,
+                        return_heading=True
+                    )
+                    custom_heading = f"➕ {artist_name} is featured on a {release_type}!"
+                    embed.title = custom_heading
+                    # Add main artist as "By"
+                    main_artist = feat_info.get('main_artist_name') or "Unknown"
+                    embed.add_field(name="By", value=main_artist, inline=True)
+                    logging.info("     Feature found! Looking for channels to post in")
+                    logging.info(f"      - guild id = {sub_gid} - found")
+                    await channel.send(content=f"# {custom_heading}", embed=embed)
+                    set_cache(cache_key_feat, 'posted', ttl=86400)
+                    found_any = True
+                if found_any:
+                    releases += 1  # count as a new event surfaced
+            # === end featured-on block ===
+
             update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
         except Exception as e:
             logging.error(f"     ❌ Error for {artist_name}: {e}")
@@ -918,7 +970,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=release_info.get('track_count'),
                                 duration=release_info.get('duration'),
                                 genres=release_info.get('genres'),
-                                repost=False
+                                repost=False,
+                                upload_date=release_info.get('upload_date')  # NEW
                             )
                             logging.info("     Release found! Looking for channels to post in")
                             for sub in _subscribers_for(artists, 'soundcloud', artist_id):
@@ -998,7 +1051,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=repost.get('track_count'),
                                 duration=repost.get('duration'),
                                 genres=repost.get('genres'),
-                                content_type=repost.get('content_type')
+                                content_type=repost.get('content_type'),
+                                upload_date=repost.get('upload_date')  # NEW
                             )
                             await channel.send(embed=embed)
                             mark_posted_repost(artist_id, sub_gid, repost_id)
@@ -1049,7 +1103,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=repost.get('track_count'),
                                 duration=repost.get('duration'),
                                 genres=repost.get('genres'),
-                                content_type=repost.get('content_type')
+                                content_type=repost.get('content_type'),
+                                upload_date=repost.get('upload_date')  # NEW
                             )
                             await channel.send(embed=embed)
                             mark_posted_repost(artist_id, sub_gid, repost_id)
@@ -1113,7 +1168,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=like.get('track_count'),
                                 duration=like.get('duration'),
                                 genres=like.get('genres'),
-                                content_type=like.get('content_type')
+                                content_type=like.get('content_type'),
+                                upload_date=like.get('upload_date')  # NEW
                             )
                             await channel.send(embed=embed)
                             mark_posted_like(artist_id, sub_gid, like_id)
@@ -1158,7 +1214,8 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                                 track_count=like.get('track_count'),
                                 duration=like.get('duration'),
                                 genres=like.get('genres'),
-                                content_type=like.get('content_type')
+                                content_type=like.get('content_type'),
+                                upload_date=like.get('upload_date')  # NEW
                             )
                             await channel.send(embed=embed)
                             mark_posted_like(artist_id, sub_gid, like_id)
@@ -1490,6 +1547,7 @@ async def key_command(interaction: discord.Interaction):
         color=0x7289DA
     )
 
+    embed.add_field(name="📀 Deluxe", value="7 or more tracks released together or marked as album/mixtape.", inline=False)
     embed.add_field(name="💿 Album", value="7 or more tracks released together or marked as album/mixtape.", inline=False)
     embed.add_field(name="🎶 EP", value="2 to 6 tracks released together or marked as EP.", inline=False)
     embed.add_field(name="🎵 Single", value="Only 1 track released.", inline=False)
