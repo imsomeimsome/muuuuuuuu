@@ -313,7 +313,7 @@ def create_repost_embed(
     embed = discord.Embed(
         title=f"📢 {reposted_by} reposted {_indef_article(repost_type)} {repost_type}!",
         description=f"[{title_for_desc}]({url})" if title_for_desc and url else (title_for_desc or url or "Repost"),
-        color=0xfa502
+        color=0xfa5a02
     )
 
     # First row: By, Tracks, Duration

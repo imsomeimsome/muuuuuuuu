@@ -40,7 +40,25 @@ def add_user(user_id, username):
     now = datetime.now(timezone.utc).isoformat()
     try:
         with get_connection() as conn:
-            conn.execute("REPLACE INTO users(user_id,username,registered_at) VALUES (?,?,?)", (str(user_id), username, now))
+            # Inspect users schema to satisfy NOT NULL columns without defaults (e.g., updated_atease)
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(users)")
+            rows = cur.fetchall()
+            cols_info = [{'name': r[1], 'notnull': bool(r[3]), 'dflt': r[4]} for r in rows]
+
+            insert_cols = ['user_id', 'username', 'registered_at']
+            insert_vals = [str(user_id), username, now]
+
+            # Handle common timestamp fields if present and required
+            for extra in ('updated_atease', 'updated_at', 'created_at'):
+                col = next((c for c in cols_info if c['name'] == extra), None)
+                if col and col['notnull'] and col['dflt'] is None and extra not in insert_cols:
+                    insert_cols.append(extra)
+                    insert_vals.append(now)
+
+            placeholders = ','.join(['?'] * len(insert_cols))
+            sql = f"REPLACE INTO users({','.join(insert_cols)}) VALUES ({placeholders})"
+            conn.execute(sql, insert_vals)
         return True
     except sqlite3.Error as e:
         logging.error(f"add_user failed: {e}")
