@@ -906,7 +906,20 @@ def get_release_info(url):
         data = response.json()
 
         if data['kind'] == 'track':
-            info = process_track(data)
+            info = {
+                "title": data.get("title"),
+                "artist_name": (data.get("user") or {}).get("username"),
+                "url": data.get("permalink_url"),
+                "upload_date": data.get("created_at"),
+                "release_date": data.get("release_date") or data.get("created_at"),
+                "cover_url": data.get("artwork_url"),
+                "track_count": 1,
+                "duration": format_duration(data.get("duration", 0)),
+                "features": extract_track_features(data),
+                "genres": [data.get("genre")] if data.get("genre") else [],
+                "type": "track",
+                "repost": False,
+            }
         elif data['kind'] == 'playlist':
             info = process_playlist(data)
         elif data['kind'] == 'user':
@@ -1102,7 +1115,7 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "release_date": original.get("release_date") or original.get("created_at"),
                 "liked_date": like_date,
                 "cover_url": original.get("artwork_url"),
-                "features": extract_features(original.get("title", "")),
+                "features": extract_track_features(original),
                 "track_count": original.get("track_count", 1),
                 "duration": duration,
                 "genres": genres,
@@ -1180,7 +1193,7 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     "release_date": original.get("release_date") or original.get("created_at"),
                     "reposted_date": repost_date,
                     "cover_url": original.get("artwork_url"),
-                    "features": extract_features(original.get("title", "")),
+                    "features": extract_track_features(original),
                     "track_count": original.get("track_count", 1),
                     "duration": format_duration(original.get("duration", 0)),
                     "genres": [original.get("genre")] if original.get("genre") else [],
@@ -1339,6 +1352,65 @@ def extract_features(title):
     if len(out) > _MAX_FEATURE_CHARS:
         out = out[:_MAX_FEATURE_CHARS-3].rstrip(', ') + '...'
     return out
+
+def extract_track_features(track: dict, main_artist: str | None = None):
+    """
+    Extract collaborators/features from a SoundCloud track payload.
+    Prefers publisher_metadata.artist, falls back to title parsing.
+    Returns a list of names excluding the main artist.
+    """
+    if not isinstance(track, dict):
+        return None
+
+    # Main artist
+    main = (main_artist or (track.get('user') or {}).get('username') or '').strip()
+
+    # 1) Try publisher_metadata.artist (often "Artist A, Artist B")
+    artist_line = None
+    pm = track.get('publisher_metadata') or {}
+    if isinstance(pm, dict):
+        artist_line = pm.get('artist')
+
+    # 2) Try other possible fields
+    if not artist_line:
+        artist_line = track.get('artist') or track.get('display_artist')
+
+    names: list[str] = []
+    if isinstance(artist_line, str):
+        txt = artist_line.strip()
+        if txt:
+            # Normalize separators: comma, ampersand, “ x ”, “ × ”, slash
+            parts = re.split(r'\s*[,&/]\s*|\s+x\s+| × ', txt)
+            # De-dupe, filter invalids
+            seen = set()
+            for p in parts:
+                name = p.strip()
+                if not name:
+                    continue
+                low = name.lower()
+                if low in {'none', 'unknown', 'various artists', 'va', '-'}:
+                    continue
+                if low not in seen:
+                    seen.add(low)
+                    names.append(name)
+
+            # Remove the main artist if present
+            if main:
+                names = [n for n in names if n.lower() != main.lower()]
+
+    # 3) Fallback to legacy title parser if nothing found
+    if not names:
+        try:
+            # Existing helper used previously in likes/reposts building
+            extracted = extract_features(track.get('title', '') or '')
+            if isinstance(extracted, list):
+                names = [n for n in extracted if n]
+            elif isinstance(extracted, str):
+                names = [p.strip() for p in extracted.split(',') if p.strip()]
+        except Exception:
+            pass
+
+    return names or None
 
 # --- Bot Integration Helpers ---
 

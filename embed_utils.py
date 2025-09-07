@@ -38,6 +38,37 @@ def _first_feat_name_strict(features):
             return p
     return None
 
+def _to_unix_ts(s):
+    """Robust timestamp parser for SoundCloud and Spotify dates."""
+    if not s:
+        return None
+    try:
+        txt = str(s).strip()
+        # Normalize Z to +00:00 for fromisoformat
+        if txt.endswith('Z'):
+            txt = txt[:-1] + '+00:00'
+        # fromisoformat handles: YYYY-MM-DD, YYYY-MM-DDTHH:MM:SS(.fff)(±HH:MM)
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        pass
+    # Legacy SoundCloud format: 2025/09/06 16:40:00 +0000
+    for fmt in ('%Y/%m/%d %H:%M:%S %z',
+                '%Y-%m-%dT%H:%M:%S%z',
+                '%Y-%m-%dT%H:%M:%S.%f%z'):
+        try:
+            txt = str(s).strip().replace('Z', '+0000')
+            return int(datetime.strptime(txt, fmt).timestamp())
+        except Exception:
+            continue
+    # Date-only fallback
+    try:
+        return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return None
+
 def create_music_embed(
     platform,
     artist_name,
@@ -103,7 +134,7 @@ def create_music_embed(
 
     color = custom_color if custom_color is not None else (0x1DB954 if platform.lower() == "spotify" else 0xfa5a02)
 
-    # Ensure emoji map & duration field logic (re‑add or reinforce)
+    # Ensure emoji map & heading
     emoji_map = {
         "playlist": "📂",
         "album": "💿",
@@ -111,11 +142,12 @@ def create_music_embed(
         "deluxe": "💿",
         "track": "🎵"
     }
-
     heading_emoji = emoji_map.get(release_type, "🎵")
     heading = f"{heading_emoji} {artist_name} released {_indef_article(release_type)} {release_type}!"
+
+    # Title: do NOT append (Feat. …) for SoundCloud (avoid duplication)
     feat_in_title = _first_feat_name_strict(features)
-    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+    title_for_desc = title if platform.lower() == "soundcloud" else (f"{title} (Feat. {feat_in_title})" if feat_in_title else title)
 
     embed = discord.Embed(
         title=heading,
@@ -128,43 +160,14 @@ def create_music_embed(
     if isinstance(duration, str) and duration.strip():
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Release date (show raw date for date-only strings)
+    # Release date (use robust parser)
     if release_date:
-        rd = str(release_date).strip()
-        if 'T' in rd:
-            rd_norm = rd.replace('Z', '+0000')
-            ts = None
-            for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-                try:
-                    ts = int(datetime.strptime(rd_norm, fmt).timestamp())
-                    break
-                except Exception:
-                    continue
-            if ts:
-                embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
-            else:
-                embed.add_field(name="Release Date", value=rd[:10], inline=True)
+        ts = _to_unix_ts(release_date)
+        if ts is not None:
+            embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
         else:
-            # Parse date-only and render as relative time
-            ts = None
-            try:
-                if len(rd) >= 10:
-                    dt = datetime.strptime(rd[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc)
-                    ts = int(dt.timestamp())
-                elif len(rd) == 7:
-                    # YYYY-MM -> assume first of month
-                    dt = datetime.strptime(rd, '%Y-%m').replace(day=1, tzinfo=timezone.utc)
-                    ts = int(dt.timestamp())
-                elif len(rd) == 4:
-                    # YYYY -> assume Jan 1st
-                    dt = datetime.strptime(rd, '%Y').replace(tzinfo=timezone.utc)
-                    ts = int(dt.timestamp())
-            except Exception:
-                ts = None
-            if ts is not None:
-                embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
-            else:
-                embed.add_field(name="Release Date", value=rd[:10], inline=True)
+            rd = str(release_date).strip()
+            embed.add_field(name="Release Date", value=rd[:10], inline=True)
 
     if genres:
         if isinstance(genres, list):
@@ -189,19 +192,8 @@ def create_music_embed(
 
     # Upload Date (SoundCloud only), only if present and different from Release Date
     if platform.lower() == "soundcloud" and upload_date:
-        def _to_ts(s):
-            try:
-                s2 = str(s).replace('Z', '+0000')
-                for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
-                    try:
-                        return int(datetime.strptime(s2, fmt).timestamp())
-                    except Exception:
-                        continue
-                return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                return None
-        rd_ts = _to_ts(release_date) if release_date else None
-        up_ts = _to_ts(upload_date)
+        rd_ts = _to_unix_ts(release_date) if release_date else None
+        up_ts = _to_unix_ts(upload_date)
         if up_ts and (not rd_ts or up_ts != rd_ts):
             embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
 
@@ -235,8 +227,7 @@ def create_repost_embed(
     *,
     original_artist=None
 ):
-    """Create an embed for a reposted track.
-    Updated to match the SoundCloud like embed styling EXACTLY (structure & field order) without modifying the like embed itself."""
+    """Create an embed for a reposted track."""
     display_artist = artist_name or original_artist or "Unknown"
 
     # Normalize track_count
@@ -258,37 +249,9 @@ def create_repost_embed(
         except ValueError:
             pass
 
-    # Parse timestamps -> Discord relative format
-    release_timestamp = None
-    if release_date:
-        rd = str(release_date).replace('Z', '+0000')
-        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-            try:
-                release_timestamp = int(datetime.strptime(rd, fmt).timestamp())
-                break
-            except Exception:
-                continue
-        if release_timestamp is None:
-            # Fallback date-only
-            try:
-                release_timestamp = int(datetime.strptime(str(release_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                release_timestamp = None
-
-    repost_timestamp = None
-    if reposted_date:
-        rpd = str(reposted_date).replace('Z', '+0000')
-        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-            try:
-                repost_timestamp = int(datetime.strptime(rpd, fmt).timestamp())
-                break
-            except Exception:
-                continue
-        if repost_timestamp is None:
-            try:
-                repost_timestamp = int(datetime.strptime(str(reposted_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                repost_timestamp = None
+    # Parse timestamps with robust helper
+    release_timestamp = _to_unix_ts(release_date)
+    repost_timestamp = _to_unix_ts(reposted_date)
 
     # Determine repost type (prefer explicit content_type from SC classification)
     repost_type = (content_type or "").lower()
@@ -313,8 +276,8 @@ def create_repost_embed(
             else:
                 repost_type = "track"
 
-    feat_in_title = _first_feat_name_strict(features)
-    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+    # Title: NEVER append (Feat. …) in reposts
+    title_for_desc = title
 
     embed = discord.Embed(
         title=f"📢 {reposted_by} reposted {_indef_article(repost_type)} {repost_type}!",
@@ -349,26 +312,12 @@ def create_repost_embed(
     embed.add_field(name=genre_name, value=genre_text, inline=True)
 
     # Row 3: Upload Date (only if different), Features (only if present)
-    def _to_ts(s):
-        try:
-            s2 = str(s).replace('Z', '+0000')
-            for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
-                try:
-                    return int(datetime.strptime(s2, fmt).timestamp())
-                except Exception:
-                    continue
-            return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-        except Exception:
-            return None
-    up_ts = _to_ts(upload_date) if upload_date else None
+    up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
         embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
 
     if features:
-        if isinstance(features, list):
-            ftxt = ", ".join([f for f in features if f])
-        else:
-            ftxt = str(features).strip()
+        ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
         if ftxt and ftxt.lower() != "none":
             embed.add_field(name="Features", value=ftxt[:1024], inline=True)
 
@@ -396,7 +345,7 @@ def create_like_embed(
     upload_date=None,  # NEW (now used)
     original_artist=None
 ):
-    """Create an embed for a liked item (track / album / ep / playlist) mirroring repost embed styling."""
+    """Create an embed for a liked item (track / album / ep / playlist)."""
     display_artist = artist_name or original_artist or "Unknown"
 
     # Normalize track_count
@@ -421,38 +370,11 @@ def create_like_embed(
         except ValueError:
             pass
 
-    # Parse timestamps -> Discord relative format
-    release_timestamp = None
-    if release_date:
-        rd = str(release_date).replace('Z', '+0000')
-        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-            try:
-                release_timestamp = int(datetime.strptime(rd, fmt).timestamp())
-                break
-            except Exception:
-                continue
-        if release_timestamp is None:
-            try:
-                release_timestamp = int(datetime.strptime(str(release_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                release_timestamp = None
+    # Parse timestamps with robust helper
+    release_timestamp = _to_unix_ts(release_date)
+    like_timestamp = _to_unix_ts(liked_date)
 
-    like_timestamp = None
-    if liked_date:
-        ld = str(liked_date).replace('Z', '+0000')
-        for fmt in ('%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z'):
-            try:
-                like_timestamp = int(datetime.strptime(ld, fmt).timestamp())
-                break
-            except Exception:
-                continue
-        if like_timestamp is None:
-            try:
-                like_timestamp = int(datetime.strptime(str(liked_date)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-            except Exception:
-                like_timestamp = None
-
-    # Determine type (prefer upstream classification)
+    # Determine like_type (existing logic)
     like_type = (content_type or "").lower()
     if like_type not in ("album", "ep", "playlist", "track"):
         title_lower = (title or "").lower()
@@ -474,8 +396,8 @@ def create_like_embed(
             else:
                 like_type = "track"
 
-    feat_in_title = _first_feat_name_strict(features)
-    title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
+    # Title: NEVER append (Feat. …) in likes
+    title_for_desc = title
 
     embed = discord.Embed(
         title=f"❤️ {liked_by} liked {_indef_article(like_type)} {like_type}!",
@@ -508,27 +430,12 @@ def create_like_embed(
             genre_text = genres.strip()
     embed.add_field(name=genre_name, value=genre_text, inline=True)
 
-    # Row 3: Upload Date (only if different), Features (only if present)
-    def _to_ts(s):
-        try:
-            s2 = str(s).replace('Z', '+0000')
-            for fmt in ('%Y-%m-%dT%H:%M:%S%z','%Y-%m-%dT%H:%M:%S.%f%z'):
-                try:
-                    return int(datetime.strptime(s2, fmt).timestamp())
-                except Exception:
-                    continue
-            return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
-        except Exception:
-            return None
-    up_ts = _to_ts(upload_date) if upload_date else None
+    # Row 3: Upload Date and Features
+    up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
         embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
-
     if features:
-        if isinstance(features, list):
-            ftxt = ", ".join([f for f in features if f])
-        else:
-            ftxt = str(features).strip()
+        ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
         if ftxt and ftxt.lower() != "none":
             embed.add_field(name="Features", value=ftxt[:1024], inline=True)
 
