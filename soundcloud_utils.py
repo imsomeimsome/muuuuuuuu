@@ -1310,10 +1310,13 @@ def format_duration(ms):
 
 # Precompile feature extraction regex patterns
 _FEATURE_PATTERNS = [
+    # Only treat "with" as a feature when it’s inside () or []
     re.compile(r"\((?:feat|ft|with)\.?\s*([^)]+)\)", re.IGNORECASE),
     re.compile(r"\[(?:feat|ft|with)\.?\s*([^\]]+)\]", re.IGNORECASE),
-    re.compile(r"(?:feat|ft|with)\.?\s+([^\-–()\[\]]+)", re.IGNORECASE),
-    re.compile(r"w/\s*([^\-–()\[\]]+)", re.IGNORECASE)
+    # Allow non-parenthesized feat/ft, but NOT "with"
+    re.compile(r"(?:feat|ft)\.?\s+([^\-–()\[\]]+)", re.IGNORECASE),
+    # Keep "w/" shorthand
+    re.compile(r"w/\s*([^\-–()\[\]]+)", re.IGNORECASE),
 ]
 _MAX_FEATURE_CHARS = 120
 

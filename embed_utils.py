@@ -9,6 +9,35 @@ def _indef_article(word: str) -> str:
         return "a"
     return "an" if word[0].lower() in "aeiou" else "a"
 
+def _first_feat_name_strict(features):
+    """
+    Return the first valid feature name or None.
+    - Ignores placeholders like 'none'/'unknown'
+    - Handles list or comma-separated string
+    """
+    def _is_valid(n: str) -> bool:
+        if not n:
+            return False
+        s = n.strip()
+        if not s:
+            return False
+        low = s.lower()
+        return low not in {"none", "unknown", "n/a", "na", "-"}
+
+    if not features:
+        return None
+    if isinstance(features, list):
+        for f in features:
+            if isinstance(f, str) and _is_valid(f):
+                return f.strip()
+        return None
+    # string
+    parts = [p.strip() for p in str(features).split(",")]
+    for p in parts:
+        if _is_valid(p):
+            return p
+    return None
+
 def create_music_embed(
     platform,
     artist_name,
@@ -83,21 +112,9 @@ def create_music_embed(
         "track": "🎵"
     }
 
-    # Build "(Feat. X)" suffix for title if any features present
-    def _first_feat_name(f):
-        if not f:
-            return None
-        if isinstance(f, list):
-            for n in f:
-                if n:
-                    return str(n).strip()
-            return None
-        s = str(f).strip()
-        return s.split(",")[0].strip() if s else None
-
     heading_emoji = emoji_map.get(release_type, "🎵")
     heading = f"{heading_emoji} {artist_name} released {_indef_article(release_type)} {release_type}!"
-    feat_in_title = _first_feat_name(features)
+    feat_in_title = _first_feat_name_strict(features)
     title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
 
     embed = discord.Embed(
@@ -296,18 +313,7 @@ def create_repost_embed(
             else:
                 repost_type = "track"
 
-    # Append (Feat. X) to description title if available
-    def _first_feat_name(f):
-        if not f:
-            return None
-        if isinstance(f, list):
-            for n in f:
-                if n:
-                    return str(n).strip()
-            return None
-        s = str(f).strip()
-        return s.split(",")[0].strip() if s else None
-    feat_in_title = _first_feat_name(features)
+    feat_in_title = _first_feat_name_strict(features)
     title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
 
     embed = discord.Embed(
@@ -468,18 +474,7 @@ def create_like_embed(
             else:
                 like_type = "track"
 
-    # Append (Feat. X) to description title if available
-    def _first_feat_name(f):
-        if not f:
-            return None
-        if isinstance(f, list):
-            for n in f:
-                if n:
-                    return str(n).strip()
-            return None
-        s = str(f).strip()
-        return s.split(",")[0].strip() if s else None
-    feat_in_title = _first_feat_name(features)
+    feat_in_title = _first_feat_name_strict(features)
     title_for_desc = f"{title} (Feat. {feat_in_title})" if feat_in_title else title
 
     embed = discord.Embed(
