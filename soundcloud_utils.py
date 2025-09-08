@@ -1222,7 +1222,8 @@ def process_track(track_data):
         'release_date': track_data.get('created_at', ''),
         'cover_url': track_data.get('artwork_url') or track_data['user'].get('avatar_url', ''),
         'duration': format_duration(track_data.get('duration', 0)),
-        'features': extract_features(track_data['title']),
+        # Use robust extractor (publisher_metadata.artist) instead of title-only parsing
+        'features': extract_track_features(track_data),
         'genres': [track_data.get('genre', '')] if track_data.get('genre') else [],
         'repost': track_data.get('repost', False),
         'track_count': 1
@@ -1336,16 +1337,24 @@ _MAX_FEATURE_CHARS = 120
 def extract_features(title):
     """Extract featured artists from track titles using precompiled patterns with trimming."""
     features = set()
+    if not title:
+        return "None"
     for pattern in _FEATURE_PATTERNS:
         matches = pattern.findall(title or '')
         for match in matches:
-            cleaned = match.strip()
-            for sep in ['/', '&', ',', ' and ', ' x ']:
-                cleaned = cleaned.replace(sep, ',')
-            for name in cleaned.split(','):
-                name = name.strip()
-                if name:
-                    features.add(name)
+            cleaned = (match or '').strip()
+            if not cleaned:
+                continue
+            # Split on common separators
+            parts = re.split(r'\s*(?:/|&|,| and | x | × )\s*', cleaned, flags=re.IGNORECASE)
+            for name in parts:
+                n = (name or '').strip()
+                if not n:
+                    continue
+                low = n.lower()
+                if low in {'none', 'unknown', '-', 'n/a', 'na', 'various artists', 'va'}:
+                    continue
+                features.add(n)
     if not features:
         return "None"
     out = ", ".join(sorted(features))
@@ -1362,16 +1371,16 @@ def extract_track_features(track: dict, main_artist: str | None = None):
     if not isinstance(track, dict):
         return None
 
-    # Main artist
+    # Main artist to exclude
     main = (main_artist or (track.get('user') or {}).get('username') or '').strip()
 
-    # 1) Try publisher_metadata.artist (often "Artist A, Artist B")
+    # 1) Prefer publisher_metadata.artist (e.g., "1649194610, icant2")
     artist_line = None
     pm = track.get('publisher_metadata') or {}
     if isinstance(pm, dict):
         artist_line = pm.get('artist')
 
-    # 2) Try other possible fields
+    # 2) Other possible fields
     if not artist_line:
         artist_line = track.get('artist') or track.get('display_artist')
 
@@ -1379,36 +1388,31 @@ def extract_track_features(track: dict, main_artist: str | None = None):
     if isinstance(artist_line, str):
         txt = artist_line.strip()
         if txt:
-            # Normalize separators: comma, ampersand, “ x ”, “ × ”, slash
-            parts = re.split(r'\s*[,&/]\s*|\s+x\s+| × ', txt)
-            # De-dupe, filter invalids
+            parts = re.split(r'\s*(?:/|&|,| and | x | × )\s*', txt, flags=re.IGNORECASE)
             seen = set()
             for p in parts:
-                name = p.strip()
+                name = (p or '').strip()
                 if not name:
                     continue
                 low = name.lower()
-                if low in {'none', 'unknown', 'various artists', 'va', '-'}:
+                if low in {'none', 'unknown', '-', 'n/a', 'na', 'various artists', 'va'}:
+                    continue
+                if main and low == main.lower():
                     continue
                 if low not in seen:
                     seen.add(low)
                     names.append(name)
 
-            # Remove the main artist if present
-            if main:
-                names = [n for n in names if n.lower() != main.lower()]
-
-    # 3) Fallback to legacy title parser if nothing found
+    # 3) Fallback: parse title "(feat ...)", "ft ...", "w/ ..." etc.
     if not names:
         try:
-            # Existing helper used previously in likes/reposts building
             extracted = extract_features(track.get('title', '') or '')
             if isinstance(extracted, list):
                 names = [n for n in extracted if n]
-            elif isinstance(extracted, str):
+            elif isinstance(extracted, str) and extracted.lower() != 'none':
                 names = [p.strip() for p in extracted.split(',') if p.strip()]
         except Exception:
-            pass
+            names = []
 
     return names or None
 
