@@ -132,16 +132,18 @@ def record_data_anomaly(kind: str, endpoint: str, detail: str = ''):
         logging.debug(f"record_data_anomaly failed: {e}")
 
 def circuit_breaker_active():
+    """Return True only while the breaker window is still active; auto-clear when expired."""
     global CIRCUIT_BREAKER_UNTIL
     if not CIRCUIT_BREAKER_UNTIL:
         return False
     if datetime.now(timezone.utc) >= CIRCUIT_BREAKER_UNTIL:
+        # Auto-clear expired breaker
         CIRCUIT_BREAKER_UNTIL = None
         return False
     return True
 
 def trip_circuit_breaker(duration: timedelta = None, reason: str = ''):
-    """Activate circuit breaker for given duration (default adaptive)."""
+    """Activate circuit breaker for given duration (default to minimum window)."""
     global CIRCUIT_BREAKER_UNTIL, TELEMETRY
     if duration is None:
         duration = CIRCUIT_BREAKER_MIN
@@ -149,6 +151,11 @@ def trip_circuit_breaker(duration: timedelta = None, reason: str = ''):
     TELEMETRY['circuit_breaker_tripped'] += 1
     logging.error(f"🛑 SoundCloud circuit breaker tripped for {duration}. Reason: {reason}")
 
+def reset_circuit_breaker():
+    """Manually clear the circuit breaker (use sparingly)."""
+    global CIRCUIT_BREAKER_UNTIL
+    CIRCUIT_BREAKER_UNTIL = None
+    logging.info("🔌 SoundCloud circuit breaker reset")
 
 def get_circuit_breaker_status():
     return {
