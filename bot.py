@@ -663,10 +663,22 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         artist_id = artist.get('artist_id')
         owner_id = artist.get('owner_id')
         guild_id = artist.get('guild_id')
+        # Validate artist_id early; try to extract from URL if missing
+        if not artist_id:
+            try:
+                from spotify_utils import extract_spotify_id  # local import to avoid top import changes
+                candidate_url = artist.get('artist_url') or artist.get('url') or ''
+                artist_id = extract_spotify_id(candidate_url)
+            except Exception:
+                artist_id = None
+        if not artist_id:
+            logging.error(f"❌ Missing Spotify artist_id for {artist_name}; skipping artist")
+            update_last_release_check(artist.get('artist_id') or 'unknown', owner_id, guild_id, datetime.now(timezone.utc).isoformat())
+            continue
+        # Parse stored timestamps
         last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
         last_release_date_raw = artist.get('last_release_date')
         try:
-            # Parse stored timestamps
             last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
             last_check_dt = parse_date(last_release_check) if last_release_check else None
             logging.info(f"🟢 Checking {artist_name}")

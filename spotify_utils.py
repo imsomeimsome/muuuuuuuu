@@ -435,8 +435,11 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
             status = getattr(e, "http_status", None)
             msg_lc = str(e).lower()
             headers = getattr(e, 'headers', {}) or {}
-            # Unified pattern detection for custom messages even if status != 429
             is_pattern_limit = any(pat in msg_lc for pat in RATE_LIMIT_PATTERNS)
+            # Handle invalid ID (do NOT rotate keys for client-side bad input)
+            if status == 400 and ('invalid base62 id' in msg_lc or 'invalid id' in msg_lc):
+                logging.error(f"❌ Spotify API invalid ID error: {e}")
+                break
             # Standard 429 or heuristic 403 with pattern text (sometimes appears)
             if status in (429, 403) and (status == 429 or is_pattern_limit):
                 wait = 0
@@ -471,8 +474,8 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
                     continue
                 time.sleep(min(60, (attempt + 1) * delay))
                 continue
-            # Invalid client / auth
-            if 'invalid_client' in msg_lc or status in (400, 401):
+            # Invalid client / auth: rotate ONLY on 401 or explicit invalid_client
+            if 'invalid_client' in msg_lc or status == 401:
                 TELEMETRY['invalid_credentials'] += 1
                 logging.error("❌ Spotify invalid/expired credentials. Rotating...")
                 if _attempt_rotation("invalid_client"):
@@ -494,7 +497,7 @@ def safe_spotify_call(callable_fn, *args, retries=3, delay=2, **kwargs):
             break
         except Exception as e:
             TELEMETRY['errors'] += 1
-            logging.error(f"Unexpected Spotify error: {e}")
+            logging.error(f"Spotify call exception: {e}")
             time.sleep(delay)
             continue
     return None

@@ -321,6 +321,14 @@ class SoundCloudKeyManager:
         except Exception as e:
             logging.error(f"Failed to log SoundCloud rotation: {e}")
 
+    def _schedule_rotation_log(self, old_index, new_index, reason, exhausted=False):
+        """Only create/schedule the coroutine if a loop is running."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no running loop; skip logging to avoid 'never awaited'
+        loop.create_task(self._log_rotation(old_index, new_index, reason, exhausted=exhausted))
+
     def rotate_key(self, reason="rate_limit"):
         """Rotate to next available key; schedule async log. Returns new key or None."""
         if len(self.api_keys) <= 1:
@@ -331,28 +339,20 @@ class SoundCloudKeyManager:
             nxt = (self.current_key_index + 1) % len(self.api_keys)
             cd = self.key_cooldowns.get(nxt)
             if cd and datetime.now(timezone.utc) < cd:
-                # Skip keys still cooling down
-                self.current_key_index = nxt
+                # Skip keys still cooling down (do NOT move index)
                 continue
             self.current_key_index = nxt
             new_key = self.get_current_key()
             self.fail_counts[self.current_key_index] = 0
             logging.info(f"🔄 Rotated SoundCloud key {old+1} ➜ {self.current_key_index+1} ({new_key[:10]}…)")
             if self.bot:
-                try:
-                    asyncio.create_task(self._log_rotation(old, self.current_key_index, reason))
-                except RuntimeError:
-                    # Event loop not started yet
-                    pass
+                self._schedule_rotation_log(old, self.current_key_index, reason)
             self.persist_state()
             return new_key
         # Exhausted
         logging.error("🛑 All SoundCloud keys on cooldown (rotation exhausted).")
         if self.bot:
-            try:
-                asyncio.create_task(self._log_rotation(old, old, reason, exhausted=True))
-            except RuntimeError:
-                pass
+            self._schedule_rotation_log(old, old, reason, exhausted=True)
         self.persist_state()
         return None
 
@@ -1262,9 +1262,9 @@ def process_playlist(playlist_data):
     # Also check playlist-level genres/tags
     if playlist_data.get('genre'):
         genres.add(playlist_data.get('genre'))
-    if playlist_data.get('tags'):
+    if (tags := playlist_data.get('tags')):
         genres.update([
-            tag.strip() for tag in playlist_data.get('tags', '').split() 
+            tag.strip() for tag in tags.split() 
             if 'genre:' in tag.lower() or 
             any(g in tag.lower() for g in ['rap', 'hip-hop', 'trap', 'edm', 'electronic', 'rock'])
         ])
