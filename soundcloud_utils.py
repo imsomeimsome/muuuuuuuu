@@ -17,6 +17,7 @@ from functools import lru_cache
 import threading
 from collections import deque
 import statistics
+import base64
 
 # At the top after imports
 load_dotenv()
@@ -38,6 +39,14 @@ TELEMETRY = {
 }
 CIRCUIT_BREAKER_UNTIL = None  # datetime when breaker lifts
 CIRCUIT_BREAKER_MIN = timedelta(minutes=10)
+
+# Add default cache TTL and jitter helper
+CACHE_TTL = int(os.getenv('SC_CACHE_TTL', '300'))  # default 5 min
+def _jittered_ttl(base: int, jitter: int) -> int:
+    try:
+        return max(5, int(base) + random.randint(-int(jitter), int(jitter)))
+    except Exception:
+        return max(5, int(base))
 
 # Passive anomaly detection (data truncation / unexpected empties)
 DATA_ANOMALIES = deque(maxlen=50)  # (ts, kind, endpoint, detail)
@@ -164,465 +173,151 @@ def get_circuit_breaker_status():
         'seconds_remaining': (CIRCUIT_BREAKER_UNTIL - datetime.now(timezone.utc)).total_seconds() if CIRCUIT_BREAKER_UNTIL else 0
     }
 
-# --- Batch Release Fetch Monitor (detect truncated runs / silent rate limits) ---
-class _ReleaseFetchMonitor:
-    def __init__(self):
-        self.reset()
-        self.consecutive_fail_threshold = int(os.getenv('SC_RUN_FAIL_THRESHOLD', '5'))
-        self.failure_rate_threshold = float(os.getenv('SC_RUN_FAIL_RATE', '0.8'))
-        self.min_samples_for_rate = int(os.getenv('SC_RUN_MIN_SAMPLES', '6'))
-        self.rotated_this_run = False
+# --- OAuth (Developer API) support ---
+SC_OAUTH_CLIENT_ID = os.getenv("SC_OAUTH_CLIENT_ID") or os.getenv("SOUNDCLOUD_OAUTH_CLIENT_ID")
+SC_OAUTH_CLIENT_SECRET = os.getenv("SC_OAUTH_CLIENT_SECRET") or os.getenv("SOUNDCLOUD_OAUTH_CLIENT_SECRET")
+SC_OAUTH_REFRESH_TOKEN = os.getenv("SC_OAUTH_REFRESH_TOKEN")
+SC_OAUTH_ACCESS_TOKEN = os.getenv("SC_OAUTH_ACCESS_TOKEN")
+SC_OAUTH_EXPIRES_AT = 0  # epoch seconds
 
-    def reset(self):
-        self.total = 0
-        self.success = 0
-        self.fail = 0
-        self.consecutive_fail = 0
-        self.rotated_this_run = False
+def _oauth_enabled():
+    return bool(SC_OAUTH_ACCESS_TOKEN or (SC_OAUTH_CLIENT_ID and SC_OAUTH_CLIENT_SECRET and SC_OAUTH_REFRESH_TOKEN))
 
-    def note(self, success: bool, context: str = ''):
-        self.total += 1
-        if success:
-            self.success += 1
-            self.consecutive_fail = 0
-        else:
-            self.fail += 1
-            self.consecutive_fail += 1
+def _set_oauth_token(token: str, expires_in: int | None):
+    global SC_OAUTH_ACCESS_TOKEN, SC_OAUTH_EXPIRES_AT
+    SC_OAUTH_ACCESS_TOKEN = token
+    SC_OAUTH_EXPIRES_AT = int(time.time()) + int(expires_in or 3600) - 60  # refresh 60s early
 
-    def should_rotate(self):
-        if self.rotated_this_run:
-            return False
-        # Hard trigger on consecutive failures
-        if self.consecutive_fail >= self.consecutive_fail_threshold:
+def refresh_oauth_access_token(force: bool = False) -> bool:
+    """Refresh OAuth access token using refresh_token. Return True on success."""
+    global SC_OAUTH_CLIENT_ID, SC_OAUTH_CLIENT_SECRET, SC_OAUTH_REFRESH_TOKEN
+    if not (SC_OAUTH_CLIENT_ID and SC_OAUTH_CLIENT_SECRET and SC_OAUTH_REFRESH_TOKEN):
+        return False
+    try:
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": SC_OAUTH_REFRESH_TOKEN,
+            "client_id": SC_OAUTH_CLIENT_ID,
+            "client_secret": SC_OAUTH_CLIENT_SECRET,
+        }
+        resp = requests.post("https://api.soundcloud.com/oauth2/token", data=data, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            payload = resp.json() or {}
+            _set_oauth_token(payload.get("access_token"), payload.get("expires_in"))
+            logging.info("✅ Refreshed SoundCloud OAuth access token")
             return True
-        # Soft trigger on high failure rate after enough samples
-        if self.total >= self.min_samples_for_rate and self.fail / max(1, self.total) >= self.failure_rate_threshold:
-            return True
+        logging.warning(f"⚠️ OAuth refresh failed ({resp.status_code}): {resp.text[:200]}")
+        return False
+    except Exception as e:
+        logging.error(f"❌ OAuth refresh exception: {e}")
         return False
 
-    def mark_rotated(self):
-        self.rotated_this_run = True
+def _oauth_token_valid():
+    return bool(SC_OAUTH_ACCESS_TOKEN and time.time() < SC_OAUTH_EXPIRES_AT)
 
-_release_monitor_singleton = _ReleaseFetchMonitor()
-
-def get_release_monitor():
-    return _release_monitor_singleton
-
-class SoundCloudKeyManager:
-    def __init__(self, bot=None):
-        self.bot = bot
-        self.api_keys = [
-            os.getenv("SOUNDCLOUD_CLIENT_ID"),
-            os.getenv("SOUNDCLOUD_CLIENT_ID_2"),
-            os.getenv("SOUNDCLOUD_CLIENT_ID_3"),
-        ]
-        self.api_keys = [k for k in self.api_keys if k]
-        self.current_key_index = 0
-        self.key_cooldowns = {}          # idx -> datetime until reusable
-        self.fail_counts = {}            # idx -> consecutive failures
-        # Load persisted state if any
-        try:
-            persisted = load_api_key_state('soundcloud')
-            if persisted:
-                # Determine active index
-                active_indices = [idx for idx, row in persisted.items() if row.get('active')]
-                if active_indices:
-                    active_idx = active_indices[0]
-                    if active_idx < len(self.api_keys):
-                        self.current_key_index = active_idx
-                # Restore fail counts & cooldowns (only if within future)
-                from datetime import datetime as _dt, timezone as _tz
-                now = _dt.now(_tz.utc)
-                for idx, row in persisted.items():
-                    if idx < len(self.api_keys):
-                        self.fail_counts[idx] = row.get('fail_count', 0)
-                        cd_str = row.get('cooldown_until')
-                        if cd_str:
-                            try:
-                                cd_dt = _dt.fromisoformat(cd_str.replace('Z', '+00:00'))
-                                if cd_dt > now:
-                                    self.key_cooldowns[idx] = cd_dt
-                            except Exception:
-                                pass
-        except Exception as e:
-            logging.warning(f"Failed restoring SoundCloud key state: {e}")
-        if not self.api_keys:
-            logging.error("❌ No SoundCloud API keys configured.")
-        else:
-            logging.info(f"✅ Loaded {len(self.api_keys)} SoundCloud key(s). Using index {self.current_key_index}.")
-            self.persist_state()
-
-    def persist_state(self):
-        """Persist current rotation state to database."""
-        snapshot = []
-        for idx, key in enumerate(self.api_keys):
-            cd = self.key_cooldowns.get(idx)
-            snapshot.append({
-                'index': idx,
-                'key': key,
-                'fail_count': self.fail_counts.get(idx, 0),
-                'cooldown_until': cd.isoformat() if cd else None,
-                'active': idx == self.current_key_index
-            })
-        save_api_key_state('soundcloud', snapshot)
-
-    def stop_background_tasks(self):
-        """Cancel internal background tasks (called on shutdown)."""
-        task = getattr(self, '_auto_refresh_task', None)
-        if task and not task.done():
-            task.cancel()
-
-    def get_current_key(self):
-        if not self.api_keys:
-            raise ValueError("No SoundCloud keys configured.")
-        return self.api_keys[self.current_key_index]
-
-    def _calc_cooldown(self, idx):
-        """Adaptive cooldown: grows with consecutive failures."""
-        base = 30   # seconds
-        fails = self.fail_counts.get(idx, 0)
-        # Exponential-ish backoff capped
-        seconds = min(base * (2 ** fails), 60 * 60 * 6)  # cap at 6h
-        return timedelta(seconds=seconds)
-
-    def mark_rate_limited(self):
-        """Mark current key as limited without rotating (used before rotate)."""
-        idx = self.current_key_index
-        self.fail_counts[idx] = self.fail_counts.get(idx, 0) + 1
-        self.key_cooldowns[idx] = datetime.now(timezone.utc) + self._calc_cooldown(idx)
-        self.persist_state()
-
-    async def _log_rotation(self, old_index, new_index, reason, exhausted=False):
-        if not self.bot:
-            return
-        try:
-            now = datetime.now(timezone.utc)
-            lines = []
-            for i, key in enumerate(self.api_keys):
-                if i == new_index and not exhausted:
-                    state = "▶️ Active"
-                else:
-                    cd = self.key_cooldowns.get(i)
-                    if cd and cd > now:
-                        state = f"⏳ Cooldown until <t:{int(cd.timestamp())}:R>"
-                    else:
-                        state = "✅ Ready"
-                preview = key[:10] + "…" if key else "N/A"
-                lines.append(f"Key {i+1}: {state} ({preview})")
-            header = "🛑 All SoundCloud keys exhausted" if exhausted else "🔄 SoundCloud Key Rotation"
-            msg = f"{header}\nReason: {reason}\nFrom Key {old_index+1} ➜ Key {new_index+1 if not exhausted else 'N/A'}\n\n" + "\n".join(lines)
-            from database_utils import get_channel
-            for guild in self.bot.guilds:
-                channel_id = get_channel(str(guild.id), "logs")
-                if channel_id:
-                    ch = self.bot.get_channel(int(channel_id))
-                    if ch:
-                        await ch.send(msg)
-        except Exception as e:
-            logging.error(f"Failed to log SoundCloud rotation: {e}")
-
-    def _schedule_rotation_log(self, old_index, new_index, reason, exhausted=False):
-        """Only create/schedule the coroutine if a loop is running."""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return  # no running loop; skip logging to avoid 'never awaited'
-        loop.create_task(self._log_rotation(old_index, new_index, reason, exhausted=exhausted))
-
-    def rotate_key(self, reason="rate_limit"):
-        """Rotate to next available key; schedule async log. Returns new key or None."""
-        if len(self.api_keys) <= 1:
-            logging.warning("⚠️ Only one SoundCloud key configured; cannot rotate.")
-            return None
-        old = self.current_key_index
-        for _ in range(len(self.api_keys) - 1):
-            nxt = (self.current_key_index + 1) % len(self.api_keys)
-            cd = self.key_cooldowns.get(nxt)
-            if cd and datetime.now(timezone.utc) < cd:
-                # Skip keys still cooling down (do NOT move index)
-                continue
-            self.current_key_index = nxt
-            new_key = self.get_current_key()
-            self.fail_counts[self.current_key_index] = 0
-            logging.info(f"🔄 Rotated SoundCloud key {old+1} ➜ {self.current_key_index+1} ({new_key[:10]}…)")
-            if self.bot:
-                self._schedule_rotation_log(old, self.current_key_index, reason)
-            self.persist_state()
-            return new_key
-        # Exhausted
-        logging.error("🛑 All SoundCloud keys on cooldown (rotation exhausted).")
-        if self.bot:
-            self._schedule_rotation_log(old, old, reason, exhausted=True)
-        self.persist_state()
-        return None
-
-    def get_status_rows(self):
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
-        rows = []
-        for i, key in enumerate(self.api_keys):
-            if i == self.current_key_index:
-                state = 'active'
-            else:
-                cd = self.key_cooldowns.get(i)
-                state = f"cooldown_until={cd.isoformat()}" if cd and cd > now else 'ready'
-            rows.append({
-                'index': i,
-                'key_preview': (key or '')[:12] + '…',
-                'state': state,
-                'fail_count': self.fail_counts.get(i, 0)
-            })
-        return rows
-
-    def start_background_tasks(self):
-        if not self.bot:
-            return
-        loop = asyncio.get_event_loop()
-        if not hasattr(self, '_auto_refresh_task'):
-            self._auto_refresh_task = loop.create_task(self._auto_refresh_loop())
-
-    async def _auto_refresh_loop(self):
-        from datetime import datetime as _dt, timezone as _tz
-        from soundcloud_utils import verify_client_id, refresh_client_id  # self import safe at runtime
-        while True:
-            try:
-                # Sleep ~30m +/- 5m jitter
-                base = 1800
-                jitter = random.randint(-300, 300)
-                await asyncio.sleep(max(60, base + jitter))
-                # Skip if no keys
-                if not self.api_keys:
-                    continue
-                # If active key is in cooldown pick a ready one
-                now = _dt.now(_tz.utc)
-                cd = self.key_cooldowns.get(self.current_key_index)
-                if cd and cd > now:
-                    rotated = self.rotate_key(reason="cooldown_active_auto")
-                    if rotated:
-                        logging.info("🔁 Auto-rotation due to active key cooldown.")
-                # Validate current key
-                if not verify_client_id():
-                    logging.warning("⚠️ Active SoundCloud key appears invalid; attempting refresh/rotation")
-                    refreshed = None
-                    # Try rotation first
-                    rotated = self.rotate_key(reason="auto_invalid")
-                    if not rotated:
-                        try:
-                            refreshed = refresh_client_id()
-                        except Exception:
-                            refreshed = None
-                    if refreshed:
-                        logging.info("♻️ Auto-refreshed SoundCloud client_id")
-                    self.persist_state()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logging.warning(f"SoundCloud auto-refresh loop error: {e}")
-
-def init_key_manager(bot):
-    """Initialize the key manager with bot reference."""
-    global key_manager, CLIENT_ID
-    key_manager = SoundCloudKeyManager(bot)
-    CLIENT_ID = key_manager.get_current_key()
-    # Start background maintenance tasks
-    try:
-        key_manager.start_background_tasks()
-    except Exception as e:
-        logging.warning(f"Failed starting SoundCloud key background tasks: {e}")
-    return CLIENT_ID
-
-def manual_rotate_soundcloud_key(reason: str = 'manual'):
-    """Rotate SoundCloud key manually. Returns dict with rotation info."""
-    global key_manager, CLIENT_ID
-    if not key_manager or not getattr(key_manager, 'api_keys', None):
-        return {'rotated': False, 'error': 'No SoundCloud keys configured'}
-    if len(key_manager.api_keys) == 1:
-        return {'rotated': False, 'error': 'Only one SoundCloud key configured', 'keys': key_manager.get_status_rows()}
-    old = key_manager.current_key_index
-    new_key = key_manager.rotate_key(reason=reason)
-    if new_key:
-        CLIENT_ID = new_key
-        return {
-            'rotated': True,
-            'old_index': old,
-            'active_index': key_manager.current_key_index,
-            'total_keys': len(key_manager.api_keys),
-            'keys': key_manager.get_status_rows()
-        }
-    return {'rotated': False, 'error': 'Rotation failed (all keys exhausted)', 'keys': key_manager.get_status_rows()}
-
-def get_soundcloud_key_status():
-    global key_manager
-    if not key_manager or not getattr(key_manager, 'api_keys', None):
-        return {'loaded': False, 'keys': []}
-    return {
-        'loaded': True,
-        'active_index': key_manager.current_key_index,
-        'total_keys': len(key_manager.api_keys),
-        'keys': key_manager.get_status_rows()
-    }
-
-# Cache duration for repeated SoundCloud lookups
-CACHE_TTL = 300  # 5 minutes
-# Load environment variables
-
-# --- Cache helper with jitter ---
-import random as _random
-
-def _jittered_ttl(base:int, jitter:int=60):
-    if jitter <= 0:
-        return base
-    delta = _random.randint(-jitter, jitter)
-    return max(30, base + delta)  # enforce minimum 30s
-
-# Unified resolve logic (remove duplicate _cached_resolve layering)
-
-def resolve_url(url):
-    """Resolve a SoundCloud URL to its API data with single-layer caching + jitter."""
-    url = clean_soundcloud_url(url)  # Normalize the URL
-    cache_key = f"resolve:{url}"
-    cached = get_cache(cache_key)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            delete_cache(cache_key)
-    resolve_endpoint = f"https://api-v2.soundcloud.com/resolve?url={url}&client_id={CLIENT_ID}"
-    for attempt in range(3):
-        if circuit_breaker_active():
-            logging.warning("⛔ Circuit breaker active - skipping resolve")
-            return None
-        response = safe_request(resolve_endpoint)
-        if response and response.status_code == 200:
-            try:
-                data = response.json()
-            except Exception:
-                data = None
-            if data:
-                set_cache(cache_key, json.dumps(data), ttl=_jittered_ttl(3600, 120))
-                return data
-        time.sleep(1 + attempt * 0.5)
-    return None
-
-# Backwards compatibility shim (kept name, uses new resolve_url)
-@lru_cache(maxsize=512)
-def _cached_resolve(url: str):
-    return resolve_url(url)
-
-# Rate limit detection patterns (case-insensitive)
-RATE_LIMIT_PATTERNS = [
-    "rate/request limit",
-    "retry will occur after",
-    "application has reached a rate",
-    "too many requests",
-    "rate limit",
-    "exceeded",  # new pattern
-    "over rate limit",  # new pattern
-    "temporarily disabled",  # new pattern
-]
+def _maybe_authorize(headers: dict, prefer_bearer: bool = False) -> dict:
+    """Attach Authorization header if OAuth is configured and token is valid (or refresh succeeds)."""
+    final = dict(headers or {})
+    if _oauth_enabled():
+        if not _oauth_token_valid():
+            refresh_oauth_access_token()
+        if SC_OAUTH_ACCESS_TOKEN:
+            scheme = "Bearer" if prefer_bearer else "OAuth"
+            final["Authorization"] = f"{scheme} {SC_OAUTH_ACCESS_TOKEN}"
+    return final
 
 def _ensure_client_id_param(url: str, client_id: str) -> str:
-    """Ensure the URL contains the correct client_id parameter, replacing or appending as needed."""
-    if 'client_id=' in url:
-        return re.sub(r'client_id=[^&]+', f'client_id={client_id}', url)
-    separator = '&' if '?' in url else '?'
-    return f"{url}{separator}client_id={client_id}"
+    """Ensure the URL contains the correct client_id parameter (kept even when OAuth is used for v2 endpoints)."""
+    try:
+        parsed = urlparse(url)
+        # Skip client_id for oauth token endpoint
+        if "oauth2/token" in parsed.path:
+            return url
+        qs = dict([p.split("=", 1) for p in parsed.query.split("&") if p]) if parsed.query else {}
+        if client_id:
+            qs["client_id"] = client_id
+        q = "&".join([f"{k}={v}" for k, v in qs.items()])
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}" + (f"?{q}" if q else "")
+    except Exception:
+        return url
 
 def safe_request(url, headers=None, retries=3, timeout=10):
-    """HTTP request with adaptive timeout, rotation, circuit breaker, soft-fail HTML detection."""
-    global CLIENT_ID, key_manager, TELEMETRY, CIRCUIT_BREAKER_UNTIL
+    """HTTP request with adaptive timeout, rotation, circuit breaker, soft-fail HTML detection, OAuth fallback."""
+    global CLIENT_ID
+    TELEMETRY['requests'] += 1
     if circuit_breaker_active():
-        logging.debug("🔌 Circuit breaker active - skipping request")
+        logging.warning("⛔ Circuit breaker active - skipping resolve")
         return None
-    if not CLIENT_ID:
-        raise ValueError("No SoundCloud CLIENT_ID available")
-    original_url = url
-    last_error_body = None
-    timeouts = [5, 10, 15]  # adaptive timeouts
-    for attempt in range(retries):
-        TELEMETRY['requests'] += 1
-        # Update batch progress timestamp to avoid false watchdog inactivity rotations
+
+    # Always ensure client_id present for v2 endpoints (harmless with OAuth)
+    url = _ensure_client_id_param(url, CLIENT_ID or "")
+
+    prefer_bearer = False  # try "OAuth" first, then "Bearer" on 401
+    for attempt in range(1, retries + 1):
         try:
-            st = globals().get('BATCH_STATE')
-            if isinstance(st, dict):
-                st['last_progress_time'] = time.time()
-        except Exception:
-            pass
-        try:
-            eff_timeout = timeouts[min(attempt, len(timeouts)-1)]
-            url = _ensure_client_id_param(original_url, CLIENT_ID)
-            response = requests.get(url, headers=headers or HEADERS, timeout=eff_timeout)
-            status = response.status_code
-            # Soft-fail HTML detection
-            ct = response.headers.get('Content-Type','')
-            text_snip_full = response.text or ''
-            text_snip = text_snip_full[:160].lower()
-            if status == 200 and ('text/html' in ct.lower() or text_snip.startswith('<!doctype') or text_snip.startswith('<html')):
+            base_headers = headers or HEADERS
+            final_headers = _maybe_authorize(base_headers, prefer_bearer=prefer_bearer)
+            resp = requests.get(url, headers=final_headers, timeout=timeout)
+            # Soft-fail: HTML payload (client id invalid) => treat as 401-like
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/html" in ctype and resp.status_code == 200:
                 TELEMETRY['html_soft_fail'] += 1
-                logging.warning("⚠️ Received HTML instead of JSON (soft fail) - treating as rate limit (status 200 -> 429 synthetic)")
-                status = 429  # treat as rate limit to trigger rotation
-            try:
-                body_lower = text_snip_full.lower()
-            except Exception:
-                body_lower = ""
-            # Header-based detection
-            rl_remaining = response.headers.get('x-ratelimit-remaining') or response.headers.get('X-RateLimit-Remaining')
-            rl_limit = response.headers.get('x-ratelimit-limit') or response.headers.get('X-RateLimit-Limit')
-            header_exhausted = rl_remaining == '0' and rl_limit is not None
-            rate_text_hit = any(pat in body_lower for pat in RATE_LIMIT_PATTERNS)
-            is_rate_limited = status in (401, 429, 403) or rate_text_hit or header_exhausted
-            if is_rate_limited:
-                logging.warning(
-                    f"🚫 SoundCloud rate limit indicator: status={response.status_code} url={original_url} "
-                    f"patterns_hit={rate_text_hit} header_exhausted={header_exhausted} remaining={rl_remaining} limit={rl_limit} attempt={attempt+1}/{retries}")
-                if key_manager:
-                    prev_key_value = CLIENT_ID
-                    prev_index = key_manager.current_key_index
-                    key_manager.mark_rate_limited()
-                    new_key = key_manager.rotate_key(reason="rate_limit")
-                    TELEMETRY['rotations'] += 1
-                    if new_key:
-                        # Always switch even if same string (avoid false circuit breaker)
-                        CLIENT_ID = new_key
-                        logging.warning(
-                            f"🔄 Rotated SoundCloud key {prev_index+1} -> {key_manager.current_key_index+1} "
-                            f"({'same value' if new_key == prev_key_value else 'new value'})")
-                        time.sleep(0.35)
-                        # Retry with new / same key
-                        continue
-                    else:
-                        trip_circuit_breaker(reason="all_keys_exhausted_or_rotation_failed")
-                        return None
-                else:
-                    logging.error("❌ key_manager missing - cannot rotate; tripping circuit breaker")
-                    trip_circuit_breaker(reason="no_key_manager")
-                    return None
+                status = 401
+            else:
+                status = resp.status_code
+
             if status == 200:
                 TELEMETRY['success'] += 1
-                return response
-            if status == 404:
-                TELEMETRY['client_errors'] += 1
-                return response
-            if 500 <= status < 600:
-                TELEMETRY['server_errors'] += 1
-                if attempt < retries - 1:
-                    logging.warning(f"⚠️ SoundCloud server error {status}; retrying (attempt {attempt+2}/{retries})")
-                    time.sleep(1 + attempt)
+                return resp
+
+            # OAuth handling on 401/403
+            if status in (401, 403) and _oauth_enabled():
+                # 1) Switch scheme once (OAuth -> Bearer)
+                if not prefer_bearer:
+                    prefer_bearer = True
                     continue
-                return None
-            # Other client errors
-            if 400 <= status < 500:
-                TELEMETRY['client_errors'] += 1
-            last_error_body = body_lower
-            response.raise_for_status()
-        except Exception as e:
-            if attempt < retries - 1:
-                logging.warning(f"❌ SoundCloud request exception: {e} (retry {attempt+2}/{retries})")
-                time.sleep(0.5 + attempt * 0.5)
+                # 2) Refresh token once
+                if refresh_oauth_access_token():
+                    prefer_bearer = False  # go back to default scheme after refresh
+                    continue
+
+            # Rate limit/invalid client_id handling (existing logic uses rotation/refresh)
+            msg = f"status={status} url={url}"
+            logging.info(f"🚫 SoundCloud rate limit/unauth indicator: {msg} attempt={attempt}/{retries}")
+            if status in (401, 403, 429):
+                if key_manager:
+                    key_manager.mark_rate_limited()
+                    new_key = key_manager.rotate_key(reason="http_"+str(status))
+                    if new_key:
+                        CLIENT_ID = new_key
+                        continue
+                # Try scraping fresh public client_id
+                try:
+                    new_cid = refresh_client_id()
+                    if new_cid:
+                        CLIENT_ID = new_cid
+                        continue
+                except Exception:
+                    pass
+                if attempt >= retries:
+                    trip_circuit_breaker(reason="all_keys_exhausted_or_rotation_failed")
+                    return None
+
+            # 5xx/transient retry
+            if status >= 500:
+                TELEMETRY['server_errors'] += 1
+                time.sleep(min(5, attempt))
                 continue
-            logging.error(f"❌ SoundCloud request failed permanently: {e} url={original_url}")
-            return None
-    return None
+
+            TELEMETRY['client_errors'] += 1
+            return resp
+        except requests.RequestException as e:
+            TELEMETRY['client_errors'] += 1
+            if attempt >= retries:
+                logging.error(f"HTTP error for {url}: {e}")
+                return None
+            time.sleep(min(5, attempt))
+            continue
 
 # Global headers for all requests to avoid 403 errors
 HEADERS = {
@@ -818,6 +513,33 @@ def extract_soundcloud_username(url):
         raise ValueError("No path segments in URL")
 
     return path_segments[0]
+
+# Core resolver (cached)
+def resolve_url(url: str):
+    """Resolve any SoundCloud URL to its API object via /resolve."""
+    try:
+        clean = clean_soundcloud_url(url)
+        api = f"https://api-v2.soundcloud.com/resolve?url={clean}&client_id={CLIENT_ID}"
+        resp = safe_request(api, headers=HEADERS)
+        if resp and resp.status_code == 200:
+            return resp.json()
+        return None
+    except Exception:
+        return None
+
+def _cached_resolve(url: str):
+    """Cached wrapper around resolve_url."""
+    key = f"sc_resolve:{url}"
+    cached = get_cache(key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            delete_cache(key)
+    data = resolve_url(url)
+    if data:
+        set_cache(key, json.dumps(data), ttl=_jittered_ttl(CACHE_TTL, 30))
+    return data
 
 # --- Artist Data Fetching ---
 
@@ -1856,3 +1578,47 @@ def finalize_soundcloud_release_batch():
         if task and not task.done():
             task.cancel()
         BATCH_STATE['start_time'] = None
+
+# Lightweight per-run release failure monitor (for batch heuristics)
+class _ReleaseFetchMonitor:
+    def __init__(self):
+        self.reset()
+    def reset(self):
+        self.fail = 0
+        self.consecutive_fail = 0
+        self.success = 0
+        self.rotated = False
+    def note(self, success: bool, _context: str = ''):
+        if success:
+            self.success += 1
+            self.consecutive_fail = 0
+        else:
+            self.fail += 1
+            self.consecutive_fail += 1
+    def should_rotate(self) -> bool:
+        # conservative default: rotate after 5 consecutive failures
+        return self.consecutive_fail >= int(os.getenv('SC_CONSEC_FAIL_THRESHOLD', '5')) and not self.rotated
+    def mark_rotated(self):
+        self.rotated = True
+
+_SC_RELEASE_MONITOR = _ReleaseFetchMonitor()
+def get_release_monitor() -> _ReleaseFetchMonitor:
+    return _SC_RELEASE_MONITOR
+
+def get_soundcloud_key_status():
+    """Expose key status for telemetry endpoints."""
+    try:
+        if not key_manager:
+            return {'active_index': None, 'total': 1 if CLIENT_ID else 0, 'keys': [CLIENT_ID[:10] + '…' if CLIENT_ID else None]}
+        keys = getattr(key_manager, 'api_keys', []) or []
+        masked = [k[:10] + '…' if k else None for k in keys]
+        cds = getattr(key_manager, 'key_cooldowns', {}) or {}
+        cooldowns = {str(idx): (dt.isoformat() if dt else None) for idx, dt in cds.items()}
+        return {
+            'active_index': getattr(key_manager, 'current_key_index', None),
+            'total': len(keys),
+            'keys': masked,
+            'cooldowns': cooldowns
+        }
+    except Exception:
+        return {'active_index': None, 'total': 0, 'keys': []}

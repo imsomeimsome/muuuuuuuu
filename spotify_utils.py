@@ -552,8 +552,24 @@ def get_spotify_telemetry_snapshot():
 # --- Utilities ---
 
 def extract_spotify_id(url):
-    """Extract the Spotify artist or album ID from a URL."""
-    parsed_url = urlparse(url)
+    """Extract the Spotify artist or album ID from a URL, URI, or raw ID."""
+    if not url:
+        return None
+    s = str(url).strip()
+
+    # Handle URI forms: spotify:artist:<id> or spotify:album:<id>
+    if s.startswith("spotify:"):
+        parts = s.split(":")
+        if len(parts) == 3 and parts[1] in ("artist", "album"):
+            return parts[2]
+
+    # Handle raw base62 IDs (22 chars)
+    import re as _re
+    if _re.fullmatch(r"[A-Za-z0-9]{22}", s):
+        return s
+
+    # Handle standard https URLs
+    parsed_url = urlparse(s)
     if "spotify.com" in parsed_url.netloc:
         if "/artist/" in parsed_url.path:
             return parsed_url.path.split("/artist/")[1].split("?")[0]
@@ -576,6 +592,9 @@ def get_artist_name(artist_id):
 def get_artist_info(artist_id):
     """Fetch artist info including genres and URL."""
     try:
+        if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+            logging.error("❌ get_artist_info called with invalid artist_id")
+            return None
         artist = safe_spotify_call(spotify.artist, artist_id)
         if not artist:
             return None
@@ -629,6 +648,9 @@ def search_artist(query):
 def get_last_release_date(artist_id):
     """Fetch the most recent release date for an artist."""
     try:
+        if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+            logging.error("❌ get_last_release_date called with invalid artist_id")
+            return "N/A"
         releases = safe_spotify_call(
             spotify.artist_albums,
             artist_id,
@@ -645,6 +667,9 @@ def get_last_release_date(artist_id):
 def get_latest_album_id(artist_id):
     """Get the latest album/single ID for an artist."""
     try:
+        if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+            logging.error("❌ get_latest_album_id called with invalid artist_id")
+            return None
         # Fetch multiple releases
         releases = safe_spotify_call(
             spotify.artist_albums,
@@ -655,14 +680,12 @@ def get_latest_album_id(artist_id):
         )
         if not releases or not releases.get('items'):
             return None
-        
         # Sort releases by release_date
         sorted_releases = sorted(
             releases['items'],
             key=lambda x: x['release_date'],
             reverse=True
         )
-        
         latest_album = sorted_releases[0]
         return latest_album['id']
     except Exception as e:

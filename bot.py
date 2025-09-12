@@ -663,14 +663,17 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         artist_id = artist.get('artist_id')
         owner_id = artist.get('owner_id')
         guild_id = artist.get('guild_id')
-        # Validate artist_id early; try to extract from URL if missing
-        if not artist_id:
+
+        # Validate artist_id early; try to extract from URL/URI/raw ID if missing/invalid
+        if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+            candidate = artist.get('artist_url') or artist.get('url') or artist.get('artist_id') or ''
             try:
-                from spotify_utils import extract_spotify_id  # local import to avoid top import changes
-                candidate_url = artist.get('artist_url') or artist.get('url') or ''
-                artist_id = extract_spotify_id(candidate_url)
+                from spotify_utils import extract_spotify_id  # local import avoids top-level cycles
+                recovered = extract_spotify_id(candidate)
             except Exception:
-                artist_id = None
+                recovered = None
+            artist_id = recovered
+
         if not artist_id:
             logging.error(f"❌ Missing Spotify artist_id for {artist_name}; skipping artist")
             update_last_release_check(artist.get('artist_id') or 'unknown', owner_id, guild_id, datetime.now(timezone.utc).isoformat())
