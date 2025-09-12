@@ -26,6 +26,174 @@ load_dotenv()
 CLIENT_ID = os.getenv("SOUNDCLOUD_CLIENT_ID")
 key_manager = None
 
+# --- Key Manager (rotation, status, logging) ---
+
+class SoundCloudKeyManager:
+    def __init__(self, bot=None):
+        self.bot = bot
+        # Gather and de-duplicate keys
+        keys = [
+            os.getenv("SOUNDCLOUD_CLIENT_ID"),
+            os.getenv("SOUNDCLOUD_CLIENT_ID_2"),
+            os.getenv("SOUNDCLOUD_CLIENT_ID_3"),
+        ]
+        self.api_keys = [k for k in keys if k]
+        self.api_keys = list(dict.fromkeys(self.api_keys))
+        self.current_key_index = 0
+        self.key_cooldowns = {}  # index -> datetime until usable again
+        if not self.api_keys:
+            logging.error("❌ No SoundCloud client IDs found in environment.")
+        else:
+            logging.info(f"✅ Loaded {len(self.api_keys)} SoundCloud key(s). Using index {self.current_key_index}.")
+
+    def get_current_key(self):
+        if not self.api_keys:
+            return None
+        return self.api_keys[self.current_key_index]
+
+    def mark_rate_limited(self, minutes: int = 15, seconds: int | None = None):
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        cd = _td(seconds=max(1, int(seconds))) if seconds is not None else _td(minutes=max(1, int(minutes)))
+        self.key_cooldowns[self.current_key_index] = _dt.now(_tz.utc) + cd
+
+    async def _log_rotation(self, old_index: int, new_index: int, reason: str, exhausted: bool = False):
+        if not self.bot:
+            return
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            lines = []
+            now = _dt.now(_tz.utc).isoformat()
+            for i, k in enumerate(self.api_keys):
+                if i == self.current_key_index:
+                    state = "▶️ Active"
+                else:
+                    cd = self.key_cooldowns.get(i)
+                    if cd and cd > _dt.now(_tz.utc):
+                        state = f"⏳ Cooldown until {cd.isoformat()}"
+                    else:
+                        state = "✅ Ready"
+                preview = (k[:10] + "…") if k else "(none)"
+                lines.append(f"K{i+1}: {state} ({preview})")
+            message = (
+                "🔄 SoundCloud Key Rotation\n"
+                f"Reason: {reason}\n"
+                f"Time: {now}\n"
+                f"Switched: {old_index+1} ➜ {new_index+1}\n"
+                + ("\n".join(lines))
+            )
+            # Send to each guild's logs channel (if configured)
+            for guild in self.bot.guilds:
+                try:
+                    ch_id = get_channel(str(guild.id), "logs")
+                    if ch_id:
+                        ch = self.bot.get_channel(int(ch_id))
+                        if ch:
+                            await ch.send(message)
+                except Exception:
+                    continue
+        except Exception as e:
+            logging.debug(f"SoundCloud rotation log send failed: {e}")
+
+    def _schedule_rotation_log(self, old_index: int, new_index: int, reason: str, exhausted: bool = False):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._log_rotation(old_index, new_index, reason, exhausted=exhausted))
+
+    def rotate_key(self, reason: str = "rate_limit"):
+        """Rotate to next available key not in cooldown. Returns new key or None."""
+        if not self.api_keys or len(self.api_keys) == 1:
+            logging.warning("⚠️ Cannot rotate SoundCloud key (one or zero keys configured).")
+            return None
+        from datetime import datetime as _dt, timezone as _tz
+        old = self.current_key_index
+        for _ in range(len(self.api_keys) - 1):
+            nxt = (self.current_key_index + 1) % len(self.api_keys)
+            cd = self.key_cooldowns.get(nxt)
+            if cd and _dt.now(_tz.utc) < cd:
+                # skip this key but do not advance index
+                # try next candidate
+                self.current_key_index = self.current_key_index  # no-op for clarity
+                # move window forward to test next candidate in next iteration
+                self.current_key_index = nxt  # temporarily advance to probe, will set if usable
+                continue
+            # usable
+            self.current_key_index = nxt
+            new_key = self.get_current_key()
+            logging.info(f"🔄 Rotated SoundCloud key {old+1} ➜ {self.current_key_index+1} ({new_key[:10]}…)")
+            if self.bot:
+                self._schedule_rotation_log(old, self.current_key_index, reason)
+            return new_key
+        logging.error("🛑 All SoundCloud keys are on cooldown (rotation exhausted).")
+        if self.bot:
+            self._schedule_rotation_log(old, old, reason, exhausted=True)
+        return None
+
+    def get_status_rows(self):
+        from datetime import datetime as _dt, timezone as _tz
+        rows = []
+        now = _dt.now(_tz.utc)
+        for i, k in enumerate(self.api_keys):
+            if i == self.current_key_index:
+                state = "▶️ Active"
+            else:
+                cd = self.key_cooldowns.get(i)
+                if cd and cd > now:
+                    state = f"⏳ Cooldown until {cd.isoformat()}"
+                else:
+                    state = "✅ Ready"
+            rows.append({
+                "index": i,
+                "state": state,
+                "key_preview": (k[:10] + "…") if k else ""
+            })
+        return rows
+
+    def stop_background_tasks(self):
+        # No background tasks yet; placeholder for symmetry
+        pass
+
+def init_key_manager(bot=None):
+    """Initialize SoundCloudKeyManager and set CLIENT_ID."""
+    global key_manager, CLIENT_ID
+    if key_manager is None:
+        key_manager = SoundCloudKeyManager(bot)
+        if key_manager.api_keys:
+            CLIENT_ID = key_manager.get_current_key()
+    return key_manager
+
+def get_soundcloud_key_status():
+    """Public helper used by bot.emit_health_log."""
+    if not key_manager or not getattr(key_manager, 'api_keys', None):
+        return {"loaded": False, "keys": []}
+    return {
+        "loaded": True,
+        "active_index": key_manager.current_key_index,
+        "total_keys": len(key_manager.api_keys),
+        "keys": key_manager.get_status_rows()
+    }
+
+def manual_rotate_soundcloud_key(reason: str = "manual"):
+    """Rotate SC client_id and report status for /rotatekeys."""
+    global key_manager, CLIENT_ID
+    if not key_manager or not getattr(key_manager, 'api_keys', None):
+        return {"rotated": False, "error": "No SoundCloud keys configured", "keys": []}
+    if len(key_manager.api_keys) == 1:
+        return {"rotated": False, "error": "Only one SoundCloud key configured", "keys": key_manager.get_status_rows()}
+    old_index = key_manager.current_key_index
+    new_key = key_manager.rotate_key(reason=reason)
+    rotated = bool(new_key)
+    if rotated:
+        CLIENT_ID = new_key
+    return {
+        "rotated": rotated,
+        "old_index": old_index,
+        "active_index": key_manager.current_key_index,
+        "total_keys": len(key_manager.api_keys),
+        "keys": key_manager.get_status_rows()
+    }
+
 # --- Telemetry & Circuit Breaker ---
 TELEMETRY = {
     'requests': 0,
