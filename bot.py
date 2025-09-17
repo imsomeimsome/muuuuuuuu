@@ -709,8 +709,13 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
             api_dt = parse_date(api_release_date)
             logging.info(f"     API returned: {_fmt_dt(api_dt)}")
             if last_check_dt is None:
-                logging.info(f"     ⏭️ Baseline established (no previous check)")
-            if api_dt > last_check_dt:
+                logging.info("     ⏭️ Baseline established (no previous check)")
+                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                # Protect against any downstream stray comparisons this cycle
+                continue
+            def _newer(a, b):  # local safety helper
+                return a is not None and b is not None and a > b
+            if _newer(api_dt, last_check_dt):
                 cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
                 if get_cache(cache_key):
                     logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
@@ -914,7 +919,18 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
             # Post playlist if NEW (after potential suppression decision)
             if playlist_new:
+                # Guard: skip placeholder single-track zero-duration playlists until real duration is available
+                if playlist_info.get('pending_zero_duration'):
+                    logging.info("     ⏭️ Skipping placeholder playlist (single track, zero duration) – will retry next cycle")
+                    playlist_new = False
+                else:
+                    playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
+                    # (existing code continues)
+            if playlist_new:
                 playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
+                # existing posting logic remains unchanged
+                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
+                # ...
                 logging.info("     Playlist found! Looking for channels to post in")
                 for sub in _subscribers_for(artists, 'soundcloud', artist_id):
                     sub_gid = sub.get('guild_id')

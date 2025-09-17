@@ -3,6 +3,11 @@ import datetime
 from datetime import datetime, timezone, timedelta
 from utils import get_highest_quality_artwork
 import logging
+from dateutil.parser import parse as isoparse
+import os
+
+# New configurable offset (hours) for SoundCloud display day adjustment
+SC_DISPLAY_TZ_OFFSET = int(os.getenv("SC_DISPLAY_TZ_OFFSET", "0"))
 
 def _indef_article(word: str) -> str:
     if not word:
@@ -68,6 +73,86 @@ def _to_unix_ts(s):
         return int(datetime.strptime(str(s)[:10], '%Y-%m-%d').replace(tzinfo=timezone.utc).timestamp())
     except Exception:
         return None
+
+def _is_date_only(s: str) -> bool:
+    return isinstance(s, str) and len(s) == 10 and s.count('-') == 2 and 'T' not in s
+
+def _discord_ts(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+def _format_discord_release_date(date_str: str) -> str:
+    """
+    Date-only (YYYY-MM-DD) -> absolute calendar date (:D) using noon UTC to avoid TZ edge cases.
+    Full timestamps -> relative (:R).
+    """
+    if not date_str:
+        return "Unknown"
+    try:
+        if _is_date_only(date_str):
+            # Anchor at 12:00 UTC so Discord shows the correct calendar day everywhere
+            day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=12)
+            return f"<t:{_discord_ts(day)}:D>"
+        # Full timestamp -> relative
+        dt = isoparse(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"<t:{_discord_ts(dt)}:R>"
+    except Exception:
+        # Fallback to raw value if parsing fails
+        return str(date_str)
+
+def _parse_dt_any(s: str) -> datetime | None:
+    if not s:
+        return None
+    try:
+        dt = isoparse(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _sc_adjust_calendar_day(dt: datetime) -> datetime:
+    """
+    Shift SoundCloud UTC timestamp by SC_DISPLAY_TZ_OFFSET hours (can be negative).
+    Used only for deciding the calendar day to show; time-of-day is discarded.
+    """
+    if SC_DISPLAY_TZ_OFFSET == 0:
+        return dt
+    return dt + timedelta(hours=SC_DISPLAY_TZ_OFFSET)
+
+def format_release_date_for_platform(platform: str, release_date: str) -> str:
+    """
+    Unified field formatter:
+    - Spotify:
+        * Date-only (YYYY-MM-DD) -> absolute calendar <t:...:D>
+        * Full timestamp -> relative <t:...:R>
+    - SoundCloud:
+        * If date-only -> absolute <t:...:D>
+        * If full timestamp -> convert to adjusted local day (offset) and display absolute calendar <t:...:D>
+          (prevents 'previous day 8pm' confusion).
+    """
+    if not release_date:
+        return "Unknown"
+    # Spotify uses existing _format_discord_release_date logic
+    if platform.lower() == "spotify":
+        return _format_discord_release_date(release_date)
+
+    if platform.lower() == "soundcloud":
+        # Date-only case
+        if _is_date_only(release_date):
+            return _format_discord_release_date(release_date)
+        # Full timestamp -> adjust & show absolute calendar day
+        dt = _parse_dt_any(release_date)
+        if not dt:
+            return release_date
+        adj = _sc_adjust_calendar_day(dt)
+        # Anchor at noon local (after shift) to stabilize the calendar date across user timezones
+        noon = adj.replace(hour=12, minute=0, second=0, microsecond=0)
+        return f"<t:{_discord_ts(noon)}:D>"
+    return _format_discord_release_date(release_date)
 
 def create_music_embed(
     platform,
@@ -160,14 +245,9 @@ def create_music_embed(
     if isinstance(duration, str) and duration.strip():
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Release date (use robust parser)
+    # Release Date (use absolute date for YYYY-MM-DD, relative otherwise)
     if release_date:
-        ts = _to_unix_ts(release_date)
-        if ts is not None:
-            embed.add_field(name="Release Date", value=f"<t:{ts}:R>", inline=True)
-        else:
-            rd = str(release_date).strip()
-            embed.add_field(name="Release Date", value=rd[:10], inline=True)
+        embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
 
     if genres:
         if isinstance(genres, list):
@@ -179,21 +259,22 @@ def create_music_embed(
             if gtxt and gtxt.lower() != "none":
                 embed.add_field(name="Genre", value=gtxt[:1024], inline=True)
 
-    # Features (now for all platforms, next to Genres)
-    feat_text = None
+    # Features
     if isinstance(features, list):
-        feat_text = ", ".join([f for f in features if f]) if features else None
+        feat_text = ", ".join([f for f in features if f]) or None
     elif isinstance(features, str):
         s = features.strip()
-        if s and s.lower() != "none":
-            feat_text = s
+        feat_text = s if (s and s.lower() != "none") else None
+    else:
+        feat_text = None
     if feat_text:
         embed.add_field(name="Features", value=feat_text[:1024], inline=True)
 
     # Upload Date (SoundCloud only), only if present and different from Release Date
     if platform.lower() == "soundcloud" and upload_date:
-        rd_ts = _to_unix_ts(release_date) if release_date else None
-        up_ts = _to_unix_ts(upload_date)
+        rd_ts = _discord_ts(isoparse(release_date)) if (release_date and 'T' in release_date) else None
+        up_dt = isoparse(upload_date)
+        up_ts = _discord_ts(up_dt)
         if up_ts and (not rd_ts or up_ts != rd_ts):
             embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
 
@@ -414,7 +495,7 @@ def create_like_embed(
 
     # Second row: Release Date, Liked
     if release_timestamp:
-        embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+        embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 

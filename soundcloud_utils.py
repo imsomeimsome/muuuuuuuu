@@ -879,6 +879,28 @@ def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
                     "order": index
                 })
         playlist_duration = None
+        total_duration_ms = total_duration_ms  # already accumulated above
+
+        # If all durations are zero, attempt a secondary fetch per track (cheap for 1–5 tracks)
+        if total_duration_ms == 0 and tracks:
+            recovered_ms = 0
+            for t in tracks:
+                tid = t.get("id")
+                if not tid:
+                    continue
+                try:
+                    tr_url = f"https://api-v2.soundcloud.com/tracks/{tid}?client_id={CLIENT_ID}"
+                    tr_resp = safe_request(tr_url)
+                    if tr_resp and tr_resp.status_code == 200:
+                        tr_json = tr_resp.json() or {}
+                        dur = int(tr_json.get("duration") or 0)
+                        if dur > 0:
+                            recovered_ms += dur
+                except Exception:
+                    continue
+            if recovered_ms > 0:
+                total_duration_ms = recovered_ms
+
         if total_duration_ms > 0:
             playlist_duration = format_duration(total_duration_ms)
         if not playlist_duration and tracks:
@@ -890,6 +912,12 @@ def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
                     playlist_duration = "0:00"
             except Exception:
                 playlist_duration = None
+
+        pending_zero = (
+            len(tracks) == 1 and
+            (not playlist_duration or playlist_duration in ("0:00", "0:00:00"))
+        )
+
         result = {
             "title": latest_playlist.get("title"),
             "artist_name": latest_playlist.get("user", {}).get("username"),
@@ -901,6 +929,7 @@ def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
             "type": classify_sc_playlist(latest_playlist) if 'classify_sc_playlist' in globals() else "playlist",
             "genres": sorted(genre_set),
             "duration": playlist_duration,
+            "pending_zero_duration": pending_zero,
             "features": None
         }
         if not result.get('url'):
