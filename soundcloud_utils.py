@@ -923,7 +923,7 @@ def get_soundcloud_playlist_info(artist_url, force_refresh: bool = False):
             "artist_name": latest_playlist.get("user", {}).get("username"),
             "url": latest_playlist.get("permalink_url"),
             "release_date": latest_playlist.get("created_at"),
-            "cover_url": latest_playlist.get("artwork_url"),
+            "cover_url": compute_playlist_cover_url(latest_playlist),
             "track_count": len(tracks),
             "tracks": tracks,
             "type": classify_sc_playlist(latest_playlist) if 'classify_sc_playlist' in globals() else "playlist",
@@ -1040,7 +1040,11 @@ def get_soundcloud_likes_info(artist_url, force_refresh=False):
                 "upload_date": original.get("created_at"),
                 "release_date": original.get("release_date") or original.get("created_at"),
                 "liked_date": like_date,
-                "cover_url": original.get("artwork_url"),
+                "cover_url": (
+                    compute_playlist_cover_url(original)
+                    if original.get('kind') == 'playlist'
+                    else (original.get("artwork_url") or (original.get("user") or {}).get("avatar_url"))
+                ),
                 "features": extract_track_features(original),
                 "track_count": original.get("track_count", 1),
                 "duration": duration,
@@ -1118,7 +1122,11 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     "upload_date": original.get("created_at"),
                     "release_date": original.get("release_date") or original.get("created_at"),
                     "reposted_date": repost_date,
-                    "cover_url": original.get("artwork_url"),
+                    "cover_url": (
+                        compute_playlist_cover_url(original)
+                        if original.get('kind') == 'playlist'
+                        else (original.get("artwork_url") or (original.get("user") or {}).get("avatar_url"))
+                    ),
                     "features": extract_track_features(original),
                     "track_count": original.get("track_count", 1),
                     "duration": format_duration(original.get("duration", 0)),
@@ -1199,7 +1207,7 @@ def process_playlist(playlist_data):
         'title': playlist_data['title'],
         'url': playlist_data['permalink_url'],
         'release_date': playlist_data.get('created_at', ''),
-        'cover_url': playlist_data.get('artwork_url') or playlist_data.get('avatar_url', ''),
+        'cover_url': compute_playlist_cover_url(playlist_data),
         'duration': format_duration(total_duration),
         'features': ', '.join(sorted(features)) if features else None,
         'genres': sorted(list(genres)) if genres else ['Unknown'],  # Return list of genres or ['Unknown']
@@ -1247,6 +1255,29 @@ def format_duration(ms):
         minutes = minutes % 60
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
+
+# --- Playlist artwork fallback ---
+def compute_playlist_cover_url(pl: dict) -> str | None:
+    """
+    Best-effort playlist cover resolution order:
+      1. playlist.artwork_url
+      2. first track.artwork_url (first non-empty)
+      3. playlist.user.avatar_url
+    Returns None if nothing found.
+    """
+    if not isinstance(pl, dict):
+        return None
+    art = (pl.get('artwork_url') or '').strip() if pl.get('artwork_url') else None
+    if art:
+        return art
+    for t in (pl.get('tracks') or []):
+        if isinstance(t, dict):
+            ta = (t.get('artwork_url') or '').strip() if t.get('artwork_url') else None
+            if ta:
+                return ta
+    user = pl.get('user') or {}
+    av = (user.get('avatar_url') or '').strip() if user.get('avatar_url') else None
+    return av or None
 
 # Precompile feature extraction regex patterns
 _FEATURE_PATTERNS = [

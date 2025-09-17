@@ -495,7 +495,12 @@ def create_like_embed(
 
     # Second row: Release Date, Liked
     if release_timestamp:
-        embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
+        if platform.lower() == "soundcloud":
+            # Match repost style (relative)
+            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+        else:
+            # Spotify keeps platform-aware formatting
+            embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
