@@ -1776,6 +1776,75 @@ async def userinfo_command(interaction: discord.Interaction, user: typing.Option
         embed.add_field(name="🌐 Server Total Artists", value=total_artists, inline=False)
     await interaction.followup.send(embed=embed)
 
+@bot.tree.command(name="forcecheck", description="Force an immediate check for a tracked artist (Spotify or SoundCloud).")
+@require_registration
+@app_commands.describe(link="Artist profile URL or ID (must already be tracked)")
+async def forcecheck_command(interaction: discord.Interaction, link: str):
+    await interaction.response.defer(ephemeral=True)
+    user_id = interaction.user.id
+    guild_id = str(interaction.guild.id) if interaction.guild else None
+
+    # Normalize input
+    raw = link.strip()
+    platform = None
+    artist_id = None
+    artist = None
+
+    try:
+        if "spotify.com" in raw:
+            platform = "spotify"
+            try:
+                from spotify_utils import extract_spotify_id
+                artist_id = extract_spotify_id(raw)
+            except Exception:
+                await interaction.followup.send("❌ Could not extract Spotify artist ID.", ephemeral=True)
+                return
+        elif "soundcloud.com" in raw:
+            platform = "soundcloud"
+            try:
+                from soundcloud_utils import extract_soundcloud_id
+                artist_id = extract_soundcloud_id(raw)
+            except Exception:
+                await interaction.followup.send("❌ Could not extract SoundCloud artist ID.", ephemeral=True)
+                return
+        else:
+            # Fallback: user supplied raw ID they already track
+            # Determine platform by lookup
+            artist_sp = get_artist_by_id(raw, user_id, guild_id)
+            if artist_sp:
+                platform = artist_sp.get("platform")
+                artist_id = raw
+            else:
+                await interaction.followup.send("❌ Provide a valid Spotify/SoundCloud artist URL or a tracked artist ID.", ephemeral=True)
+                return
+
+        artist = get_artist_by_id(artist_id, user_id, guild_id)
+        if not artist:
+            await interaction.followup.send("❌ This artist is not tracked in this server (or by you).", ephemeral=True)
+            return
+
+        # Build a single-artist list shaped like main checker expects
+        artists_payload = [artist]
+
+        started = datetime.now(timezone.utc)
+        if platform == "spotify":
+            logging.info(f"⚡ /forcecheck (Spotify) for {artist.get('artist_name')} ({artist_id}) by {interaction.user.name}")
+            releases, errors = await check_spotify_updates(bot, artists_payload, shutdown_time=None, is_catchup=False)
+            finished = datetime.now(timezone.utc)
+            msg = f"✅ Forced Spotify check complete in {(finished-started).total_seconds():.1f}s.\nNew events: {releases}\nErrors: {len(errors)}"
+        else:
+            logging.info(f"⚡ /forcecheck (SoundCloud) for {artist.get('artist_name')} ({artist_id}) by {interaction.user.name}")
+            counts, errors = await check_soundcloud_updates(bot, artists_payload, shutdown_time=None, is_catchup=False)
+            finished = datetime.now(timezone.utc)
+            summary = ", ".join([f"{k}:{v}" for k, v in counts.items()])
+            msg = f"✅ Forced SoundCloud check complete in {(finished-started).total_seconds():.1f}s.\nEvents: {summary}\nErrors: {len(errors)}"
+
+        await interaction.followup.send(msg, ephemeral=True)
+
+    except Exception as e:
+        logging.error(f"/forcecheck error: {e}")
+        await interaction.followup.send(f"❌ Error running forced check: {e}")
+
 
 # (Ensure bot.run(TOKEN) remains at bottom)
 bot.run(TOKEN)
