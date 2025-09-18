@@ -404,7 +404,7 @@ def _ensure_client_id_param(url: str, client_id: str) -> str:
         qs = dict([p.split("=", 1) for p in parsed.query.split("&") if p]) if parsed.query else {}
         if client_id:
             qs["client_id"] = client_id
-        q = "&".join([f"{k}={v}" for k, v in qs.items()])
+        q = "&".join([f"{k}={v}"] for k, v in qs.items())
         return f"{parsed.scheme}://{parsed.netloc}{parsed.path}" + (f"?{q}" if q else "")
     except Exception:
         return url
@@ -1125,7 +1125,7 @@ def get_soundcloud_reposts_info(artist_url, force_refresh: bool = False):
                     "cover_url": (
                         compute_playlist_cover_url(original)
                         if original.get('kind') == 'playlist'
-                        else (original.get("artwork_url") or (original.get("user") or {}).get("avatar_url"))
+                        else resolve_track_cover_url(original)
                     ),
                     "features": extract_track_features(original),
                     "track_count": original.get("track_count", 1),
@@ -1278,6 +1278,41 @@ def compute_playlist_cover_url(pl: dict) -> str | None:
     user = pl.get('user') or {}
     av = (user.get('avatar_url') or '').strip() if user.get('avatar_url') else None
     return av or None
+
+# --- Track artwork fallback (for reposts without artwork_url) ---
+def resolve_track_cover_url(track: dict) -> str | None:
+    """
+    Fallback order for track artwork (reposts sometimes omit artwork_url):
+      1. track.artwork_url
+      2. track.user.avatar_url
+      3. Fresh fetch of /tracks/{id} then artwork_url or user.avatar_url
+    """
+    if not isinstance(track, dict):
+        return None
+    art = (track.get('artwork_url') or '').strip() if track.get('artwork_url') else None
+    if art:
+        return art
+    user = track.get('user') or {}
+    avatar = (user.get('avatar_url') or '').strip() if user.get('avatar_url') else None
+    if avatar:
+        return avatar
+    tid = track.get('id')
+    if not tid:
+        return None
+    try:
+        tr_url = f"https://api-v2.soundcloud.com/tracks/{tid}?client_id={CLIENT_ID}"
+        tr_resp = safe_request(tr_url)
+        if tr_resp and tr_resp.status_code == 200:
+            tj = tr_resp.json() or {}
+            art2 = (tj.get('artwork_url') or '').strip() if tj.get('artwork_url') else None
+            if art2:
+                return art2
+            user2 = tj.get('user') or {}
+            avatar2 = (user2.get('avatar_url') or '').strip() if user2.get('avatar_url') else None
+            return avatar2
+    except Exception:
+        pass
+    return None
 
 # Precompile feature extraction regex patterns
 _FEATURE_PATTERNS = [
