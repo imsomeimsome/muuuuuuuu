@@ -5,6 +5,8 @@ import spotipy
 import logging
 from spotipy.oauth2 import SpotifyClientCredentials
 import threading
+import json
+import random
 
 # Load environment variables
 load_dotenv()
@@ -577,6 +579,25 @@ def extract_spotify_id(url):
             return parsed_url.path.split("/album/")[1].split("?")[0]
     return None
 
+# --- Helpers (parity with SoundCloud) ---
+def _jittered_ttl(base: int, jitter: int) -> int:
+    try:
+        return base + random.randint(-jitter, jitter)
+    except Exception:
+        return base
+
+def _format_duration_ms(total_ms: int) -> str:
+    if not total_ms:
+        return "0:00"
+    seconds = total_ms // 1000
+    minutes = seconds // 60
+    seconds %= 60
+    if minutes >= 60:
+        hours = minutes // 60
+        minutes %= 60
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
 # --- Artist Data ---
 
 def get_artist_name(artist_id):
@@ -692,8 +713,19 @@ def get_latest_album_id(artist_id):
         print(f"Error getting latest album for {artist_id}: {e}")
         return None
 
-def get_release_info(release_id):
-    """Fetch detailed release info for a Spotify album or single."""
+def get_release_info(release_id, force_refresh: bool = False):
+    """Fetch detailed release info (album or single) with caching & normalized fields."""
+    if not release_id:
+        return None
+    cache_key = f"spotify_release:{release_id}"
+    if not force_refresh:
+        try:
+            from utils import get_cache
+            cached = get_cache(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
     try:
         album = safe_spotify_call(spotify.album, release_id)
         if not album:
@@ -706,44 +738,144 @@ def get_release_info(release_id):
         title = album['name']
         release_date = album['release_date']
         cover_url = album['images'][0]['url'] if album.get('images') else None
-        track_count = album.get('total_tracks', 0)
+        track_items = album.get('tracks', {}).get('items', [])
+        track_count = album.get('total_tracks', len(track_items))
 
-        total_ms = sum(track['duration_ms'] for track in album['tracks']['items'])
-        minutes, seconds = divmod(total_ms // 1000, 60)
-        duration_min = f"{minutes}:{seconds:02d}"
+        total_ms = sum(t.get('duration_ms', 0) for t in track_items)
+        duration_min = _format_duration_ms(total_ms)
 
-        features = set()
-        for track in album['tracks']['items']:
-            for artist in track['artists']:
-                if artist['name'] not in main_artists:
-                    features.add(artist['name'])
-        features_str = ", ".join(sorted(features)) if features else "None"
+        features_set = set()
+        for track in track_items:
+            for a in track.get('artists', []):
+                if a.get('name') not in main_artists:
+                    features_set.add(a.get('name'))
+        features_list = sorted(features_set)
 
-        genres = album.get('genres', [])
-        for artist_id in main_artist_ids:
+        # Determine release type similar logic used elsewhere
+        if track_count == 1:
+            release_type = 'single'
+        elif track_count <= 6:
+            release_type = 'ep'
+        else:
+            release_type = 'album'
+
+        genres = album.get('genres', []) or []
+        # Augment with main artist genres
+        for mid in main_artist_ids:
             try:
-                artist_info = safe_spotify_call(spotify.artist, artist_id)
-                if artist_info:
-                    genres.extend(artist_info.get('genres', []))
+                ai = safe_spotify_call(spotify.artist, mid)
+                if ai:
+                    genres.extend(ai.get('genres', []))
             except Exception:
                 continue
-        genres = list(sorted(set(genres)))
+        genres = sorted(set(g for g in genres if g))
 
-        return {
+        result = {
             "artist_name": artist_name,
+            "main_artist_name": artist_name,
             "title": title,
             "url": album['external_urls']['spotify'],
             "release_date": release_date,
             "cover_url": cover_url,
             "track_count": track_count,
             "duration": duration_min,
-            "features": features_str,
+            "features": features_list,          # list form (SoundCloud parity)
+            "features_str": ", ".join(features_list) if features_list else None,  # legacy convenience
             "genres": genres,
-            "repost": False
+            "repost": False,
+            "album_id": release_id,
+            "type": release_type
         }
+        try:
+            from utils import set_cache
+            set_cache(cache_key, json.dumps(result), ttl=_jittered_ttl(300, 60))
+        except Exception:
+            pass
+        return result
     except Exception as e:
-        print(f"Error fetching release info for {release_id}: {str(e)}")
+        logging.debug(f"Error fetching release info for {release_id}: {str(e)}")
         return None
+
+def get_spotify_artist_latest_release_info(artist_id: str, force_refresh: bool = False):
+    """
+    Parity with SoundCloud's get_soundcloud_release_info:
+    Returns dict:
+      {
+        artist_name, title, url, release_date, cover_url,
+        track_count, duration, features (list or empty list),
+        genres (list), repost(False), album_id, type (single|ep|album),
+        main_artist_name
+      }
+    Cached briefly; force_refresh bypasses cache (used to avoid 2‑cycle lag).
+    """
+    if not artist_id:
+        return None
+    cache_key = f"spotify_latest_release_info:{artist_id}"
+    if not force_refresh:
+        try:
+            from utils import get_cache
+            cached = get_cache(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+    album_id = get_spotify_latest_album_id(artist_id, force_refresh=force_refresh)
+    if not album_id:
+        return None
+    info = get_release_info(album_id, force_refresh=force_refresh)
+    if not info:
+        return None
+    # Already standardized in get_release_info enhancements below
+    try:
+        from utils import set_cache
+        set_cache(cache_key, json.dumps(info), ttl=_jittered_ttl(120, 30))
+    except Exception:
+        pass
+    return info
+
+def get_spotify_featured_release_info(artist_id: str, force_refresh: bool = False):
+    """
+    Wrapper over existing get_latest_featured_release returning same normalized shape.
+    """
+    cache_key = f"spotify_featured_release_info:{artist_id}"
+    if not force_refresh:
+        try:
+            from utils import get_cache
+            cached = get_cache(cache_key)
+            if cached:
+                return json.loads(cached)
+        except Exception:
+            pass
+    raw = get_latest_featured_release(artist_id)
+    if not raw:
+        return None
+    # Ensure features list (SoundCloud parity)
+    feat_list = []
+    if raw.get('features'):
+        # features string may underline first; strip formatting & split
+        cleaned = raw['features'].replace('__', '')
+        feat_list = [s.strip() for s in cleaned.split(',') if s.strip()]
+    norm = {
+        "artist_name": raw.get("artist_name"),
+        "main_artist_name": raw.get("main_artist_name"),
+        "title": raw.get("title"),
+        "url": raw.get("url"),
+        "release_date": raw.get("release_date"),
+        "cover_url": raw.get("cover_url"),
+        "track_count": raw.get("track_count"),
+        "duration": raw.get("duration"),
+        "features": feat_list,
+        "genres": raw.get("genres") or [],
+        "repost": False,
+        "album_id": raw.get("album_id"),
+        "type": raw.get("type")
+    }
+    try:
+        from utils import set_cache
+        set_cache(cache_key, json.dumps(norm), ttl=_jittered_ttl(180, 40))
+    except Exception:
+        pass
+    return norm
 
 def _parse_spotify_date_str(s: str) -> str:
     # Normalize Spotify release_date to YYYY-MM-DD (fills month/day when missing)
