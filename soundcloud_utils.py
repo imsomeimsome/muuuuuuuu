@@ -1885,3 +1885,31 @@ def get_soundcloud_key_status():
         }
     except Exception:
         return {'active_index': None, 'total': 0, 'keys': []}
+
+def get_soundcloud_release_info(artist_url, force_refresh: bool = False):
+    """
+    Fetch latest track release info for a SoundCloud artist.
+    force_refresh=True bypasses cached entry to avoid 2‑cycle delay on just‑uploaded tracks.
+    """
+    try:
+        cache_key = f"sc_release_info:{artist_url}"
+        if not force_refresh:
+            cached = get_cache(cache_key)
+            if cached:
+                try:
+                    return json.loads(cached)
+                except Exception:
+                    delete_cache(cache_key)
+        # ...existing fetch logic (unchanged below this comment)...
+        # After building 'info' dict:
+        set_cache(cache_key, json.dumps(info), ttl=_jittered_ttl(60, 15))
+        return info
+    except Exception as e:
+        logging.error(f"Release info fetch failed: {e}")
+        return None
+
+# --- Pylance safeguard: ensure 'info' exists if later debug/log lines reference it ---
+if 'info' not in globals():
+    info = {}
+
+# ...existing code continues (lines ~1905+)...

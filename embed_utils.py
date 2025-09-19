@@ -231,8 +231,8 @@ def create_music_embed(
     heading = f"{heading_emoji} {artist_name} released {_indef_article(release_type)} {release_type}!"
 
     # Title: do NOT append (Feat. …) for SoundCloud (avoid duplication)
-    feat_in_title = _first_feat_name_strict(features)
-    title_for_desc = title if platform.lower() == "soundcloud" else (f"{title} (Feat. {feat_in_title})" if feat_in_title else title)
+    # Do not append (Feat. …) to the title/description (requested for Spotify as well)
+    title_for_desc = title
 
     embed = discord.Embed(
         title=heading,
@@ -268,7 +268,9 @@ def create_music_embed(
     else:
         feat_text = None
     if feat_text:
-        embed.add_field(name="Features", value=feat_text[:1024], inline=True)
+        # Suppress Features section for single-track Spotify releases
+        if not (platform.lower() == "spotify" and str(track_count) == "1"):
+            embed.add_field(name="Features", value=feat_text[:1024], inline=True)
 
     # Upload Date (SoundCloud only), only if present and different from Release Date
     if platform.lower() == "soundcloud" and upload_date:
@@ -395,7 +397,7 @@ def create_repost_embed(
     # Row 3: Upload Date (only if different), Features (only if present)
     up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
-        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R}", inline=True)
 
     if features:
         ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
@@ -519,7 +521,7 @@ def create_like_embed(
     # Row 3: Upload Date and Features
     up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
-        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R}", inline=True)
     if features:
         ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
         if ftxt and ftxt.lower() != "none":

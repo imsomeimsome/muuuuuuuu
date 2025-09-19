@@ -734,19 +734,23 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         repost=False,
                         return_heading=True
                     )
-                    logging.info("     Release found! Looking for channels to post in")
-                    for sub in _subscribers_for(artists, 'spotify', artist_id):
-                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                        channel = await get_release_channel(sub_gid, 'spotify')
-                        if channel:
-                            logging.info(f"      - guild id = {sub_gid} - found")
-                            await channel.send(content=f"# {heading_text}", embed=embed)
-                            update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
-                        else:
-                            logging.info(f"      - guild id = {sub_gid} - not found")
-                    set_cache(cache_key, 'posted', ttl=86400)
-                    releases += 1
-                    logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                    main_artist_name = release_info.get('main_artist_name')
+                    if main_artist_name and main_artist_name.lower() != artist_name.lower():
+                        # Tracked artist is featured, not main – skip normal release embed (feature block will cover it)
+                        logging.info("     ⏭️ Skipping normal embed (tracked artist is a feature on another artist's release)")
+                    else:
+                        for sub in _subscribers_for(artists, 'spotify', artist_id):
+                            sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                            channel = await get_release_channel(sub_gid, 'spotify')
+                            if channel:
+                                logging.info(f"      - guild id = {sub_gid} - found")
+                                await channel.send(embed=embed)
+                                update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
+                            else:
+                                logging.info(f"      - guild id = {sub_gid} - not found")
+                        set_cache(cache_key, 'posted', ttl=86400)
+                        releases += 1
+                        logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
             else:
                 logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
 
@@ -790,13 +794,20 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         return_heading=True
                     )
                     custom_heading = f"➕ {artist_name} is featured on a {release_type}!"
+                    main_artist = (feat_info.get('main_artist_name') or "").strip() or "Unknown"
+                    # If tracked artist IS the main artist, skip duplicate feature embed
+                    if artist_name.lower() == main_artist.lower():
+                        continue
                     embed.title = custom_heading
-                    # Add main artist as "By"
-                    main_artist = feat_info.get('main_artist_name') or "Unknown"
-                    embed.add_field(name="By", value=main_artist, inline=True)
-                    logging.info("     Feature found! Looking for channels to post in")
-                    logging.info(f"      - guild id = {sub_gid} - found")
-                    await channel.send(content=f"# {custom_heading}", embed=embed)
+                    embed.add_field(name="By", value=f"{main_artist}, {artist_name}", inline=True)
+                    # Reorder fields so "By" appears first
+                    try:
+                        fields = list(embed.fields)
+                        by_field = fields[-1]
+                        embed._fields = [by_field] + fields[:-1]
+                    except Exception:
+                        pass
+                    await channel.send(embed=embed)
                     set_cache(cache_key_feat, 'posted', ttl=86400)
                     found_any = True
                 if found_any:
@@ -865,7 +876,7 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
             logging.info(f"🟠 Checking {artist_name}")
 
             # Fetch both first so we can decide about suppression
-            release_info = await run_blocking(get_soundcloud_release_info, artist_url)
+            release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
             playlist_info = None
             try:
                 playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
