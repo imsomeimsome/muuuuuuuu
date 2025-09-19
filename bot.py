@@ -144,17 +144,18 @@ async def log_summary(total_checked, new_releases, errors):
 logger = logging.getLogger("release_checker")
 
 def parse_date(date_str: str) -> datetime:
-    """Handle multiple date formats consistently."""
+    """Handle multiple date formats consistently (normalized for ordering, not display).
+       Date-only values are anchored at 12:00 UTC (not 23:59:59) to avoid artificial 'future' drift."""
     if not date_str:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        # Pure date -> set to end of day to avoid being 'older' than a stored same-day timestamp
-        if len(date_str) == 10 and date_str.count('-') == 2:
+        # Pure date (YYYY-MM-DD)
+        if len(date_str) == 10 and date_str.count('-') == 2 and 'T' not in date_str:
             dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            return dt + timedelta(hours=23, minutes=59, seconds=59)
+            # Anchor at midday UTC so every timezone still maps to the same calendar date
+            return dt + timedelta(hours=12)
         if 'T' in date_str:
-            # Accept both with and without timezone / microseconds
-            ds = date_str.replace('Z', '+0000')
+            ds = date_str.replace('Z', '+00:00')
             fmts = ['%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z']
             for fmt in fmts:
                 try:
@@ -654,6 +655,7 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
     errors = []
     releases = 0
     batch_check_time = datetime.now(timezone.utc).isoformat()
+    cycle_dedupe = set()  # (album_id, release_date)
     logging.info(f"\n🟢 CHECKING SPOTIFY{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
     for artist in artists:
@@ -716,13 +718,16 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
             def _newer(a, b):  # local safety helper
                 return a is not None and b is not None and a > b
             if _newer(api_dt, last_check_dt):
-                cache_key = f"posted_spotify:{artist_id}:{latest_album_id}:{api_release_date}"
-                if get_cache(cache_key):
-                    logging.info(f"     ⏭️ Duplicate suppressed (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                album_id = release_info.get('album_id')
+                cache_key_global = f"posted_spotify:{artist_id}:{album_id}:{api_release_date}"
+                if get_cache(cache_key_global):
+                    logging.info("     ⏭️ Duplicate suppressed (cache)")
+                elif (album_id, api_release_date) in cycle_dedupe:
+                    logging.info("     ⏭️ Duplicate suppressed (cycle memory)")
                 else:
-                    heading_text, _, embed = create_music_embed(
+                    heading_text, release_type_detected, embed = create_music_embed(
                         platform='spotify',
-                        artist_name=artist_name,
+                        artist_name=release_info.get('artist_name', artist_name),
                         title=release_info.get('title','New Release'),
                         url=release_info.get('url'),
                         release_date=api_release_date,
@@ -730,30 +735,39 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         features=release_info.get('features'),
                         track_count=release_info.get('track_count'),
                         duration=release_info.get('duration'),
-                        genres=release_info.get('genres',[]),
+                        genres=release_info.get('genres'),
                         repost=False,
+                        content_type=release_info.get('type'),
                         return_heading=True
                     )
-                    main_artist_name = release_info.get('main_artist_name')
-                    if main_artist_name and main_artist_name.lower() != artist_name.lower():
-                        # Tracked artist is featured, not main – skip normal release embed (feature block will cover it)
-                        logging.info("     ⏭️ Skipping normal embed (tracked artist is a feature on another artist's release)")
-                    else:
-                        for sub in _subscribers_for(artists, 'spotify', artist_id):
-                            sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                            channel = await get_release_channel(sub_gid, 'spotify')
-                            if channel:
-                                logging.info(f"      - guild id = {sub_gid} - found")
-                                await channel.send(embed=embed)
-                                update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
-                            else:
-                                logging.info(f"      - guild id = {sub_gid} - not found")
-                        set_cache(cache_key, 'posted', ttl=86400)
+
+                    posted_any = False
+                    for sub in _subscribers_for(artists, 'spotify', artist_id):
+                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                        channel = await get_release_channel(sub_gid, 'spotify')
+                        if not channel:
+                            logging.info(f"      - guild id = {sub_gid} - no channel")
+                            continue
+                        try:
+                            await channel.send(embed=embed)
+                            update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
+                            posted_any = True
+                            logging.info(f"      - guild id = {sub_gid} - posted")
+                        except Exception as se:
+                            logging.error(f"      - guild id = {sub_gid} - send failed: {se}")
+
+                    if posted_any:
+                        set_cache(cache_key_global, '1', ttl=86400)
+                        cycle_dedupe.add((album_id, api_release_date))
                         releases += 1
                         logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
-            else:
-                logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
+                    else:
+                        logging.info("     ⚠️ Not posted anywhere (no channels configured)")
 
+                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                continue  # skip feature block if main release handled
+
+            # Only reach feature logic if not a new main release
             # === NEW: Featured-on detection (one fetch, broadcast per guild) ===
             try:
                 feat_info = await run_blocking(get_spotify_latest_featured_release, artist_id)
@@ -807,9 +821,31 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         embed._fields = [by_field] + fields[:-1]
                     except Exception:
                         pass
-                    await channel.send(embed=embed)
-                    set_cache(cache_key_feat, 'posted', ttl=86400)
-                    found_any = True
+
+                    # Dedupe before sending
+                    album_id = feat_info.get('album_id')
+                    feat_release_date = feat_info.get('release_date')
+                    feat_key = f"posted_spotify:{artist_id}:{album_id}:{feat_release_date}"
+                    if get_cache(feat_key) or (album_id, feat_release_date) in cycle_dedupe:
+                        logging.info("     ⏭️ Featured duplicate suppressed")
+                        continue
+
+                    posted_any = False
+                    for sub in _subscribers_for(artists, 'spotify', artist_id):
+                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                        channel = await get_release_channel(sub_gid, 'spotify')
+                        if not channel:
+                            continue
+                        try:
+                            await channel.send(embed=embed)
+                            # Do NOT update last_release_date (featured doesn't represent artist's own drop)
+                            posted_any = True
+                        except Exception as se:
+                            logging.error(f"      - featured send failed guild={sub_gid}: {se}")
+                    if posted_any:
+                        set_cache(feat_key, '1', ttl=86400)
+                        cycle_dedupe.add((album_id, feat_release_date))
+                        releases += 1
                 if found_any:
                     releases += 1  # count as a new event surfaced
             # === end featured-on block ===

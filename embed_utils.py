@@ -82,25 +82,33 @@ def _discord_ts(dt: datetime) -> int:
         dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp())
 
+def _absolute_calendar_tag(dt: datetime) -> str:
+    """Return a Discord absolute date (:D) tag anchored at the given datetime's calendar day (no time shown to users)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    # Re-anchor at 12:00 UTC of that day so every timezone maps to same displayed date
+    noon = dt.astimezone(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+    return f"<t:{_discord_ts(noon)}:D>"
+
 def _format_discord_release_date(date_str: str) -> str:
     """
-    Date-only (YYYY-MM-DD) -> absolute calendar date (:D) using noon UTC to avoid TZ edge cases.
-    Full timestamps -> relative (:R).
+    Unified calendar-only formatter:
+    - Any date (date-only or full timestamp) => absolute calendar date (:D) anchored at 12:00 UTC.
+    - Eliminates misleading previous-evening or early-morning times in different timezones.
     """
     if not date_str:
         return "Unknown"
     try:
+        # Date-only
         if _is_date_only(date_str):
-            # Anchor at 12:00 UTC so Discord shows the correct calendar day everywhere
-            day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(hours=12)
-            return f"<t:{_discord_ts(day)}:D>"
-        # Full timestamp -> relative
+            day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return _absolute_calendar_tag(day)
+        # Full timestamp
         dt = isoparse(date_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return f"<t:{_discord_ts(dt)}:R>"
+        return _absolute_calendar_tag(dt)
     except Exception:
-        # Fallback to raw value if parsing fails
         return str(date_str)
 
 def _parse_dt_any(s: str) -> datetime | None:
@@ -123,35 +131,38 @@ def _sc_adjust_calendar_day(dt: datetime) -> datetime:
         return dt
     return dt + timedelta(hours=SC_DISPLAY_TZ_OFFSET)
 
+def _sc_calendar_day_tag(date_str: str) -> str:
+    """Return absolute calendar day tag for a SoundCloud timestamp string."""
+    if not date_str:
+        return "Unknown"
+    try:
+        from datetime import datetime, timezone
+        from dateutil.parser import parse as _dp
+        dt = _dp(date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # Anchor at noon UTC so the calendar day is stable globally
+        dt = dt.astimezone(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
+        return f"<t:{int(dt.timestamp())}:D>"
+    except Exception:
+        return date_str
+
 def format_release_date_for_platform(platform: str, release_date: str) -> str:
     """
-    Unified field formatter:
-    - Spotify:
-        * Date-only (YYYY-MM-DD) -> absolute calendar <t:...:D>
-        * Full timestamp -> relative <t:...:R>
-    - SoundCloud:
-        * If date-only -> absolute <t:...:D>
-        * If full timestamp -> convert to adjusted local day (offset) and display absolute calendar <t:...:D>
-          (prevents 'previous day 8pm' confusion).
+    Platform-aware wrapper now normalized to calendar-only display for both Spotify & SoundCloud.
+    (We intentionally drop relative 'x hours ago' to avoid timezone confusion.)
     """
     if not release_date:
         return "Unknown"
-    # Spotify uses existing _format_discord_release_date logic
-    if platform.lower() == "spotify":
-        return _format_discord_release_date(release_date)
-
+    # SoundCloud optional offset adjustment still applied before tagging
     if platform.lower() == "soundcloud":
-        # Date-only case
-        if _is_date_only(release_date):
-            return _format_discord_release_date(release_date)
-        # Full timestamp -> adjust & show absolute calendar day
-        dt = _parse_dt_any(release_date)
-        if not dt:
-            return release_date
-        adj = _sc_adjust_calendar_day(dt)
-        # Anchor at noon local (after shift) to stabilize the calendar date across user timezones
-        noon = adj.replace(hour=12, minute=0, second=0, microsecond=0)
-        return f"<t:{_discord_ts(noon)}:D>"
+        if not _is_date_only(release_date):
+            dt = _parse_dt_any(release_date)
+            if dt:
+                adj = _sc_adjust_calendar_day(dt)
+                return _absolute_calendar_tag(adj)
+        return _format_discord_release_date(release_date)
+    # Spotify (date-only or full) -> absolute calendar
     return _format_discord_release_date(release_date)
 
 def create_music_embed(
@@ -377,9 +388,11 @@ def create_repost_embed(
 
     # Second row: Release Date, Reposted (relative times)
     if release_timestamp:
-        embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+        if platform.lower() == "soundcloud":
+            embed.add_field(name="Release Date", value=_sc_calendar_day_tag(release_date), inline=True)
+        else:
+            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
     if repost_timestamp:
-        # Use 'Liked' label to mirror like embed exactly per request
         embed.add_field(name="Reposted", value=f"<t:{repost_timestamp}:R>", inline=True)
 
     # Always add Genres (even if None)
@@ -498,10 +511,9 @@ def create_like_embed(
     # Second row: Release Date, Liked
     if release_timestamp:
         if platform.lower() == "soundcloud":
-            # Match repost style (relative)
-            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+            # Absolute calendar date (no relative “X hours ago” mislead)
+            embed.add_field(name="Release Date", value=_sc_calendar_day_tag(release_date), inline=True)
         else:
-            # Spotify keeps platform-aware formatting
             embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
