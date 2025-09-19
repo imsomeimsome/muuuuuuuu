@@ -891,6 +891,84 @@ def get_latest_featured_release(artist_id: str):
         logging.error(f"Error fetching latest featured release for artist {artist_id}: {e}")
         return None
 
+def _parse_spotify_date_for_compare(date_str: str, precision: str | None):
+    """
+    Convert Spotify release_date + precision into a comparable UTC datetime.
+    Anchors:
+      day   -> that day 12:00 UTC
+      month -> first day of month 12:00 UTC
+      year  -> July 1 12:00 UTC (mid-year to reduce ordering bias)
+    """
+    from datetime import datetime, timezone
+    if not date_str:
+        return datetime(1970, 1, 1, 0, 0, tzinfo=timezone.utc)
+    try:
+        if precision == 'day' or (len(date_str) == 10 and date_str.count('-') == 2):
+            dt = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
+        elif precision == 'month' or (len(date_str) == 7 and date_str.count('-') == 1):
+            dt = datetime.strptime(date_str[:7], "%Y-%m").replace(tzinfo=timezone.utc, day=1, hour=12)
+        elif precision == 'year' or len(date_str) == 4:
+            dt = datetime.strptime(date_str[:4], "%Y").replace(tzinfo=timezone.utc, month=7, day=1, hour=12)
+        else:
+            # Fallback attempt
+            dt = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc, hour=12)
+        return dt
+    except Exception:
+        return datetime(1970, 1, 1, 0, 0, tzinfo=timezone.utc)
+
+def get_spotify_latest_album_id(artist_id: str, force_refresh: bool = False):
+    """
+    Deterministically return newest album/single ID for an artist.
+    Fixes stale/older dates by:
+      - Fetching up to 50 items (album + single)
+      - Parsing release_date with precision
+      - Selecting max parsed datetime
+    """
+    if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+        logging.error("❌ get_spotify_latest_album_id called with invalid artist_id")
+        return None
+    cache_key = f"spotify_latest_album_id:{artist_id}"
+    if not force_refresh:
+        try:
+            from utils import get_cache
+            cached = get_cache(cache_key)
+            if cached:
+                return cached
+        except Exception:
+            pass
+    try:
+        releases = safe_spotify_call(
+            spotify.artist_albums,
+            artist_id,
+            include_groups="album,single",
+            limit=50
+        )
+        items = (releases or {}).get('items', []) if releases else []
+        if not items:
+            return None
+        parsed = []
+        for alb in items:
+            rid = alb.get('id')
+            rdate = alb.get('release_date')
+            prec = alb.get('release_date_precision')
+            if not rid or not rdate:
+                continue
+            dt = _parse_spotify_date_for_compare(rdate, prec)
+            parsed.append((dt, rid))
+        if not parsed:
+            return None
+        parsed.sort(key=lambda x: x[0], reverse=True)
+        newest_id = parsed[0][1]
+        try:
+            from utils import set_cache
+            set_cache(cache_key, newest_id, ttl=120)
+        except Exception:
+            pass
+        return newest_id
+    except Exception as e:
+        logging.debug(f"get_spotify_latest_album_id error for {artist_id}: {e}")
+        return None
+
 import logging
 
 # Custom logging formatter for Railway logs
