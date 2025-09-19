@@ -92,22 +92,20 @@ def _absolute_calendar_tag(dt: datetime) -> str:
 
 def _format_discord_release_date(date_str: str) -> str:
     """
-    Unified calendar-only formatter:
-    - Any date (date-only or full timestamp) => absolute calendar date (:D) anchored at 12:00 UTC.
-    - Eliminates misleading previous-evening or early-morning times in different timezones.
+    Display logic:
+    - Full timestamp (has 'T') -> relative (<t:...:R>)
+    - Date-only (YYYY-MM-DD)   -> absolute calendar (<t:...:D>)
     """
     if not date_str:
         return "Unknown"
     try:
-        # Date-only
         if _is_date_only(date_str):
             day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            return _absolute_calendar_tag(day)
-        # Full timestamp
+            return f"<t:{_discord_ts(day)}:D>"
         dt = isoparse(date_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return _absolute_calendar_tag(dt)
+        return f"<t:{_discord_ts(dt)}:R>"
     except Exception:
         return str(date_str)
 
@@ -131,38 +129,31 @@ def _sc_adjust_calendar_day(dt: datetime) -> datetime:
         return dt
     return dt + timedelta(hours=SC_DISPLAY_TZ_OFFSET)
 
-def _sc_calendar_day_tag(date_str: str) -> str:
-    """Return absolute calendar day tag for a SoundCloud timestamp string."""
-    if not date_str:
-        return "Unknown"
-    try:
-        from datetime import datetime, timezone
-        from dateutil.parser import parse as _dp
-        dt = _dp(date_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        # Anchor at noon UTC so the calendar day is stable globally
-        dt = dt.astimezone(timezone.utc).replace(hour=12, minute=0, second=0, microsecond=0)
-        return f"<t:{int(dt.timestamp())}:D>"
-    except Exception:
-        return date_str
-
 def format_release_date_for_platform(platform: str, release_date: str) -> str:
     """
-    Platform-aware wrapper now normalized to calendar-only display for both Spotify & SoundCloud.
-    (We intentionally drop relative 'x hours ago' to avoid timezone confusion.)
+    Platform-aware wrapper:
+    - SoundCloud full timestamps -> relative
+    - SoundCloud date-only (rare) -> calendar
+    - Spotify date-only (normal) -> calendar (no time precision available)
+    - Spotify full timestamp (if ever present) -> relative
     """
     if not release_date:
         return "Unknown"
-    # SoundCloud optional offset adjustment still applied before tagging
-    if platform.lower() == "soundcloud":
+    p = platform.lower()
+    if p == "soundcloud":
+        # Preserve original SC timestamp; no artificial midday shift
         if not _is_date_only(release_date):
-            dt = _parse_dt_any(release_date)
-            if dt:
-                adj = _sc_adjust_calendar_day(dt)
-                return _absolute_calendar_tag(adj)
+            try:
+                dt = _parse_dt_any(release_date)
+                if dt:
+                    return f"<t:{_discord_ts(dt)}:R>"
+            except Exception:
+                pass
+        # Date-only fallback
         return _format_discord_release_date(release_date)
-    # Spotify (date-only or full) -> absolute calendar
+    # Spotify: usually date-only (no time). Keep calendar for clarity.
+    if _is_date_only(release_date):
+        return _format_discord_release_date(release_date)
     return _format_discord_release_date(release_date)
 
 def create_music_embed(
@@ -258,7 +249,11 @@ def create_music_embed(
 
     # Release Date (use absolute date for YYYY-MM-DD, relative otherwise)
     if release_date:
-        embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
+        embed.add_field(
+            name="Release Date",
+            value=format_release_date_for_platform(platform, release_date),
+            inline=True
+        )
 
     if genres:
         if isinstance(genres, list):
@@ -387,11 +382,12 @@ def create_repost_embed(
         embed.add_field(name="Duration", value=duration, inline=True)
 
     # Second row: Release Date, Reposted (relative times)
-    if release_timestamp:
-        if platform.lower() == "soundcloud":
-            embed.add_field(name="Release Date", value=_sc_calendar_day_tag(release_date), inline=True)
-        else:
-            embed.add_field(name="Release Date", value=f"<t:{release_timestamp}:R>", inline=True)
+    if release_timestamp and release_date:
+        embed.add_field(
+            name="Release Date",
+            value=format_release_date_for_platform(platform, release_date),
+            inline=True
+        )
     if repost_timestamp:
         embed.add_field(name="Reposted", value=f"<t:{repost_timestamp}:R>", inline=True)
 
@@ -509,12 +505,12 @@ def create_like_embed(
         embed.add_field(name="Duration", value=duration, inline=True)
 
     # Second row: Release Date, Liked
-    if release_timestamp:
-        if platform.lower() == "soundcloud":
-            # Absolute calendar date (no relative “X hours ago” mislead)
-            embed.add_field(name="Release Date", value=_sc_calendar_day_tag(release_date), inline=True)
-        else:
-            embed.add_field(name="Release Date", value=format_release_date_for_platform(platform, release_date), inline=True)
+    if release_timestamp and release_date:
+        embed.add_field(
+            name="Release Date",
+            value=format_release_date_for_platform(platform, release_date),
+            inline=True
+        )
     if like_timestamp:
         embed.add_field(name="Liked", value=f"<t:{like_timestamp}:R>", inline=True)
 
