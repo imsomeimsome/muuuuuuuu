@@ -131,30 +131,47 @@ def _sc_adjust_calendar_day(dt: datetime) -> datetime:
 
 def format_release_date_for_platform(platform: str, release_date: str) -> str:
     """
-    Platform-aware wrapper:
-    - SoundCloud full timestamps -> relative
-    - SoundCloud date-only (rare) -> calendar
-    - Spotify date-only (normal) -> calendar (no time precision available)
-    - Spotify full timestamp (if ever present) -> relative
+    Unified relative formatter:
+    - Full timestamp -> relative
+    - Date-only -> relative (from 00:00 UTC) if the date is today, otherwise calendar
     """
     if not release_date:
         return "Unknown"
-    p = platform.lower()
-    if p == "soundcloud":
-        # Preserve original SC timestamp; no artificial midday shift
-        if not _is_date_only(release_date):
-            try:
+    try:
+        now_utc = datetime.now(timezone.utc)
+        is_date_only = _is_date_only(release_date)
+
+        if platform.lower() == "soundcloud":
+            if not is_date_only:
                 dt = _parse_dt_any(release_date)
                 if dt:
+                    if dt > now_utc:
+                        return f"<t:{_discord_ts(dt)}:D>"
                     return f"<t:{_discord_ts(dt)}:R>"
-            except Exception:
-                pass
-        # Date-only fallback
-        return _format_discord_release_date(release_date)
-    # Spotify: usually date-only (no time). Keep calendar for clarity.
-    if _is_date_only(release_date):
-        return _format_discord_release_date(release_date)
-    return _format_discord_release_date(release_date)
+            # date-only fallback
+            day = datetime.strptime(release_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            return f"<t:{_discord_ts(day)}:D>"
+
+        # Spotify
+        if is_date_only:
+            day = datetime.strptime(release_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if day.date() == now_utc.date():
+                # Treat midnight as release moment for relative display
+                midnight = day  # already 00:00 UTC
+                ts = _discord_ts(midnight)
+                if midnight > now_utc:
+                    return f"<t:{ts}:D>"
+                return f"<t:{ts}:R>"
+            return f"<t:{_discord_ts(day)}:D>"
+        else:
+            dt = _parse_dt_any(release_date)
+            if not dt:
+                return release_date
+            if dt > now_utc:
+                return f"<t:{_discord_ts(dt)}:D>"
+            return f"<t:{_discord_ts(dt)}:R>"
+    except Exception:
+        return release_date
 
 def create_music_embed(
     platform,

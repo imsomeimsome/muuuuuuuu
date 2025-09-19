@@ -685,13 +685,22 @@ def get_last_release_date(artist_id):
         print(f"Error fetching last release date for {artist_id}: {e}")
         return "N/A"
 
-def get_latest_album_id(artist_id):
-    """Get the latest album/single ID for an artist."""
+def get_latest_album_id(artist_id, force_refresh: bool = False):
+    """
+    Backward-compatible wrapper for legacy callers.
+    Primary path: deterministic get_spotify_latest_album_id (supports force_refresh).
+    Fallback: legacy limited (limit=10) fetch + sort if deterministic path returns None.
+    """
+    # Prefer deterministic implementation
+    new_id = get_spotify_latest_album_id(artist_id, force_refresh=force_refresh)
+    if new_id:
+        return new_id
+
+    # Fallback legacy logic (mirrors original removed version)
     try:
         if not artist_id or str(artist_id).lower() in ("none", "null", ""):
-            logging.error("❌ get_latest_album_id called with invalid artist_id")
+            logging.error("❌ get_latest_album_id fallback called with invalid artist_id")
             return None
-        # Fetch multiple releases
         releases = safe_spotify_call(
             spotify.artist_albums,
             artist_id,
@@ -701,16 +710,15 @@ def get_latest_album_id(artist_id):
         )
         if not releases or not releases.get('items'):
             return None
-        # Sort releases by release_date
         sorted_releases = sorted(
             releases['items'],
-            key=lambda x: x['release_date'],
+            key=lambda x: x.get('release_date') or "",
             reverse=True
         )
         latest_album = sorted_releases[0]
-        return latest_album['id']
+        return latest_album.get('id')
     except Exception as e:
-        print(f"Error getting latest album for {artist_id}: {e}")
+        logging.debug(f"Fallback get_latest_album_id error for {artist_id}: {e}")
         return None
 
 def get_release_info(release_id, force_refresh: bool = False):

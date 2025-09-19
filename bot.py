@@ -708,15 +708,44 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                 logging.info("     ⏭️ Skipping (no release_date)")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue
+
             api_dt = parse_date(api_release_date)
             logging.info(f"     API returned: {_fmt_dt(api_dt)}")
-            if last_check_dt is None:
-                logging.info("     ⏭️ Baseline established (no previous check)")
+
+            # Determine if this is the artist's first ever cycle (baseline)
+            is_baseline = last_check_dt is None
+
+            # Force fresh fetch on baseline or if release date is today's date (to avoid stale cached IDs)
+            if is_baseline or (api_release_date[:10] == datetime.now(timezone.utc).strftime("%Y-%m-%d")):
+                try:
+                    latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id, True)
+                    if latest_album_id:
+                        release_info_fresh = await run_blocking(get_spotify_release_info, latest_album_id, True)
+                        if release_info_fresh and release_info_fresh.get('release_date'):
+                            release_info = release_info_fresh
+                            api_release_date = release_info.get('release_date')
+                            api_dt = parse_date(api_release_date)
+                            logging.info("     🔄 Forced fresh fetch (baseline/today)")
+
+                except Exception as fr_e:
+                    logging.debug(f"     Fresh fetch skipped: {fr_e}")
+
+            # NEW: Treat baseline as eligible for posting (no skip)
+            # We only skip if api_dt is None
+            if not api_dt:
+                logging.info("     ⏭️ Skipping (no valid api_dt)")
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                # Protect against any downstream stray comparisons this cycle
                 continue
-            def _newer(a, b):  # local safety helper
-                return a is not None and b is not None and a > b
+
+            # Drift correction (stored future vs API)
+            if last_release_dt and api_dt and last_release_dt > api_dt:
+                logging.warning(f"     ⚠️ Stored last_release_date {_fmt_dt(last_release_dt)} > API newest {_fmt_dt(api_dt)}; correcting.")
+                update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
+                last_release_dt = api_dt
+
+            def _newer(a, b):
+                return a is not None and (b is None or a > b)
+
             if _newer(api_dt, last_check_dt):
                 album_id = release_info.get('album_id')
                 cache_key_global = f"posted_spotify:{artist_id}:{album_id}:{api_release_date}"
@@ -760,12 +789,16 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                         set_cache(cache_key_global, '1', ttl=86400)
                         cycle_dedupe.add((album_id, api_release_date))
                         releases += 1
-                        logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt)})")
+                        logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt) if last_check_dt else 'None'})")
                     else:
                         logging.info("     ⚠️ Not posted anywhere (no channels configured)")
-
+                # Always update last_check after evaluation
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
                 continue  # skip feature block if main release handled
+
+            # Not newer → proceed to feature logic
+            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+            # (feature logic continues unchanged below)
 
             # Only reach feature logic if not a new main release
             # === NEW: Featured-on detection (one fetch, broadcast per guild) ===
@@ -854,7 +887,14 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         except Exception as e:
             logging.error(f"     ❌ Error for {artist_name}: {e}")
             errors.append({'type':'Spotify','message':str(e)})
-            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+            # Only mark last_release_check if we successfully got api_release_date earlier in loop
+            try:
+                if 'api_release_date' in locals() and api_release_date:
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                else:
+                    logging.info("     ⚠️ Skipping last_release_check update due to failure before fetch completion")
+            except Exception:
+                pass
     return releases, errors
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup: bool = False):
