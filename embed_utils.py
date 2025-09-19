@@ -397,7 +397,7 @@ def create_repost_embed(
     # Row 3: Upload Date (only if different), Features (only if present)
     up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
-        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R}", inline=True)
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
 
     if features:
         ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
@@ -521,7 +521,7 @@ def create_like_embed(
     # Row 3: Upload Date and Features
     up_ts = _to_unix_ts(upload_date) if upload_date else None
     if up_ts and (not release_timestamp or up_ts != release_timestamp):
-        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R}", inline=True)
+        embed.add_field(name="Upload Date", value=f"<t:{up_ts}:R>", inline=True)
     if features:
         ftxt = ", ".join([f for f in features if f]) if isinstance(features, list) else (str(features).strip() if features else "")
         if ftxt and ftxt.lower() != "none":

@@ -1431,69 +1431,49 @@ def get_soundcloud_artist_id(url):
         print(f"Error getting artist ID: {e}")
         return None
 
-def get_soundcloud_release_info(url):
+def get_soundcloud_release_info(artist_url, force_refresh: bool = False):
     """
-    Resolve any SoundCloud URL (track / playlist / user profile) into a normalized release dict.
-    Adds fallback for user profiles with empty initial track collections.
+    Resolve any SoundCloud artist/track/playlist URL into a normalized release dict.
+    force_refresh=True bypasses cache (prevents 2-cycle delay for just-uploaded items).
     """
-    cache_key = f"sc_release:{url}"
-    cached = get_cache(cache_key)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass  # Corrupt cache entry -> rebuild
-
+    cache_key = f"sc_release_info:{artist_url}"
+    if not force_refresh:
+        cached = get_cache(cache_key)
+        if cached:
+            try:
+                return json.loads(cached)
+            except Exception:
+                delete_cache(cache_key)
     try:
-        resolved = _cached_resolve(url)
+        resolved = _cached_resolve(artist_url)
         if not resolved:
-            logging.warning(f"Resolve failed for {url}")
+            logging.debug(f"[SC] resolve failed for {artist_url}")
             return None
-
-        kind = resolved.get("kind")
+        kind = (resolved.get('kind') or '').lower()
         info = None
-
-        if kind == "track":
+        if kind == 'track':
             info = process_track(resolved)
-
-        elif kind == "playlist":
-            # Ensure 'tracks' key present (sometimes truncated)
-            if not resolved.get("tracks"):
-                playlist_api = f"https://api-v2.soundcloud.com/playlists/{resolved.get('id')}?client_id={CLIENT_ID}"
-                full_resp = safe_request(playlist_api, headers=HEADERS)
+        elif kind == 'playlist':
+            # Fetch full playlist if tracks truncated
+            if not resolved.get('tracks'):
+                pl_api = f"https://api-v2.soundcloud.com/playlists/{resolved.get('id')}?client_id={CLIENT_ID}"
+                full_resp = safe_request(pl_api, headers=HEADERS)
                 if full_resp and full_resp.status_code == 200:
-                    resolved = full_resp.json()
+                    try:
+                        resolved = full_resp.json()
+                    except Exception:
+                        pass
             info = process_playlist(resolved)
-
-        elif kind == "user":
-            # Try to get latest track(s)
-            user_id = resolved.get("id")
-            if user_id:
-                tracks_url = (
-                    f"https://api-v2.soundcloud.com/users/{user_id}/tracks"
-                    f"?client_id={CLIENT_ID}&limit=5&linked_partitioning=1&representation=full"
-                )
-                resp = safe_request(tracks_url, headers=HEADERS)
-                if resp and resp.status_code == 200:
-                    data = resp.json()
-                    tracks = data.get('collection', data if isinstance(data, list) else [])
-                    if tracks:
-                        # Pick newest by created_at
-                        newest = max(tracks, key=lambda t: t.get('created_at', '') or '')
-                        info = process_track(newest)
-            if not info:
-                logging.info(f"ℹ️ No tracks available after fallback for {url}")
-                return None
+        elif kind == 'user':
+            info = get_artist_release(resolved)
         else:
-            logging.warning(f"Unsupported content kind '{kind}' for {url}")
+            logging.debug(f"[SC] Unsupported kind '{kind}' for {artist_url}")
             return None
-
         if info:
-            set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)
+            set_cache(cache_key, json.dumps(info), ttl=_jittered_ttl(60, 15))
         return info
-
     except Exception as e:
-        logging.error(f"Error fetching release info for {url}: {e}")
+        logging.error(f"Release info fetch failed for {artist_url}: {e}")
         return None
 
 def extract_soundcloud_id(url):
@@ -1885,31 +1865,3 @@ def get_soundcloud_key_status():
         }
     except Exception:
         return {'active_index': None, 'total': 0, 'keys': []}
-
-def get_soundcloud_release_info(artist_url, force_refresh: bool = False):
-    """
-    Fetch latest track release info for a SoundCloud artist.
-    force_refresh=True bypasses cached entry to avoid 2‑cycle delay on just‑uploaded tracks.
-    """
-    try:
-        cache_key = f"sc_release_info:{artist_url}"
-        if not force_refresh:
-            cached = get_cache(cache_key)
-            if cached:
-                try:
-                    return json.loads(cached)
-                except Exception:
-                    delete_cache(cache_key)
-        # ...existing fetch logic (unchanged below this comment)...
-        # After building 'info' dict:
-        set_cache(cache_key, json.dumps(info), ttl=_jittered_ttl(60, 15))
-        return info
-    except Exception as e:
-        logging.error(f"Release info fetch failed: {e}")
-        return None
-
-# --- Pylance safeguard: ensure 'info' exists if later debug/log lines reference it ---
-if 'info' not in globals():
-    info = {}
-
-# ...existing code continues (lines ~1905+)...
