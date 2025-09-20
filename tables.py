@@ -22,13 +22,13 @@ TABLE_DEFS = [
         artist_name TEXT,
         artist_url TEXT,
         owner_id TEXT,
-        guild_id TEXT,
+        guild_id TEXT NOT NULL DEFAULT '',
         genres TEXT,
         last_release_date TEXT,
         last_like_date TEXT,
         last_repost_date TEXT,
         last_playlist_date TEXT,
-        PRIMARY KEY(platform, artist_id, owner_id, COALESCE(guild_id,''))
+        PRIMARY KEY(platform, artist_id, owner_id, guild_id)
     )"""),
     ("channels", """CREATE TABLE IF NOT EXISTS channels (
         guild_id TEXT,
