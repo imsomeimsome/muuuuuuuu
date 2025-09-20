@@ -75,7 +75,7 @@ def _to_unix_ts(s):
         return None
 
 def _is_date_only(s: str) -> bool:
-    return isinstance(s, str) and len(s) == 10 and s.count('-') == 2 and 'T' not in s
+    return bool(s and len(s) == 10 and s.count('-') == 2 and 'T' not in s)
 
 def _discord_ts(dt: datetime) -> int:
     if dt.tzinfo is None:
@@ -129,18 +129,49 @@ def _sc_adjust_calendar_day(dt: datetime) -> datetime:
         return dt
     return dt + timedelta(hours=SC_DISPLAY_TZ_OFFSET)
 
+def _choose_sc_release_datetime(release_date: str | None, upload_date: str | None) -> str | None:
+    """
+    For SoundCloud likes/reposts:
+      - If release_date has full timestamp -> keep it.
+      - If release_date is date-only OR empty and we have upload_date -> use upload_date.
+      - Else return release_date (may be None).
+    """
+    if upload_date and (not release_date or _is_date_only(release_date)):
+        return upload_date
+    return release_date
+
+def _normalize_platform_release_date(platform: str, release_date: str | None) -> str | None:
+    """
+    Strip unintended time components for Spotify date-only releases.
+    If a Spotify release_date arrives with a synthetic time (e.g. '2025-09-19T08:00:00Z'),
+    collapse it back to YYYY-MM-DD so we don't render misleading 8am/pm times later.
+    """
+    if not release_date:
+        return release_date
+    if platform.lower() == "spotify":
+        if len(release_date) >= 10 and release_date[4:5] == "-" and release_date[7:8] == "-":
+            # Always treat Spotify album/single date as date-only
+            return release_date[:10]
+    return release_date
+
 def format_release_date_for_platform(platform: str, release_date: str) -> str:
     """
-    Unified relative formatter:
-    - Full timestamp -> relative
-    - Date-only -> relative (from 00:00 UTC) if the date is today, otherwise calendar
+    Unified formatter:
+      SoundCloud:
+        - Full timestamp -> relative
+        - Date-only -> calendar date
+      Spotify:
+        - Always strip to date-only (done earlier); if today or <48h old -> relative from midnight UTC
+          else calendar date. Any unexpected timestamp -> relative if <=48h else calendar.
     """
     if not release_date:
         return "Unknown"
     try:
         now_utc = datetime.now(timezone.utc)
+
         is_date_only = _is_date_only(release_date)
 
+        # SoundCloud logic (unchanged)
         if platform.lower() == "soundcloud":
             if not is_date_only:
                 dt = _parse_dt_any(release_date)
@@ -148,28 +179,36 @@ def format_release_date_for_platform(platform: str, release_date: str) -> str:
                     if dt > now_utc:
                         return f"<t:{_discord_ts(dt)}:D>"
                     return f"<t:{_discord_ts(dt)}:R>"
-            # date-only fallback
             day = datetime.strptime(release_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             return f"<t:{_discord_ts(day)}:D>"
 
-        # Spotify
-        if is_date_only:
-            day = datetime.strptime(release_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            if day.date() == now_utc.date():
-                # Treat midnight as release moment for relative display
-                midnight = day  # already 00:00 UTC
-                ts = _discord_ts(midnight)
-                if midnight > now_utc:
-                    return f"<t:{ts}:D>"
-                return f"<t:{ts}:R>"
-            return f"<t:{_discord_ts(day)}:D>"
-        else:
+        # Spotify logic
+        if platform.lower() == "spotify":
+            if is_date_only:
+                day = datetime.strptime(release_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                age = now_utc - day
+                if day > now_utc:
+                    return f"<t:{_discord_ts(day)}:D>"
+                # Relative if within last 48h (covers midnight drops)
+                if age.total_seconds() <= 172800:
+                    # Use midnight UTC start for relative reference
+                    return f"<t:{_discord_ts(day)}:R>"
+                return f"<t:{_discord_ts(day)}:D>"
+            # Unexpected full timestamp for Spotify (treat like SC but cap to 48h for relative)
             dt = _parse_dt_any(release_date)
             if not dt:
                 return release_date
             if dt > now_utc:
                 return f"<t:{_discord_ts(dt)}:D>"
-            return f"<t:{_discord_ts(dt)}:R>"
+            if (now_utc - dt).total_seconds() <= 172800:
+                return f"<t:{_discord_ts(dt)}:R>"
+            # Older than 48h → calendar only
+            day = dt.date()
+            noon = datetime(day.year, day.month, day.day, 12, 0, 0, tzinfo=timezone.utc)
+            return f"<t:{_discord_ts(noon)}:D>"
+
+        # Fallback (other platforms)
+        return release_date
     except Exception:
         return release_date
 
@@ -264,7 +303,10 @@ def create_music_embed(
     if isinstance(duration, str) and duration.strip():
         embed.add_field(name="Duration", value=duration, inline=True)
 
-    # Release Date (use absolute date for YYYY-MM-DD, relative otherwise)
+    # Normalize Spotify date to avoid synthetic 08:00/20:00 anchor artifacts
+    release_date = _normalize_platform_release_date(platform, release_date)
+
+    # Release Date field
     if release_date:
         embed.add_field(
             name="Release Date",
@@ -399,10 +441,18 @@ def create_repost_embed(
         embed.add_field(name="Duration", value=duration, inline=True)
 
     # Second row: Release Date, Reposted (relative times)
-    if release_timestamp and release_date:
+    effective_release_date = release_date
+    if platform.lower() == "soundcloud":
+        effective_release_date = _choose_sc_release_datetime(release_date, upload_date)
+
+    if release_timestamp and effective_release_date:
+        if effective_release_date != release_date:
+            rt = _to_unix_ts(effective_release_date)
+            if rt:
+                release_timestamp = rt
         embed.add_field(
             name="Release Date",
-            value=format_release_date_for_platform(platform, release_date),
+            value=format_release_date_for_platform(platform, effective_release_date),
             inline=True
         )
     if repost_timestamp:
@@ -522,10 +572,19 @@ def create_like_embed(
         embed.add_field(name="Duration", value=duration, inline=True)
 
     # Second row: Release Date, Liked
-    if release_timestamp and release_date:
+    effective_release_date = release_date
+    if platform.lower() == "soundcloud":
+        effective_release_date = _choose_sc_release_datetime(release_date, upload_date)
+
+    if release_timestamp and effective_release_date:
+        # recompute if we swapped
+        if effective_release_date != release_date:
+            rt = _to_unix_ts(effective_release_date)
+            if rt:
+                release_timestamp = rt
         embed.add_field(
             name="Release Date",
-            value=format_release_date_for_platform(platform, release_date),
+            value=format_release_date_for_platform(platform, effective_release_date),
             inline=True
         )
     if like_timestamp:
