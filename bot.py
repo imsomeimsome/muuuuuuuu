@@ -899,8 +899,9 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 # Fetch info
                 release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
                 playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
-                likes_info = await run_blocking(get_soundcloud_likes_info, artist_url, True)
-                reposts_info = await run_blocking(get_soundcloud_reposts_info, artist_url, True)
+                # Likes/Reposts return lists
+                likes_items = await run_blocking(get_soundcloud_likes, artist_url, True)
+                repost_items = await run_blocking(get_soundcloud_reposts, artist_url, True)
 
                 # Parse last stored dates
                 last_release_dt = parse_date(artist.get('last_release_date')) if artist.get('last_release_date') else None
@@ -912,81 +913,57 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 if release_info and release_info.get('release_date'):
                     rel_dt = parse_date(release_info['release_date'])
                     if _is_new(rel_dt, last_release_dt):
-                        heading, release_type_detected, embed = create_music_embed(
-                            platform='soundcloud',
-                            artist_name=artist_name,
-                            title=release_info.get('title','New Release'),
-                            url=release_info.get('url'),
-                            release_date=release_info.get('release_date'),
-                            cover_url=release_info.get('cover_url'),
-                            features=release_info.get('features'),
-                            track_count=release_info.get('track_count'),
-                            duration=release_info.get('duration'),
-                            genres=[],
-                            repost=False,
-                            content_type=release_info.get('type'),
-                            return_heading=True
-                        )
-                        channel = await get_release_channel(guild_id, 'soundcloud')
-                        if channel:
-                            await channel.send(embed=embed)
-                            update_last_release_date(artist_id, owner_id, guild_id, release_info['release_date'])
-                            counts['releases'] += 1
+                        await handle_release(bot, artist, release_info, release_info.get('type') or 'release')
+                        update_last_release_date(artist_id, owner_id, guild_id, release_info['release_date'])
+                        counts['releases'] += 1
 
                 # Playlists
                 if playlist_info and playlist_info.get('last_updated'):
                     pl_dt = parse_date(playlist_info['last_updated'])
                     if _is_new(pl_dt, last_playlist_dt) and not is_already_posted_playlist(artist_id, guild_id, playlist_info.get('url')):
-                        heading, _, embed = create_music_embed(
-                            platform='soundcloud',
-                            artist_name=artist_name,
-                            title=playlist_info.get('title','Updated Playlist'),
-                            url=playlist_info.get('url'),
-                            release_date=playlist_info.get('last_updated'),
-                            cover_url=playlist_info.get('cover_url'),
-                            features=None,
-                            track_count=len(playlist_info.get('tracks') or []),
-                            duration=None,
-                            genres=[],
-                            repost=False,
-                            content_type='playlist',
-                            return_heading=True
-                        )
-                        channel = await get_release_channel(guild_id, 'soundcloud')
-                        if channel:
-                            await channel.send(embed=embed)
-                            update_last_playlist_date(artist_id, guild_id, playlist_info['last_updated'])
-                            mark_posted_playlist(artist_id, guild_id, playlist_info.get('url'))
-                            counts['playlists'] += 1
+                        await check_for_playlist_changes(bot, artist, playlist_info)
+                        update_last_playlist_date(artist_id, guild_id, playlist_info['last_updated'])
+                        mark_posted_playlist(artist_id, guild_id, playlist_info.get('url'))
+                        counts['playlists'] += 1
 
-                # Likes
-                if likes_info and likes_info.get('latest_date'):
-                    like_dt = parse_date(likes_info['latest_date'])
+                # Likes (list of items with 'date' and metadata)
+                if isinstance(likes_items, list) and likes_items:
+                    try:
+                        latest_like_date = max((item.get('date') for item in likes_items if isinstance(item, dict) and item.get('date')), default=None)
+                    except Exception:
+                        latest_like_date = None
+                    like_dt = parse_date(latest_like_date) if latest_like_date else None
                     if _is_new(like_dt, last_like_dt):
                         like_embed = create_like_embed(
                             platform='soundcloud',
                             artist_name=artist_name,
-                            items=likes_info.get('items') or []
+                            items=likes_items
                         )
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             await channel.send(embed=like_embed)
-                            update_last_like_date(artist_id, guild_id, likes_info['latest_date'])
+                            if latest_like_date:
+                                update_last_like_date(artist_id, guild_id, latest_like_date)
                             counts['likes'] += 1
 
-                # Reposts
-                if reposts_info and reposts_info.get('latest_date'):
-                    repost_dt = parse_date(reposts_info['latest_date'])
+                # Reposts (list)
+                if isinstance(repost_items, list) and repost_items:
+                    try:
+                        latest_repost_date = max((item.get('date') for item in repost_items if isinstance(item, dict) and item.get('date')), default=None)
+                    except Exception:
+                        latest_repost_date = None
+                    repost_dt = parse_date(latest_repost_date) if latest_repost_date else None
                     if _is_new(repost_dt, last_repost_dt):
                         repost_embed = create_repost_embed(
                             platform='soundcloud',
                             artist_name=artist_name,
-                            items=reposts_info.get('items') or []
+                            items=repost_items
                         )
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             await channel.send(embed=repost_embed)
-                            update_last_repost_date(artist_id, guild_id, reposts_info['latest_date'])
+                            if latest_repost_date:
+                                update_last_repost_date(artist_id, guild_id, latest_repost_date)
                             counts['reposts'] += 1
 
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
@@ -1406,10 +1383,9 @@ async def check_scid_command(interaction: discord.Interaction):
 @app_commands.describe(file="Upload a previously exported JSON file")
 async def import_command(interaction: discord.Interaction, file: discord.Attachment):
     await interaction.response.defer(ephemeral=True)
-
     try:
         if not file.filename.endswith(".json"):
-            await interaction.followup.send("❌ File must be a `.json` export.")
+            await interaction.followup.send("❌ File must be a `.json` export.", ephemeral=True)
             return
 
         contents = await file.read()
@@ -1419,10 +1395,9 @@ async def import_command(interaction: discord.Interaction, file: discord.Attachm
         guild_id = str(interaction.guild.id) if interaction.guild else None
 
         added_count = import_artists_from_json(data, owner_id, guild_id)
-        await interaction.followup.send(f"✅ Imported {added_count} artists.")
-
+        await interaction.followup.send(f"✅ Imported {added_count} artists.", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ Failed to import: {e}")
+        await interaction.followup.send(f"❌ Failed to import: {e}", ephemeral=True)
 
 @bot.tree.command(name="debugsoundcloud", description="Test fetch SoundCloud release info manually.")
 @app_commands.describe(url="A SoundCloud artist or release URL")
