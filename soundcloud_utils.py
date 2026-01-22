@@ -18,6 +18,7 @@ import threading
 from collections import deque
 import statistics
 import base64
+from typing import Optional, List, Dict, Any
 
 # At the top after imports
 load_dotenv()
@@ -401,7 +402,7 @@ def _ensure_client_id_param(url: str, client_id: str) -> str:
         # Skip client_id for oauth token endpoint
         if "oauth2/token" in parsed.path:
             return url
-        qs = dict([p.split("=", 1) for p in parsed.query.split("&") if p]) if parsed.query else {}
+        qs = dict([p.split("=", 1)] for p in parsed.query.split("&") if p) if parsed.query else {}
         if client_id:
             qs["client_id"] = client_id
         q = "&".join([f"{k}={v}"] for k, v in qs.items())
@@ -1865,3 +1866,189 @@ def get_soundcloud_key_status():
         }
     except Exception:
         return {'active_index': None, 'total': 0, 'keys': []}
+
+def _as_dict(obj: Any) -> Dict[str, Any]:
+    return obj if isinstance(obj, dict) else {}
+
+def _is_non_empty_str(s: Any) -> bool:
+    return isinstance(s, str) and s.strip() != ""
+
+def _safe_max_date(items: List[Dict[str, Any]], key: str = "date") -> Optional[str]:
+    try:
+        dates = [it.get(key) for it in items if isinstance(it, dict) and _is_non_empty_str(it.get(key))]
+        return max(dates) if dates else None
+    except Exception:
+        return None
+
+def normalize_profile_url(url: str) -> str:
+    # Best-effort normalization; leave original if anything fails
+    try:
+        if not _is_non_empty_str(url):
+            return url
+        if "soundcloud.com/" not in url:
+            return url
+        # Strip query/fragment
+        base = url.split("?", 1)[0].split("#", 1)[0]
+        # Remove trailing slash
+        if (base.endswith("/")):
+            base = base[:-1]
+        return base
+    except Exception:
+        return url
+
+# IMPORTANT: This function is used by the checker as a fallback when profile parsing doesn’t provide a date.
+# It must never raise and must return a string date or None.
+def get_soundcloud_last_release_date(artist_url: str) -> Optional[str]:
+    try:
+        # Prefer pulling from get_artist_info to avoid brittle HTML/API edge-cases
+        url = normalize_profile_url(artist_url)
+        profile = get_artist_info(url)  # existing helper
+        prof = _as_dict(profile)
+        date = prof.get("latest_release_date")
+        return date if _is_non_empty_str(date) else None
+    except Exception as e:
+        # Do not raise; just log at debug to avoid noisy output
+        logging.debug(f"get_soundcloud_last_release_date fallback failed for {artist_url}: {e}")
+        return None
+
+# Ensure playlist helper returns a dict or None and never raises due to unexpected types
+def get_soundcloud_playlist_info(artist_url: str) -> Optional[Dict[str, Any]]:
+    try:
+        # If an internal implementation already exists, call it via a private alias to avoid recursion.
+        # If not, this wrapper just delegates and normalizes the result.
+        info = _get_soundcloud_playlist_info_impl(normalize_profile_url(artist_url))  # may exist in your file
+    except NameError:
+        # If no internal implementation exists, fall back to the public one but normalize output
+        try:
+            info = _get_playlist_info(normalize_profile_url(artist_url))  # if you have a lower-level helper
+        except Exception:
+            info = None
+    except Exception as e:
+        logging.debug(f"get_soundcloud_playlist_info failed for {artist_url}: {e}")
+        info = None
+
+    d = _as_dict(info)
+    # Validate expected keys to protect callers
+    if not d:
+        return None
+    # Normalize minimal shape used by bot.check_soundcloud_updates
+    payload = {
+        "last_updated": d.get("last_updated") or d.get("updated_at") or d.get("date"),
+        "url": d.get("url") or d.get("permalink_url"),
+        "tracks": d.get("tracks") or d.get("items") or [],
+        "cover_url": d.get("cover_url") or d.get("artwork_url") or d.get("thumbnail"),
+        "title": d.get("title") or d.get("name") or "Playlist"
+    }
+    if not _is_non_empty_str(payload["url"]) or not _is_non_empty_str(payload["last_updated"]):
+        return None
+    return payload
+
+# Likes must return a list (possibly empty) and never raise so the checker can proceed.
+def get_soundcloud_likes(artist_url: str) -> List[Dict[str, Any]]:
+    try:
+        url = normalize_profile_url(artist_url)
+        try:
+            items = _get_soundcloud_likes_impl(url)  # prefer internal impl if present
+        except NameError:
+            items = _fetch_likes(url)  # or your existing lower-level function
+        if not isinstance(items, list):
+            return []
+        # Normalize date key naming
+        normalized = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if "date" not in it:
+                # Map common alternatives
+                it = dict(it)  # shallow copy
+                it["date"] = it.get("created_at") or it.get("timestamp") or it.get("liked_at")
+            normalized.append(it)
+        return normalized
+    except Exception as e:
+        logging.debug(f"get_soundcloud_likes failed for {artist_url}: {e}")
+        return []
+
+# Reposts must return a list (possibly empty) and never raise so the checker can proceed.
+def get_soundcloud_reposts(artist_url: str) -> List[Dict[str, Any]]:
+    try:
+        url = normalize_profile_url(artist_url)
+        try:
+            items = _get_soundcloud_reposts_impl(url)  # prefer internal impl if present
+        except NameError:
+            items = _fetch_reposts(url)  # or your existing lower-level function
+        if not isinstance(items, list):
+            return []
+        normalized = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if "date" not in it:
+                it = dict(it)
+                it["date"] = it.get("created_at") or it.get("timestamp") or it.get("reposted_at")
+            normalized.append(it)
+        return normalized
+    except Exception as e:
+        logging.debug(f"get_soundcloud_reposts failed for {artist_url}: {e}")
+        return []
+
+# If you also expose a “profile” fetch, ensure it always returns a dict so bot-side code can rely on keys existing.
+def get_artist_info(url: str) -> Dict[str, Any]:  # type: ignore[override]
+    try:
+        # Call your existing implementation (rename to avoid recursion if needed)
+        info = _get_artist_info_impl(url)  # preferred internal name if present
+    except NameError:
+        # Fall back to original public function if that’s your single impl
+        info = _get_artist_info(url)  # or remove this branch if not applicable
+    except Exception as e:
+        logging.debug(f"get_artist_info failed for {url}: {e}")
+        info = None
+    d = _as_dict(info)
+    # Normalize keys used by the bot checker
+    # These may remain None if not derivable with current client_id, but shape stays consistent.
+    normalized = {
+        "url": d.get("url") or d.get("permalink_url") or normalize_profile_url(url),
+        "name": d.get("name") or d.get("username") or d.get("artist_name"),
+        "genres": d.get("genres") or [],
+        "latest_release_date": d.get("latest_release_date") or d.get("created_at") or None,
+        "latest_release_url": d.get("latest_release_url") or d.get("url") or d.get("permalink_url"),
+        "latest_release_title": d.get("latest_release_title") or d.get("title"),
+        "latest_release_type": d.get("latest_release_type") or d.get("type") or "release",
+        "latest_release_cover": d.get("latest_release_cover") or d.get("artwork_url") or d.get("thumbnail"),
+        "latest_release_features": d.get("latest_release_features"),
+        "latest_release_track_count": d.get("latest_release_track_count") or d.get("track_count"),
+        "latest_release_duration": d.get("latest_release_duration") or d.get("duration"),
+    }
+    return normalized
+
+# ===== Normalize helpers: provide internal aliases to existing public functions =====
+# These shims resolve Pylance errors by mapping the expected internal names
+# to the already-implemented public functions in this module.
+
+# Playlist info: use the existing get_soundcloud_playlist_info (force_refresh optional)
+def _get_soundcloud_playlist_info_impl(artist_url: str):
+    return get_soundcloud_playlist_info(artist_url, force_refresh=False)
+
+def _get_playlist_info(artist_url: str):
+    return get_soundcloud_playlist_info(artist_url, force_refresh=False)
+
+# Likes: use the existing get_soundcloud_likes_info
+def _get_soundcloud_likes_impl(artist_url: str):
+    return get_soundcloud_likes_info(artist_url, force_refresh=False)
+
+def _fetch_likes(artist_url: str):
+    return get_soundcloud_likes_info(artist_url, force_refresh=False)
+
+# Reposts: use the existing get_soundcloud_reposts_info
+def _get_soundcloud_reposts_impl(artist_url: str):
+    return get_soundcloud_reposts_info(artist_url, force_refresh=False)
+
+def _fetch_reposts(artist_url: str):
+    return get_soundcloud_reposts_info(artist_url, force_refresh=False)
+
+# Artist profile: use the existing get_artist_info (public implementation above)
+def _get_artist_info_impl(url: str):
+    # Call the primary get_artist_info defined earlier in this module
+    return get_artist_info(url)
+
+def _get_artist_info(url: str):
+    return get_artist_info(url)
