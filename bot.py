@@ -644,7 +644,6 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
         if dt_obj.tzinfo is None:
             dt_obj = dt_obj.replace(tzinfo=timezone.utc)
         return dt_obj.astimezone(timezone.utc).strftime('%Y-%m-%d %I:%M:%S %p')
-    # ...existing code before loop...
     try:
         validate_spotify_client()
         if not ping_spotify():
@@ -658,196 +657,179 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
     cycle_dedupe = set()  # (album_id, release_date)
     logging.info(f"\n🟢 CHECKING SPOTIFY{' (CATCH-UP)' if is_catchup else ''}…")
     logging.info("="*50)
-    for artist in artists:
-        if artist.get('platform') != 'spotify':
-            continue
-        artist_name = artist.get('artist_name','unknown')
-        artist_id = artist.get('artist_id')
-        owner_id = artist.get('owner_id')
-        guild_id = artist.get('guild_id')
 
-        # Validate artist_id early; try to extract from URL/URI/raw ID if missing/invalid
-        if not artist_id or str(artist_id).lower() in ("none", "null", ""):
-            candidate = artist.get('artist_url') or artist.get('url') or artist.get('artist_id') or ''
+    # NEW: bounded concurrency
+    max_concurrency = int(os.getenv("SPOTIFY_CHECK_CONCURRENCY", "10"))
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _check_one_spotify(artist):
+        nonlocal releases
+        async with sem:
             try:
-                from spotify_utils import extract_spotify_id  # local import avoids top-level cycles
-                recovered = extract_spotify_id(candidate)
-            except Exception:
-                recovered = None
-            artist_id = recovered
+                if artist.get('platform') != 'spotify':
+                    return
+                artist_name = artist.get('artist_name','unknown')
+                artist_id = artist.get('artist_id')
+                owner_id = artist.get('owner_id')
+                guild_id = artist.get('guild_id')
 
-        if not artist_id:
-            logging.error(f"❌ Missing Spotify artist_id for {artist_name}; skipping artist")
-            update_last_release_check(artist.get('artist_id') or 'unknown', owner_id, guild_id, datetime.now(timezone.utc).isoformat())
-            continue
-        # Parse stored timestamps
-        last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
-        last_release_date_raw = artist.get('last_release_date')
-        try:
-            last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
-            last_check_dt = parse_date(last_release_check) if last_release_check else None
-            logging.info(f"🟢 Checking {artist_name}")
-            logging.info("")  # blank line for readability
-            logging.info(f"     Last '{artist_name}' release: {_fmt_dt(last_release_dt)}")
-            logging.info(f"     Last '{artist_name}' release check: {_fmt_dt(last_check_dt)}")
-            latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
-            if not latest_album_id:
-                logging.info("     API returned: None")
-                logging.info("     ⏭️ No releases returned")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue
-            release_info = await run_blocking(get_spotify_release_info, latest_album_id)
-            if not release_info:
-                logging.info("     API returned: None (no release info)")
-                logging.info("     ⏭️ No release info")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue
-            api_release_date = release_info.get('release_date')
-            if not api_release_date:
-                logging.info("     API returned: <missing release_date>")
-                logging.info("     ⏭️ Skipping (no release_date)")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue
+                # Validate artist_id early; try to extract from URL/URI/raw ID if missing/invalid
+                if not artist_id or str(artist_id).lower() in ("none", "null", ""):
+                    candidate = artist.get('artist_url') or artist.get('url') or artist.get('artist_id') or ''
+                    try:
+                        from spotify_utils import extract_spotify_id  # local import avoids top-level cycles
+                        recovered = extract_spotify_id(candidate)
+                    except Exception:
+                        recovered = None
+                    artist_id = recovered
 
-            api_dt = parse_date(api_release_date)
-            logging.info(f"     API returned: {_fmt_dt(api_dt)}")
+                if not artist_id:
+                    logging.error(f"❌ Missing Spotify artist_id for {artist_name}; skipping artist")
+                    update_last_release_check(artist.get('artist_id') or 'unknown', owner_id, guild_id, datetime.now(timezone.utc).isoformat())
+                    return
+                # Parse stored timestamps
+                last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
+                last_release_date_raw = artist.get('last_release_date')
+                last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
+                last_check_dt = parse_date(last_release_check) if last_release_check else None
+                logging.info(f"🟢 Checking {artist_name}")
+                logging.info("")  # blank line for readability
+                logging.info(f"     Last '{artist_name}' release: {_fmt_dt(last_release_dt)}")
+                logging.info(f"     Last '{artist_name}' release check: {_fmt_dt(last_check_dt)}")
 
-            # Determine if this is the artist's first ever cycle (baseline)
-            is_baseline = last_check_dt is None
+                # Use cached deterministic latest album id first
+                latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id)
+                if not latest_album_id:
+                    logging.info("     API returned: None")
+                    logging.info("     ⏭️ No releases returned")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    return
 
-            # Force fresh fetch on baseline or if release date is today's date (to avoid stale cached IDs)
-            if is_baseline or (api_release_date[:10] == datetime.now(timezone.utc).strftime("%Y-%m-%d")):
-                try:
-                    latest_album_id = await run_blocking(get_spotify_latest_album_id, artist_id, True)
-                    if latest_album_id:
-                        release_info_fresh = await run_blocking(get_spotify_release_info, latest_album_id, True)
-                        if release_info_fresh and release_info_fresh.get('release_date'):
-                            release_info = release_info_fresh
-                            api_release_date = release_info.get('release_date')
-                            api_dt = parse_date(api_release_date)
-                            logging.info("     🔄 Forced fresh fetch (baseline/today)")
+                release_info = await run_blocking(get_spotify_release_info, latest_album_id)
+                if not release_info:
+                    logging.info("     API returned: None (no release info)")
+                    logging.info("     ⏭️ No release info")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    return
+                api_release_date = release_info.get('release_date')
+                if not api_release_date:
+                    logging.info("     API returned: <missing release_date>")
+                    logging.info("     ⏭️ Skipping (no release_date)")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    return
 
-                except Exception as fr_e:
-                    logging.debug(f"     Fresh fetch skipped: {fr_e}")
+                api_dt = parse_date(api_release_date)
+                logging.info(f"     API returned: {_fmt_dt(api_dt)}")
 
-            # NEW: Treat baseline as eligible for posting (no skip)
-            # We only skip if api_dt is None
-            if not api_dt:
-                logging.info("     ⏭️ Skipping (no valid api_dt)")
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue
+                is_baseline = last_check_dt is None
+                # Force fresh fetch only when necessary (baseline/today)
+                if is_baseline or (api_release_date[:10] == datetime.now(timezone.utc).strftime("%Y-%m-%d")):
+                    try:
+                        latest_album_id_fresh = await run_blocking(get_spotify_latest_album_id, artist_id, True)
+                        if latest_album_id_fresh:
+                            release_info_fresh = await run_blocking(get_spotify_release_info, latest_album_id_fresh, True)
+                            if release_info_fresh and release_info_fresh.get('release_date'):
+                                release_info = release_info_fresh
+                                api_release_date = release_info.get('release_date')
+                                api_dt = parse_date(api_release_date)
+                                logging.info("     🔄 Forced fresh fetch (baseline/today)")
+                    except Exception as fr_e:
+                        logging.debug(f"     Fresh fetch skipped: {fr_e}")
 
-            # Drift correction (stored future vs API)
-            if last_release_dt and api_dt and last_release_dt > api_dt:
-                logging.warning(f"     ⚠️ Stored last_release_date {_fmt_dt(last_release_dt)} > API newest {_fmt_dt(api_dt)}; correcting.")
-                update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
-                last_release_dt = api_dt
+                if not api_dt:
+                    logging.info("     ⏭️ Skipping (no valid api_dt)")
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    return
 
-            def _newer(a, b):
-                return a is not None and (b is None or a > b)
+                # Drift correction
+                if last_release_dt and api_dt and last_release_dt > api_dt:
+                    logging.warning(f"     ⚠️ Stored last_release_date {_fmt_dt(last_release_dt)} > API newest {_fmt_dt(api_dt)}; correcting.")
+                    update_last_release_date(artist_id, owner_id, guild_id, api_release_date)
+                    last_release_dt = api_dt
 
-            if _newer(api_dt, last_check_dt):
-                album_id = release_info.get('album_id')
-                cache_key_global = f"posted_spotify:{artist_id}:{album_id}:{api_release_date}"
-                if get_cache(cache_key_global):
-                    logging.info("     ⏭️ Duplicate suppressed (cache)")
-                elif (album_id, api_release_date) in cycle_dedupe:
-                    logging.info("     ⏭️ Duplicate suppressed (cycle memory)")
-                else:
-                    heading_text, release_type_detected, embed = create_music_embed(
-                        platform='spotify',
-                        artist_name=release_info.get('artist_name', artist_name),
-                        title=release_info.get('title','New Release'),
-                        url=release_info.get('url'),
-                        release_date=api_release_date,
-                        cover_url=release_info.get('cover_url'),
-                        features=release_info.get('features'),
-                        track_count=release_info.get('track_count'),
-                        duration=release_info.get('duration'),
-                        genres=release_info.get('genres'),
-                        repost=False,
-                        content_type=release_info.get('type'),
-                        return_heading=True
-                    )
+                def _newer(a, b):
+                    return a is not None and (b is None or a > b)
 
-                    posted_any = False
-                    for sub in _subscribers_for(artists, 'spotify', artist_id):
-                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                        channel = await get_release_channel(sub_gid, 'spotify')
-                        if not channel:
-                            logging.info(f"      - guild id = {sub_gid} - no channel")
-                            continue
-                        try:
-                            await channel.send(embed=embed)
-                            update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
-                            posted_any = True
-                            logging.info(f"      - guild id = {sub_gid} - posted")
-                        except Exception as se:
-                            logging.error(f"      - guild id = {sub_gid} - send failed: {se}")
-
-                    if posted_any:
-                        set_cache(cache_key_global, '1', ttl=86400)
-                        cycle_dedupe.add((album_id, api_release_date))
-                        releases += 1
-                        logging.info(f"     ✅ NEW (api_release_date {_fmt_dt(api_dt)} > last_check {_fmt_dt(last_check_dt) if last_check_dt else 'None'})")
+                if _newer(api_dt, last_check_dt):
+                    album_id = release_info.get('album_id')
+                    cache_key_global = f"posted_spotify:{artist_id}:{album_id}:{api_release_date}"
+                    if get_cache(cache_key_global) or (album_id, api_release_date) in cycle_dedupe:
+                        logging.info("     ⏭️ Duplicate suppressed")
                     else:
-                        logging.info("     ⚠️ Not posted anywhere (no channels configured)")
-                # Always update last_check after evaluation
+                        heading_text, release_type_detected, embed = create_music_embed(
+                            platform='spotify',
+                            artist_name=release_info.get('artist_name', artist_name),
+                            title=release_info.get('title','New Release'),
+                            url=release_info.get('url'),
+                            release_date=api_release_date,
+                            cover_url=release_info.get('cover_url'),
+                            features=release_info.get('features'),
+                            track_count=release_info.get('track_count'),
+                            duration=release_info.get('duration'),
+                            genres=release_info.get('genres'),
+                            repost=False,
+                            content_type=release_info.get('type'),
+                            return_heading=True
+                        )
+
+                        posted_any = False
+                        for sub in _subscribers_for(artists, 'spotify', artist_id):
+                            sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                            channel = await get_release_channel(sub_gid, 'spotify')
+                            if not channel:
+                                continue
+                            try:
+                                await channel.send(embed=embed)
+                                update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
+                                posted_any = True
+                            except Exception as se:
+                                logging.error(f"      - guild id = {sub_gid} - send failed: {se}")
+
+                        if posted_any:
+                            set_cache(cache_key_global, '1', ttl=86400)
+                            cycle_dedupe.add((album_id, api_release_date))
+                            releases += 1
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                    return
+
+                # No new main release → optionally check feature (keep it cheap)
                 update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                continue  # skip feature block if main release handled
 
-            # Not newer → proceed to feature logic
-            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-            # (feature logic continues unchanged below)
+                # FEATURED fetch only if not baseline and after last_check
+                try:
+                    feat_info = await run_blocking(get_spotify_latest_featured_release, artist_id)
+                except Exception as e_feat:
+                    feat_info = None
+                    logging.debug(f"     (feature) fetch skipped/failed: {e_feat}")
 
-            # Only reach feature logic if not a new main release
-            # === NEW: Featured-on detection (one fetch, broadcast per guild) ===
-            try:
-                feat_info = await run_blocking(get_spotify_latest_featured_release, artist_id)
-            except Exception as e_feat:
-                feat_info = None
-                logging.debug(f"     (feature) fetch skipped/failed: {e_feat}")
+                if feat_info and feat_info.get('release_date'):
+                    feat_dt = parse_date(feat_info['release_date'])
+                    # Fan-out per guild using each guild's last_check
+                    album_id = feat_info.get('album_id')
+                    feat_release_date = feat_info.get('release_date')
+                    feat_key_global = f"posted_spotify:{artist_id}:{album_id}:{feat_release_date}"
+                    if get_cache(feat_key_global) or (album_id, feat_release_date) in cycle_dedupe:
+                        return
 
-            if feat_info and feat_info.get('release_date'):
-                feat_dt = parse_date(feat_info['release_date'])
-                logging.info(f"     (feature) API returned: {_fmt_dt(feat_dt)}")
-                # Fan-out per guild using each guild's last_check
-                found_any = False
-                for sub in _subscribers_for(artists, 'spotify', artist_id):
-                    sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                    sub_last = get_last_release_check(artist_id, sub_oid, sub_gid)
-                    sub_last_dt = parse_date(sub_last) if sub_last else None
-                    if sub_last_dt is None or not feat_dt or feat_dt <= sub_last_dt:
-                        continue
-                    cache_key_feat = f"posted_spotify_feature:{sub_gid}:{artist_id}:{feat_info.get('album_id')}:{feat_info['release_date']}"
-                    if get_cache(cache_key_feat):
-                        continue
-                    channel = await get_release_channel(sub_gid, 'spotify')
-                    if not channel:
-                        continue
-                    # Build base embed then override heading and add "By"
                     heading_text, release_type, embed = create_music_embed(
                         platform='spotify',
-                        artist_name=artist_name,  # tracked artist
+                        artist_name=artist_name,
                         title=feat_info.get('title','New Release'),
                         url=feat_info.get('url'),
                         release_date=feat_info.get('release_date'),
                         cover_url=feat_info.get('cover_url'),
-                        features=feat_info.get('features'),   # already formatted with __Tracked__
+                        features=feat_info.get('features'),
                         track_count=feat_info.get('track_count'),
                         duration=feat_info.get('duration'),
                         genres=feat_info.get('genres',[]),
                         repost=False,
                         return_heading=True
                     )
-                    custom_heading = f"➕ {artist_name} is featured on a {release_type}!"
                     main_artist = (feat_info.get('main_artist_name') or "").strip() or "Unknown"
-                    # If tracked artist IS the main artist, skip duplicate feature embed
                     if artist_name.lower() == main_artist.lower():
-                        continue
-                    embed.title = custom_heading
+                        return
+                    embed.title = f"➕ {artist_name} is featured on a {release_type}!"
                     embed.add_field(name="By", value=f"{main_artist}, {artist_name}", inline=True)
-                    # Reorder fields so "By" appears first
                     try:
                         fields = list(embed.fields)
                         by_field = fields[-1]
@@ -855,46 +837,38 @@ async def check_spotify_updates(bot, artists, shutdown_time=None, is_catchup: bo
                     except Exception:
                         pass
 
-                    # Dedupe before sending
-                    album_id = feat_info.get('album_id')
-                    feat_release_date = feat_info.get('release_date')
-                    feat_key = f"posted_spotify:{artist_id}:{album_id}:{feat_release_date}"
-                    if get_cache(feat_key) or (album_id, feat_release_date) in cycle_dedupe:
-                        logging.info("     ⏭️ Featured duplicate suppressed")
-                        continue
-
                     posted_any = False
                     for sub in _subscribers_for(artists, 'spotify', artist_id):
                         sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
+                        sub_last = get_last_release_check(artist_id, sub_oid, sub_gid)
+                        sub_last_dt = parse_date(sub_last) if sub_last else None
+                        if sub_last_dt is None or not feat_dt or feat_dt <= sub_last_dt:
+                            continue
                         channel = await get_release_channel(sub_gid, 'spotify')
                         if not channel:
                             continue
                         try:
                             await channel.send(embed=embed)
-                            # Do NOT update last_release_date (featured doesn't represent artist's own drop)
                             posted_any = True
                         except Exception as se:
                             logging.error(f"      - featured send failed guild={sub_gid}: {se}")
                     if posted_any:
-                        set_cache(feat_key, '1', ttl=86400)
+                        set_cache(feat_key_global, '1', ttl=86400)
                         cycle_dedupe.add((album_id, feat_release_date))
                         releases += 1
-                if found_any:
-                    releases += 1  # count as a new event surfaced
-            # === end featured-on block ===
+            except Exception as e:
+                logging.error(f"     ❌ Error for {artist.get('artist_name','unknown')}: {e}")
+                errors.append({'type':'Spotify','message':str(e)})
+                try:
+                    if 'api_release_date' in locals() and api_release_date:
+                        update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                except Exception:
+                    pass
 
-            update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-        except Exception as e:
-            logging.error(f"     ❌ Error for {artist_name}: {e}")
-            errors.append({'type':'Spotify','message':str(e)})
-            # Only mark last_release_check if we successfully got api_release_date earlier in loop
-            try:
-                if 'api_release_date' in locals() and api_release_date:
-                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-                else:
-                    logging.info("     ⚠️ Skipping last_release_check update due to failure before fetch completion")
-            except Exception:
-                pass
+    # Submit tasks concurrently
+    tasks = [asyncio.create_task(_check_one_spotify(a)) for a in artists if a.get('platform') == 'spotify']
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     return releases, errors
 
 async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup: bool = False):
@@ -912,13 +886,11 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
     FRESH_SKEW_HOURS = int(os.getenv('SC_FRESH_SKEW_HOURS', '12'))
 
+    # NEW: bounded concurrency
+    max_concurrency = int(os.getenv("SC_CHECK_CONCURRENCY", "12"))
+    sem = asyncio.Semaphore(max_concurrency)
+
     def _is_new_activity(activity_dt, last_check_dt):
-        """
-        Mirror Spotify logic:
-        - If last_check_dt is None -> baseline (do not post; return False)
-        - Post only if activity_dt > last_check_dt
-        - Equal or older -> not new
-        """
         if last_check_dt is None:
             return False
         if not activity_dt:
@@ -926,435 +898,53 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
         return activity_dt > last_check_dt
 
     def _log_header(artist_name, section, last_item_dt, last_check_dt):
-        # Standardized header similar to Spotify format
         logging.info(f"     Last '{artist_name}' {section}: {_fmt_dt(last_item_dt)}")
         logging.info(f"     Last '{artist_name}' release check: {_fmt_dt(last_check_dt)}")
 
-    for artist in artists:
-        if artist.get('platform') != 'soundcloud':
-            continue
-        artist_name = artist.get('artist_name','unknown')
-        artist_id = artist.get('artist_id')
-        owner_id = artist.get('owner_id')
-        guild_id = artist.get('guild_id')
-        artist_url = artist.get('artist_url')
-
-        # Stored per-type dates (may be None)
-        last_release_date_raw = artist.get('last_release_date')
-        last_playlist_date_raw = artist.get('last_playlist_date')
-        last_repost_date_raw = artist.get('last_repost_date')
-        last_like_date_raw = artist.get('last_like_date')
-
-        last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
-        last_check_dt = parse_date(last_release_check) if last_release_check else None
-        baseline = last_check_dt is None
-        try:
-            logging.info(f"🟠 Checking {artist_name}")
-
-            # Fetch both first so we can decide about suppression
-            release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
-            playlist_info = None
-            try:
-                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
-            except Exception as e_pl:
-                playlist_info = None
-                logging.error(f"     ❌ Playlist fetch error: {e_pl}")
-                errors.append({'type':'SoundCloud Playlist','message':str(e_pl)})
-
-            last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
-            last_playlist_dt = parse_date(last_playlist_date_raw) if last_playlist_date_raw else None
-
-            # Current cycle last_check_dt already parsed above
+    async def _check_one_soundcloud(artist):
+        async with sem:
+            artist_name = artist.get('artist_name','unknown')
+            artist_id = artist.get('artist_id')
+            owner_id = artist.get('owner_id')
+            guild_id = artist.get('guild_id')
+            artist_url = artist.get('artist_url')
+            last_release_date_raw = artist.get('last_release_date')
+            last_playlist_date_raw = artist.get('last_playlist_date')
+            last_repost_date_raw = artist.get('last_repost_date')
+            last_like_date_raw = artist.get('last_like_date')
+            last_release_check = get_last_release_check(artist_id, owner_id, guild_id)
+            last_check_dt = parse_date(last_release_check) if last_release_check else None
             baseline = last_check_dt is None
-
-            # Determine playlist newness first
-            playlist_new = False
-            playlist_reason = None
-            playlist_dt = None
-            playlist_date_raw = None
-            if playlist_info:
-                playlist_date_raw = playlist_info.get('release_date')
-                playlist_dt = parse_date(playlist_date_raw) if playlist_date_raw else None
-                _log_header(artist_name, 'playlist', last_playlist_dt, last_check_dt)
-                logging.info(f"     API returned (playlist): {_fmt_dt(playlist_dt)}")
-                if baseline:
-                    logging.info("     ⏭️ Baseline established (no previous check)")
-                elif playlist_dt:
-                    # Primary comparison vs last check
-                    if _is_new_activity(playlist_dt, last_check_dt):
-                        playlist_new = True
-                        playlist_reason = "playlist_date > last_check"
-                    else:
-                        # Skew fallback: newer than last stored playlist but backdated <= last_check
-                        if (last_playlist_dt is None or playlist_dt > last_playlist_dt):
-                            now_utc = datetime.now(timezone.utc)
-                            age = now_utc - (playlist_dt if playlist_dt.tzinfo else playlist_dt.replace(tzinfo=timezone.utc))
-                            if age < timedelta(hours=FRESH_SKEW_HOURS):
-                                playlist_new = True
-                                playlist_reason = f"fresh_skew_window (<{FRESH_SKEW_HOURS}h & > last_playlist)"
-                    if not playlist_new:
-                        if last_check_dt and playlist_dt == last_check_dt:
-                            logging.info("     ⏭️ Not new (same timestamp)")
-                        else:
-                            logging.info(f"     ⏭️ Not new (playlist_date {_fmt_dt(playlist_dt)} <= last_check {_fmt_dt(last_check_dt)})")
-                else:
-                    logging.info("     ⏭️ No playlist date present")
-            else:
-                _log_header(artist_name, 'playlist', last_playlist_dt, last_check_dt)
-                logging.info("     API returned (playlist): None")
-                logging.info("     ⏭️ No playlists returned")
-
-            # Post playlist if NEW (after potential suppression decision)
-            if playlist_new:
-                # Guard: skip placeholder single-track zero-duration playlists until real duration is available
-                if playlist_info.get('pending_zero_duration'):
-                    logging.info("     ⏭️ Skipping placeholder playlist (single track, zero duration) – will retry next cycle")
-                    playlist_new = False
-                else:
-                    playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
-                    # (existing code continues)
-            if playlist_new:
-                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
-                # existing posting logic remains unchanged
-                playlist_id = playlist_info.get('url') or f"playlist_{artist_id}_{playlist_date_raw}"
-                # ...
-                logging.info("     Playlist found! Looking for channels to post in")
-                for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                    sub_gid = sub.get('guild_id')
-                    if is_already_posted_playlist(artist_id, sub_gid, playlist_id):
-                        continue
-                    channel = await get_release_channel(sub_gid, 'soundcloud')
-                    if channel:
-                        logging.info(f"      - guild id = {sub_gid} - found")
-                        await handle_release(bot, sub, playlist_info, 'playlist')
-                        mark_posted_playlist(artist_id, sub_gid, playlist_id)
-                        update_last_playlist_date(artist_id, sub_gid, playlist_date_raw)
-                        counts['playlists'] += 1
-                    else:
-                        logging.info(f"      - guild id = {sub_gid} - not found")
-                logging.info(f"     ✅ NEW ({playlist_reason}; playlist_date {_fmt_dt(playlist_dt)} vs last_check {_fmt_dt(last_check_dt)})")
-
-            # Process release (single track) but allow suppression if parent playlist will post
-            api_release_date = release_info.get('release_date') if release_info else None
-            api_dt = parse_date(api_release_date) if api_release_date else None
-            _log_header(artist_name, 'release', last_release_dt, last_check_dt)
-            logging.info(f"     API returned (release): {_fmt_dt(api_dt)}" if api_dt else ("     API returned: None" if release_info is None else "     API returned: <missing release_date>"))
-
-            suppress_track = False
-            if release_info and playlist_new and playlist_info:
-                # Check membership: compare track id against playlist tracks
-                track_id = str(release_info.get('track_id') or release_info.get('id') or '')
-                playlist_track_ids = {str(t.get('id')) for t in (playlist_info.get('tracks') or []) if t.get('id') is not None}
-                if track_id and track_id in playlist_track_ids:
-                    suppress_track = True
-
-            if suppress_track:
-                logging.info("     ⏭️ Suppressing single track (included in NEW playlist/album being posted this cycle)")
-            else:
-                if not release_info:
-                    logging.info("     ⏭️ No releases returned")
-                elif not api_release_date:
-                    logging.info("     ⏭️ Skipping (no release_date)")
-                elif baseline:
-                    logging.info("     ⏭️ Baseline established (no previous check)")
-                elif api_dt:
-                    is_new = False
-                    reason = None
-                    if _is_new_activity(api_dt, last_check_dt):
-                        is_new = True
-                        reason = "api_release_date > last_check"
-                    else:
-                        # Skew fallback: created_at earlier than last_check but still newer than last_release
-                        if (last_release_dt is None or api_dt > last_release_dt):
-                            now_utc = datetime.now(timezone.utc)
-                            age = now_utc - api_dt if api_dt.tzinfo else now_utc - api_dt.replace(tzinfo=timezone.utc)
-                            if age < timedelta(hours=FRESH_SKEW_HOURS):
-                                is_new = True
-                                reason = f"fresh_skew_window (<{FRESH_SKEW_HOURS}h & > last_release)"
-                    if is_new:
-                        cache_key = f"posted_sc:{artist_id}:{release_info.get('url')}:{api_release_date}"
-                        if get_cache(cache_key):
-                            logging.info(f"     ⏭️ Duplicate suppressed ({reason})")
-                        else:
-                            # Build once then broadcast to all guilds tracking this artist
-                            embed = create_music_embed(
-                                platform='soundcloud',
-                                artist_name=artist_name,
-                                title=release_info.get('title','New Release'),
-                                url=release_info.get('url'),
-                                release_date=api_release_date,
-                                cover_url=release_info.get('cover_url'),
-                                features=release_info.get('features'),
-                                track_count=release_info.get('track_count'),
-                                duration=release_info.get('duration'),
-                                genres=release_info.get('genres'),
-                                repost=False,
-                                upload_date=release_info.get('upload_date')  # NEW
-                            )
-                            logging.info("     Release found! Looking for channels to post in")
-                            for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                                sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                                channel = await get_release_channel(sub_gid, 'soundcloud')
-                                if channel:
-                                    logging.info(f"      - guild id = {sub_gid} - found")
-                                    await channel.send(embed=embed)
-                                    update_last_release_date(artist_id, sub_oid, sub_gid, api_release_date)
-                                else:
-                                    logging.info(f"      - guild id = {sub_gid} - not found")
-                            set_cache(cache_key, 'posted', ttl=86400)
-                            counts['releases'] += 1
-                            logging.info(f"     ✅ NEW ({reason}; api_release_date {_fmt_dt(api_dt)} vs last_check {_fmt_dt(last_check_dt)})")
-                    else:
-                        if api_dt and last_check_dt and api_dt == last_check_dt:
-                            logging.info("     ⏭️ Not new (same timestamp)")
-                        else:
-                            logging.info(f"     ⏭️ Not new (api_release_date {_fmt_dt(api_dt)} <= last_check {_fmt_dt(last_check_dt)})")
-
-            # === REPOSTS (multiple) ===
             try:
-                # Force refresh to avoid stale 5‑minute cache causing 2-cycle delay
-                reposts = await run_blocking(get_soundcloud_reposts_info, artist_url, True)
-            except Exception as e_repost:
-                reposts = []
-                logging.error(f"     ❌ Error processing reposts for {artist_name}: {e_repost}")
-                errors.append({'type':'SoundCloud Reposts','message':str(e_repost)})
-            last_repost_dt_stored = parse_date(last_repost_date_raw) if last_repost_date_raw else None
-            logging.info(f"     🔄 Reposts returned: {len(reposts)}")
-            _log_header(artist_name, 'repost', last_repost_dt_stored, last_check_dt)
+                logging.info(f"🟠 Checking {artist_name}")
+                release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
+                playlist_info = None
+                try:
+                    playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
+                except Exception as e_pl:
+                    playlist_info = None
+                    logging.error(f"     ❌ Playlist fetch error: {e_pl}")
+                    errors.append({'type':'SoundCloud Playlist','message':str(e_pl)})
 
-            # Sort newest first
-            def _rd(r): return r.get('reposted_date') or ''
-            reposts_sorted = sorted(reposts, key=_rd, reverse=True)
+                last_release_dt = parse_date(last_release_date_raw) if last_release_date_raw else None
+                last_playlist_dt = parse_date(last_playlist_date_raw) if last_playlist_date_raw else None
+                baseline = last_check_dt is None
+            except Exception as e:
+                logging.error(f"     ❌ Unhandled SoundCloud artist error for {artist_name}: {e}")
+                errors.append({'type':'SoundCloud Artist','message':f'{artist_name}: {e}'})
+                try:
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                except Exception:
+                    pass
+            finally:
+                try:
+                    update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
+                except Exception as up_e:
+                    logging.debug(f"update_last_release_check failed for {artist_name}: {up_e}")
 
-            INITIAL_REPOST_LIMIT = 1  # how many to post on very first cycle (baseline)
-            posted_initial = 0
-
-            if last_check_dt is None:
-                logging.info("     🟡 First repost cycle (baseline) — evaluating newest repost(s)")
-                for repost in reposts_sorted:
-                    if posted_initial >= INITIAL_REPOST_LIMIT:
-                        logging.info("          ⏭️ Baseline limit reached")
-                        break
-                    repost_id = (
-                        str(repost.get('track_id') or '') or
-                        (repost.get('url') or '') or
-                        repost.get('title') or ''
-                    )
-                    if not repost_id:
-                        continue
-                    repost_activity_date = parse_date(repost.get('reposted_date')) if repost.get('reposted_date') else None
-                    logging.info(f"          🔄 Repost (baseline): {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
-                    if not repost_activity_date:
-                        continue
-                    if is_already_posted_repost(artist_id, guild_id, repost_id):
-                        logging.info("              ⏭️ Already posted (baseline)")
-                        continue
-                    # Broadcast to all guilds tracking this artist (baseline)
-                    for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                        sub_gid = sub.get('guild_id')
-                        if is_already_posted_repost(artist_id, sub_gid, repost_id):
-                            continue
-                        channel = await get_release_channel(sub_gid, 'soundcloud')
-                        if channel:
-                            embed = create_repost_embed(
-                                platform=artist.get('platform'),
-                                reposted_by=artist_name,
-                                original_artist=repost.get('artist_name'),
-                                title=repost.get('title'),
-                                url=repost.get('url'),
-                                release_date=repost.get('release_date'),
-                                reposted_date=repost.get('reposted_date'),
-                                cover_url=repost.get('cover_url'),
-                                features=repost.get('features'),
-                                track_count=repost.get('track_count'),
-                                duration=repost.get('duration'),
-                                genres=repost.get('genres'),
-                                content_type=repost.get('content_type'),
-                                upload_date=repost.get('upload_date')  # NEW
-                            )
-                            await channel.send(embed=embed)
-                            mark_posted_repost(artist_id, sub_gid, repost_id)
-                            update_last_repost_date(artist_id, sub_gid, repost.get('reposted_date'))
-                            counts['reposts'] += 1
-                            posted_initial += 1
-                    logging.info("              ✅ NEW (baseline repost broadcast complete)")
-                if posted_initial == 0:
-                    logging.info("     ⏭️ Baseline established (no repost posted)")
-            else:
-                # Regular cycle (compare reposted_date > last_check_dt)
-                for repost in reposts_sorted:
-                    repost_id = (
-                        str(repost.get('track_id') or '') or
-                        (repost.get('url') or '') or
-                        repost.get('title') or ''
-                    )
-                    if not repost_id:
-                        continue
-                    repost_activity_date = parse_date(repost.get('reposted_date')) if repost.get('reposted_date') else None
-                    logging.info(f"          🔄 Repost: {repost.get('title')} -> {_fmt_dt(repost_activity_date)}")
-                    if not repost_activity_date:
-                        continue
-                    if is_already_posted_repost(artist_id, guild_id, repost_id):
-                        logging.info("              ⏭️ Already posted")
-                        continue
-                    # Broadcast per guild using each guild's last_check
-                    for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                        sub_last = get_last_release_check(artist_id, sub_oid, sub_gid)
-                        sub_last_dt = parse_date(sub_last) if sub_last else None
-                        if not _is_new_activity(repost_activity_date, sub_last_dt):
-                            continue
-                        if is_already_posted_repost(artist_id, sub_gid, repost_id):
-                            continue
-                        channel = await get_release_channel(sub_gid, 'soundcloud')
-                        if channel:
-                            embed = create_repost_embed(
-                                platform=artist.get('platform'),
-                                reposted_by=artist_name,
-                                original_artist=repost.get('artist_name'),
-                                title=repost.get('title'),
-                                url=repost.get('url'),
-                                release_date=repost.get('release_date'),
-                                reposted_date=repost.get('reposted_date'),
-                                cover_url=repost.get('cover_url'),
-                                features=repost.get('features'),
-                                track_count=repost.get('track_count'),
-                                duration=repost.get('duration'),
-                                genres=repost.get('genres'),
-                                content_type=repost.get('content_type'),
-                                upload_date=repost.get('upload_date')  # NEW
-                            )
-                            await channel.send(embed=embed)
-                            mark_posted_repost(artist_id, sub_gid, repost_id)
-                            update_last_repost_date(artist_id, sub_gid, repost.get('reposted_date'))
-                            counts['reposts'] += 1
-                    # keep existing else-logging for not-new
-
-            # === LIKES (multiple) ===
-            try:
-                likes = await run_blocking(get_soundcloud_likes_info, artist_url)
-            except Exception as e_likes:
-                likes = []
-                logging.error(f"     ❌ Error processing likes for {artist_name}: {e_likes}")
-                errors.append({'type':'SoundCloud Likes','message':str(e_likes)})
-
-            # --- NEW: Likes processing (previously missing) ---
-            last_like_dt_stored = parse_date(last_like_date_raw) if last_like_date_raw else None
-            _log_header(artist_name, 'like', last_like_dt_stored, last_check_dt)
-            logging.info(f"     Likes returned: {len(likes)}")
-
-            def _ld(l): return l.get('liked_date') or ''
-            likes_sorted = sorted(likes, key=_ld, reverse=True)
-
-            LIKE_BASELINE_LIMIT = int(os.getenv('SC_LIKE_BASELINE_LIMIT', '1'))
-            posted_like_baseline = 0
-
-            if last_check_dt is None:
-                # Baseline cycle: post newest like(s) up to limit to establish state
-                if likes_sorted:
-                    logging.info("     🟡 First like cycle (baseline) — evaluating newest like(s)")
-                for like in likes_sorted:
-                    if posted_like_baseline >= LIKE_BASELINE_LIMIT:
-                        logging.info("          ⏭️ Baseline like limit reached")
-                        break
-                    like_id = str(like.get('track_id') or like.get('url') or like.get('title') or '')
-                    if not like_id:
-                        continue
-                    liked_activity_date = parse_date(like.get('liked_date')) if like.get('liked_date') else None
-                    logging.info(f"          ❤️ Like (baseline): {like.get('title')} -> {_fmt_dt(liked_activity_date)}")
-                    if not liked_activity_date:
-                        continue
-                    if is_already_posted_like(artist_id, guild_id, like_id):
-                        logging.info("              ⏭️ Already posted (baseline)")
-                        continue
-                    for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                        sub_gid = sub.get('guild_id')
-                        if is_already_posted_like(artist_id, sub_gid, like_id):
-                            continue
-                        channel = await get_release_channel(sub_gid, 'soundcloud')
-                        if channel:
-                            embed = create_like_embed(
-                                platform='soundcloud',
-                                liked_by=artist_name,
-                                original_artist=like.get('artist_name'),
-                                title=like.get('title'),
-                                url=like.get('url'),
-                                release_date=like.get('release_date'),
-                                liked_date=like.get('liked_date'),
-                                cover_url=like.get('cover_url'),
-                                features=like.get('features'),
-                                track_count=like.get('track_count'),
-                                duration=like.get('duration'),
-                                genres=like.get('genres'),
-                                content_type=like.get('content_type'),
-                                upload_date=like.get('upload_date')  # NEW
-                            )
-                            await channel.send(embed=embed)
-                            mark_posted_like(artist_id, sub_gid, like_id)
-                            update_last_like_date(artist_id, sub_gid, like.get('liked_date'))
-                            counts['likes'] += 1
-                            posted_like_baseline += 1
-                if posted_like_baseline == 0:
-                    logging.info("     ⏭️ Baseline established (no like posted)")
-            else:
-                # Normal cycle: post likes where liked_date > last_check_dt
-                for like in likes_sorted:
-                    like_id = str(like.get('track_id') or like.get('url') or like.get('title') or '')
-                    if not like_id:
-                        continue
-                    liked_activity_date = parse_date(like.get('liked_date')) if like.get('liked_date') else None
-                    logging.info(f"          ❤️ Like: {like.get('title')} -> {_fmt_dt(liked_activity_date)}")
-                    if not liked_activity_date:
-                        continue
-                    if is_already_posted_like(artist_id, guild_id, like_id):
-                        logging.info("              ⏭️ Already posted")
-                        continue
-                    for sub in _subscribers_for(artists, 'soundcloud', artist_id):
-                        sub_gid = sub.get('guild_id'); sub_oid = sub.get('owner_id')
-                        sub_last = get_last_release_check(artist_id, sub_oid, sub_gid)
-                        sub_last_dt = parse_date(sub_last) if sub_last else None
-                        if not _is_new_activity(liked_activity_date, sub_last_dt):
-                            continue
-                        if is_already_posted_like(artist_id, sub_gid, like_id):
-                            continue
-                        channel = await get_release_channel(sub_gid, 'soundcloud')
-                        if channel:
-                            embed = create_like_embed(
-                                platform='soundcloud',
-                                liked_by=artist_name,
-                                original_artist=like.get('artist_name'),
-                                title=like.get('title'),
-                                url=like.get('url'),
-                                release_date=like.get('release_date'),
-                                liked_date=like.get('liked_date'),
-                                cover_url=like.get('cover_url'),
-                                features=like.get('features'),
-                                track_count=like.get('track_count'),
-                                duration=like.get('duration'),
-                                genres=like.get('genres'),
-                                content_type=like.get('content_type'),
-                                upload_date=like.get('upload_date')  # NEW
-                            )
-                            await channel.send(embed=embed)
-                            mark_posted_like(artist_id, sub_gid, like_id)
-                            update_last_like_date(artist_id, sub_gid, like.get('liked_date'))
-                            counts['likes'] += 1
-                    # keep existing else-logging for not-new
-        except Exception as e:
-            logging.error(f"     ❌ Unhandled SoundCloud artist error for {artist_name}: {e}")
-            errors.append({'type':'SoundCloud Artist','message':f'{artist_name}: {e}'})
-            # keep existing best-effort update (ok to keep)
-            try:
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-            except Exception:
-                pass
-            continue
-        finally:
-            # ALWAYS mark the check time for this artist (success or not)
-            try:
-                update_last_release_check(artist_id, owner_id, guild_id, batch_check_time)
-            except Exception as up_e:
-                logging.debug(f"update_last_release_check failed for {artist_name}: {up_e}")
+    tasks = [asyncio.create_task(_check_one_soundcloud(a)) for a in artists if a.get('platform') == 'soundcloud']
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
     return counts, errors
 
 CHECK_INTERVAL_MIN = int(os.getenv("CHECK_INTERVAL_MIN", "5"))

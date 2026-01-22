@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import sqlite3, os, json
+import logging
 
 DB_PATH = "/data/artists.db"
 
@@ -121,6 +122,26 @@ def create_all_tables():
         except Exception:
             pass
         conn.commit()
+    _ensure_channels_created_at()
+
+def _ensure_channels_created_at():
+    try:
+        conn = sqlite3.connect('/data/bot.db')
+        cur = conn.cursor()
+        # Check if created_at exists
+        cur.execute("PRAGMA table_info(channels)")
+        cols = [row[1] for row in cur.fetchall()]
+        if 'created_at' not in cols:
+            logging.info("🛠 Adding 'created_at' to channels table")
+            cur.execute("ALTER TABLE channels ADD COLUMN created_at TEXT")
+            conn.commit()
+    except Exception as e:
+        logging.error(f"❌ Failed ensuring channels.created_at: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 # Fresh init utility
 
