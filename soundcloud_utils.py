@@ -712,81 +712,68 @@ def _cached_resolve(url: str):
 
 # --- Artist Data Fetching ---
 
-def get_artist_info(url_or_username):
-    """Resolve a SoundCloud user from a full profile URL or username."""
-    url_or_username = clean_soundcloud_url(url_or_username)  # Normalize the URL
-    cache_key = f"sc_artist_info:{url_or_username}"
-    cached = get_cache(cache_key)  # Use get_cache
-    if cached:
-        return json.loads(cached)
-
+def get_artist_info(url: str) -> Dict[str, Any]:  # type: ignore[override]
     try:
-        # Extract username from URL if necessary
-        if url_or_username.startswith("http"):
-            username = extract_soundcloud_username(url_or_username)
-        else:
-            username = url_or_username
-
-        # Build the resolve URL
-        resolve_url = f"https://api-v2.soundcloud.com/resolve?url=https://soundcloud.com/{username}&client_id={CLIENT_ID}"
-        response = safe_request(resolve_url, headers=HEADERS)
-
-        # Handle invalid responses
-        if not response or response.status_code != 200:
-            raise ValueError(f"Failed to resolve SoundCloud user: {url_or_username}")
-
-        data = response.json()
-
-        # Ensure the response contains valid artist data
-        if not data or data.get('kind') != 'user':
-            raise ValueError(f"Invalid artist data for: {url_or_username}")
-
-        # Extract artist information
-        info = {
-            'id': data.get('id', username),
-            'name': data.get('username', 'Unknown Artist'),
-            'url': data.get('permalink_url', f"https://soundcloud.com/{username}"),
-            'track_count': data.get('track_count', 0),
-            'avatar_url': data.get('avatar_url', ''),
-            'followers': data.get('followers_count', 0)
-        }
-
-        # Cache the result
-        set_cache(cache_key, json.dumps(info), ttl=CACHE_TTL)  # Use set_cache
-        return info
-
+        info = _get_artist_info_impl(url)  # preferred internal name if present
+    except NameError:
+        info = _get_artist_info(url)
     except Exception as e:
-        logging.error(f"Error fetching artist info for {url_or_username}: {e}")
-        return {'id': url_or_username, 'name': 'Unknown Artist', 'url': f"https://soundcloud.com/{url_or_username}"}
-       
-# --- Release Data Fetching ---
+        logging.debug(f"get_artist_info failed for {url}: {e}")
+        info = None
+    d = _as_dict(info)
+    normalized = {
+        "id": d.get("id"),  # include numeric id for downstream calls
+        "url": d.get("url") or d.get("permalink_url") or normalize_profile_url(url),
+        "name": d.get("name") or d.get("username") or d.get("artist_name"),
+        "genres": d.get("genres") or [],
+        "latest_release_date": d.get("latest_release_date") or d.get("created_at") or None,
+        "latest_release_url": d.get("latest_release_url") or d.get("url") or d.get("permalink_url"),
+        "latest_release_title": d.get("latest_release_title") or d.get("title"),
+        "latest_release_type": d.get("latest_release_type") or d.get("type") or "release",
+        "latest_release_cover": d.get("latest_release_cover") or d.get("artwork_url") or d.get("thumbnail"),
+        "latest_release_features": d.get("latest_release_features"),
+        "latest_release_track_count": d.get("latest_release_track_count") or d.get("track_count"),
+        "latest_release_duration": d.get("latest_release_duration") or d.get("duration"),
+    }
+    return normalized
 
 def get_last_release_date(artist_url):
     cache_key = f"sc_last_release:{artist_url}"
-    cached = get_cache(cache_key)  # Use get_cache
+    cached = get_cache(cache_key)
     if cached:
         return cached
     try:
         artist_info = get_artist_info(artist_url)
-        artist_id = artist_info['id']
+        artist_id = artist_info.get('id')
+        if not artist_id:
+            # Fallback via resolve if profile normalization didn’t include id
+            resolved = resolve_url(artist_url)
+            artist_id = (resolved or {}).get('id')
+            if not artist_id:
+                logging.warning(f"⚠️ Unable to resolve user id for last release: {artist_url}")
+                return None
 
         tracks_url = f"https://api-v2.soundcloud.com/users/{artist_id}/tracks?client_id={CLIENT_ID}&limit=5&order=created_at"
         response = safe_request(tracks_url, headers=HEADERS)
         if not response:
             return None
-        
-        tracks = response.json()
+
+        payload = response.json()
+        # Some endpoints return { collection: [...] }
+        tracks = payload.get('collection', payload if isinstance(payload, list) else [])
         if not tracks:
             return None
 
-        latest_track = max(tracks, key=lambda t: t['created_at'])
-        created = latest_track.get('created_at')
+        latest = max(tracks, key=lambda t: t.get('created_at', ''))
+        created = latest.get('created_at')
         if created:
-            set_cache(cache_key, created, ttl=CACHE_TTL)  # Use set_cache
+            set_cache(cache_key, created, ttl=CACHE_TTL)
         return created
     except Exception as e:
-        print(f"Error getting last release: {e}")
+        logging.error(f"Error getting last release: {e}")
         return None
+
+# --- Release Data Fetching ---
 
 def get_release_info(url):
     """Universal release info fetcher for tracks/playlists/artists."""
