@@ -299,8 +299,8 @@ def set_channel(guild_id, platform, channel_id):
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO channels (guild_id, platform, channel_id, created_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO channels (guild_id, platform, channel_id)
+            VALUES (?, ?, ?)
             ON CONFLICT(guild_id, platform) DO UPDATE SET
                 channel_id = excluded.channel_id
             """,
