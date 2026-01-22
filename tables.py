@@ -116,52 +116,26 @@ def create_all_tables():
         cur = conn.cursor()
         for _, ddl in TABLE_DEFS:
             cur.execute(ddl)
-        # Add index for cache pruning performance
         try:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_cache_expires_at ON cache(expires_at)")
         except Exception:
             pass
         conn.commit()
-    _ensure_channels_created_at()
 
-def _ensure_channels_created_at():
-    try:
-        conn = sqlite3.connect('/data/bot.db')
-        cur = conn.cursor()
-        # Check if created_at exists
-        cur.execute("PRAGMA table_info(channels)")
-        cols = [row[1] for row in cur.fetchall()]
-        if 'created_at' not in cols:
-            logging.info("🛠 Adding 'created_at' to channels table")
-            cur.execute("ALTER TABLE channels ADD COLUMN created_at TEXT")
-            conn.commit()
-    except Exception as e:
-        logging.error(f"❌ Failed ensuring channels.created_at: {e}")
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-# Fresh init utility
+# Remove incorrect migration that referenced a different DB and non-existent column
 
 def initialize_fresh_database():
     drop_all_tables()
     create_all_tables()
-
-# Cache table (already created but helper used elsewhere)
 
 def initialize_cache_table():
     with get_connection() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, value TEXT, expires_at TEXT)")
         conn.commit()
 
-# No-op populate placeholder
-
 def populate_default_data():
     pass
 
 if __name__ == "__main__":
-    # Run this to initialize a fresh database
     initialize_fresh_database()
     populate_default_data()

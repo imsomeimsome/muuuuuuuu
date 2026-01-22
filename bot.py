@@ -52,19 +52,17 @@ from soundcloud_utils import (
     get_soundcloud_release_info,
     get_soundcloud_artist_id,
     get_soundcloud_playlist_info,
-    get_soundcloud_likes_info,
-    get_soundcloud_reposts,
-    get_soundcloud_likes,
-    get_soundcloud_reposts_info,
+    get_soundcloud_likes,           # ensure correct import (list-returning)
+    get_soundcloud_reposts,         # ensure correct import (list-returning)
     get_artist_info,
     init_key_manager,
     CLIENT_ID as SC_CLIENT_ID,
     manual_rotate_soundcloud_key,
-    get_soundcloud_telemetry_snapshot,  # <-- added import (already existed comment)
-    get_soundcloud_key_status,  # <-- added
-    expand_soundcloud_short_url,  # <-- NEW
-    begin_soundcloud_release_batch,        # <-- added for silent limit detection
-    note_soundcloud_release_fetch          # <-- added for silent limit detection
+    get_soundcloud_telemetry_snapshot,
+    get_soundcloud_key_status,
+    expand_soundcloud_short_url,
+    begin_soundcloud_release_batch,
+    note_soundcloud_release_fetch
 )
 import soundcloud_utils  # added for dynamic key manager access
 from utils import run_blocking, log_release, parse_datetime, get_cache, set_cache, delete_cache, clear_all_cache, get_cache_stats
@@ -896,12 +894,11 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
                 logging.info(f"🟠 Checking {artist_name}")
 
-                # Fetch info
-                release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
-                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
-                # Likes/Reposts return lists
-                likes_items = await run_blocking(get_soundcloud_likes, artist_url, True)
-                repost_items = await run_blocking(get_soundcloud_reposts, artist_url, True)
+                # Fetch info (no extra positional args to likes/reposts)
+                release_info = await run_blocking(get_soundcloud_release_info, artist_url)
+                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url)
+                likes_items = await run_blocking(get_soundcloud_likes, artist_url)
+                repost_items = await run_blocking(get_soundcloud_reposts, artist_url)
 
                 # Parse last stored dates
                 last_release_dt = parse_date(artist.get('last_release_date')) if artist.get('last_release_date') else None
@@ -928,17 +925,14 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
                 # Likes (list of items with 'date' and metadata)
                 if isinstance(likes_items, list) and likes_items:
+                    latest_like_date = None
                     try:
                         latest_like_date = max((item.get('date') for item in likes_items if isinstance(item, dict) and item.get('date')), default=None)
                     except Exception:
-                        latest_like_date = None
+                        pass
                     like_dt = parse_date(latest_like_date) if latest_like_date else None
                     if _is_new(like_dt, last_like_dt):
-                        like_embed = create_like_embed(
-                            platform='soundcloud',
-                            artist_name=artist_name,
-                            items=likes_items
-                        )
+                        like_embed = create_like_embed(platform='soundcloud', artist_name=artist_name, items=likes_items)
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             await channel.send(embed=like_embed)
@@ -948,17 +942,14 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
                 # Reposts (list)
                 if isinstance(repost_items, list) and repost_items:
+                    latest_repost_date = None
                     try:
                         latest_repost_date = max((item.get('date') for item in repost_items if isinstance(item, dict) and item.get('date')), default=None)
                     except Exception:
-                        latest_repost_date = None
+                        pass
                     repost_dt = parse_date(latest_repost_date) if latest_repost_date else None
                     if _is_new(repost_dt, last_repost_dt):
-                        repost_embed = create_repost_embed(
-                            platform='soundcloud',
-                            artist_name=artist_name,
-                            items=repost_items
-                        )
+                        repost_embed = create_repost_embed(platform='soundcloud', artist_name=artist_name, items=repost_items)
                         channel = await get_release_channel(guild_id, 'soundcloud')
                         if channel:
                             await channel.send(embed=repost_embed)
