@@ -712,30 +712,61 @@ def _cached_resolve(url: str):
 
 # --- Artist Data Fetching ---
 
-def get_artist_info(url: str) -> Dict[str, Any]:  # type: ignore[override]
+def _get_artist_info_impl(url: str) -> Dict[str, Any]:
+    """Low-level resolver that returns the raw user object (or empty dict)."""
     try:
-        info = _get_artist_info_impl(url)  # preferred internal name if present
-    except NameError:
-        info = _get_artist_info(url)
-    except Exception as e:
-        logging.debug(f"get_artist_info failed for {url}: {e}")
-        info = None
-    d = _as_dict(info)
+        data = _cached_resolve(url)
+        if isinstance(data, dict) and (data.get('kind') or '').lower() == 'user':
+            return data
+        return {}
+    except Exception:
+        return {}
+
+def _get_artist_info(url: str) -> Dict[str, Any]:
+    """Alias for the low-level resolver (kept for compatibility with prior wrappers)."""
+    return _get_artist_info_impl(url)
+
+def get_artist_info(url: str) -> Dict[str, Any]:
+    """
+    Profile info normalized into a stable dict with at least:
+    - id (int) if available
+    - url (permalink_url)
+    - name (username)
+    Optional "latest_release_*" fields may be None if not derivable.
+    """
+    try:
+        raw = _get_artist_info_impl(url)
+    except Exception:
+        raw = {}
+    d = raw if isinstance(raw, dict) else {}
     normalized = {
-        "id": d.get("id"),  # include numeric id for downstream calls
-        "url": d.get("url") or d.get("permalink_url") or normalize_profile_url(url),
-        "name": d.get("name") or d.get("username") or d.get("artist_name"),
+        "id": d.get("id"),
+        "url": d.get("permalink_url") or d.get("url") or normalize_profile_url(url),
+        "name": d.get("username") or d.get("name") or d.get("artist_name"),
         "genres": d.get("genres") or [],
-        "latest_release_date": d.get("latest_release_date") or d.get("created_at") or None,
-        "latest_release_url": d.get("latest_release_url") or d.get("url") or d.get("permalink_url"),
-        "latest_release_title": d.get("latest_release_title") or d.get("title"),
-        "latest_release_type": d.get("latest_release_type") or d.get("type") or "release",
-        "latest_release_cover": d.get("latest_release_cover") or d.get("artwork_url") or d.get("thumbnail"),
-        "latest_release_features": d.get("latest_release_features"),
-        "latest_release_track_count": d.get("latest_release_track_count") or d.get("track_count"),
-        "latest_release_duration": d.get("latest_release_duration") or d.get("duration"),
+        # Best-effort "latest" hints from the profile payload if present
+        "latest_release_date": d.get("last_modified") or d.get("created_at"),
+        "latest_release_url": None,
+        "latest_release_title": None,
+        "latest_release_type": "release",
+        "latest_release_cover": d.get("avatar_url"),
+        "latest_release_features": None,
+        "latest_release_track_count": None,
+        "latest_release_duration": None,
     }
     return normalized
+
+def get_soundcloud_last_release_date(artist_url: str) -> Optional[str]:
+    """Never raises; returns ISO date string or None."""
+    try:
+        url = normalize_profile_url(artist_url)
+        profile = get_artist_info(url)
+        d = profile if isinstance(profile, dict) else {}
+        dt = d.get("latest_release_date")
+        return dt if _is_non_empty_str(dt) else None
+    except Exception as e:
+        logging.debug(f"get_soundcloud_last_release_date fallback failed for {artist_url}: {e}")
+        return None
 
 def get_last_release_date(artist_url):
     cache_key = f"sc_last_release:{artist_url}"
@@ -1486,9 +1517,19 @@ def safe_get(url, headers=None, retries=3):
         return response
     return None
 
-def get_soundcloud_likes(artist_url):
-    """Backward-compatible wrapper returning likes list (uses likes_info)."""
-    return get_soundcloud_likes_info(artist_url)
+def get_soundcloud_likes(artist_url: str) -> List[Dict[str, Any]]:
+    """Wrapper returning likes as list; never raises."""
+    try:
+        return get_soundcloud_likes_info(artist_url, force_refresh=False) or []
+    except Exception:
+        return []
+
+def get_soundcloud_reposts(artist_url: str) -> List[Dict[str, Any]]:
+    """Wrapper returning reposts as list; never raises."""
+    try:
+        return get_soundcloud_reposts_info(artist_url, force_refresh=False) or []
+    except Exception:
+        return []
 
 RATE_LIMIT_DELAY = 5  # Delay in seconds between requests
 
@@ -1546,10 +1587,6 @@ def note_soundcloud_release_fetch(success: bool, context: str = ""):
         logging.debug(f"note_soundcloud_release_fetch error: {e}")
 
 # --- Missing simple wrappers expected by imports (provide lightweight adapters) ---
-
-def get_soundcloud_reposts(artist_url):
-    """Backward-compatible wrapper returning repost list (uses reposts_info)."""
-    return get_soundcloud_reposts_info(artist_url)
 
 def clear_cache(key):
     """Clear a specific cache key."""
