@@ -142,31 +142,36 @@ async def log_summary(total_checked, new_releases, errors):
 logger = logging.getLogger("release_checker")
 
 def parse_date(date_str: str) -> datetime:
-    """Handle multiple date formats consistently (normalized for ordering, not display).
-       Date-only values are anchored at 12:00 UTC (not 23:59:59) to avoid artificial 'future' drift."""
+    """Robust parsing for SC/Spotify dates. Never raises."""
     if not date_str:
         return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        # Pure date (YYYY-MM-DD)
-        if len(date_str) == 10 and date_str.count('-') == 2 and 'T' not in date_str:
-            dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
-            # Anchor at midday UTC so every timezone still maps to the same calendar date
+        # Normalize Z
+        ds = str(date_str).strip().replace('Z', '+00:00')
+        # Common ISO cases first
+        if len(ds) == 10 and ds.count('-') == 2 and 'T' not in ds:
+            dt = datetime.strptime(ds, '%Y-%m-%d').replace(tzinfo=timezone.utc)
             return dt + timedelta(hours=12)
-        if 'T' in date_str:
-            ds = date_str.replace('Z', '+00:00')
-            fmts = ['%Y-%m-%dT%H:%M:%S%z', '%Y-%m-%dT%H:%M:%S.%f%z']
-            for fmt in fmts:
-                try:
-                    return datetime.strptime(ds, fmt)
-                except ValueError:
-                    pass
-        # Fallback to dateutil
-        dt = isoparse(date_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception as e:
-        logging.error(f"Failed to parse date '{date_str}': {e}")
+        fmts = [
+            '%Y-%m-%dT%H:%M:%S%z',
+            '%Y-%m-%dT%H:%M:%S.%f%z',
+            '%Y/%m/%d %H:%M:%S %z',        # SC sometimes
+            '%Y-%m-%d %H:%M:%S%z',         # loose ISO
+        ]
+        for fmt in fmts:
+            try:
+                return datetime.strptime(ds, fmt)
+            except ValueError:
+                pass
+        # Final fallback to dateutil.parse
+        try:
+            dt = parse_datetime(ds)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    except Exception:
         return datetime.min.replace(tzinfo=timezone.utc)
 
 def _fmt_dt(dt_obj: datetime | None):
@@ -883,6 +888,15 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
     def _is_new(activity_dt, last_dt):
         return activity_dt and (last_dt is None or activity_dt > last_dt)
 
+    def _pick_date(d: dict, keys=('date','created_at','timestamp','liked_at','reposted_at','updated_at')) -> str | None:
+        if not isinstance(d, dict):
+            return None
+        for k in keys:
+            v = d.get(k)
+            if v:
+                return v
+        return None
+
     async def _check_one_soundcloud(artist):
         async with sem:
             try:
@@ -896,11 +910,11 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
                 logging.info(f"🟠 Checking {artist_name}")
 
-                # Force fresh where needed to avoid multi-cycle delays on active users
-                release_info = await run_blocking(get_soundcloud_release_info, artist_url, True)
-                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url, True)
-                likes_items = await run_blocking(get_soundcloud_likes, artist_url, True)
-                repost_items = await run_blocking(get_soundcloud_reposts, artist_url, True)
+                # Fetch all four categories (profile URL)
+                release_info = await run_blocking(get_soundcloud_release_info, artist_url)
+                playlist_info = await run_blocking(get_soundcloud_playlist_info, artist_url)
+                likes_items = await run_blocking(get_soundcloud_likes, artist_url)
+                repost_items = await run_blocking(get_soundcloud_reposts, artist_url)
 
                 # Last stored dates
                 last_release_dt = parse_date(artist.get('last_release_date')) if artist.get('last_release_date') else None
@@ -908,37 +922,58 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                 last_like_dt = parse_date(artist.get('last_like_date')) if artist.get('last_like_date') else None
                 last_repost_dt = parse_date(artist.get('last_repost_date')) if artist.get('last_repost_date') else None
 
-                # Releases
+                # Releases (fallback if helper didn’t return date)
+                if not (release_info and release_info.get('release_date')):
+                    try:
+                        fallback_dt = await run_blocking(get_soundcloud_last_release_date, artist_url)
+                    except Exception:
+                        fallback_dt = None
+                    if fallback_dt:
+                        release_info = {
+                            'artist_name': artist_name,
+                            'title': 'New Release',
+                            'url': artist_url,
+                            'release_date': fallback_dt,
+                            'cover_url': None,
+                            'features': None,
+                            'track_count': None,
+                            'duration': None,
+                            'genres': [],
+                            'type': 'release'
+                        }
+
                 if release_info and release_info.get('release_date'):
                     rel_dt = parse_date(release_info['release_date'])
+                    logging.debug(f"    Latest release={release_info.get('release_date')} vs last={artist.get('last_release_date')}")
                     if _is_new(rel_dt, last_release_dt):
                         await handle_release(bot, artist, release_info, release_info.get('type') or 'release')
                         update_last_release_date(artist_id, owner_id, guild_id, release_info['release_date'])
                         counts['releases'] += 1
 
-                # Playlists
-                if playlist_info and playlist_info.get('release_date'):
-                    # playlist_info from soundcloud_utils uses 'release_date' for playlist created_at
-                    pl_dt = parse_date(playlist_info['release_date'])
-                    if _is_new(pl_dt, last_playlist_dt) and not is_already_posted_playlist(artist_id, guild_id, playlist_info.get('url')):
+                # Playlists (support last_updated or release_date)
+                if playlist_info:
+                    pl_raw = playlist_info.get('last_updated') or playlist_info.get('release_date')
+                    pl_dt = parse_date(pl_raw) if pl_raw else None
+                    logging.debug(f"    Latest playlist={pl_raw} vs last={artist.get('last_playlist_date')}")
+                    if pl_dt and _is_new(pl_dt, last_playlist_dt) and not is_already_posted_playlist(artist_id, guild_id, playlist_info.get('url')):
                         await check_for_playlist_changes(bot, artist, {
                             "title": playlist_info.get("title"),
                             "url": playlist_info.get("url"),
-                            "last_updated": playlist_info.get("release_date"),
+                            "last_updated": pl_raw,
                             "tracks": playlist_info.get("tracks") or [],
                             "cover_url": playlist_info.get("cover_url")
                         })
-                        update_last_playlist_date(artist_id, guild_id, playlist_info['release_date'])
+                        update_last_playlist_date(artist_id, guild_id, pl_raw)
                         mark_posted_playlist(artist_id, guild_id, playlist_info.get('url'))
                         counts['playlists'] += 1
 
                 # Likes
                 if isinstance(likes_items, list) and likes_items:
-                    latest_like_date = None
                     try:
-                        latest_like_date = max((item.get('liked_date') or item.get('date') for item in likes_items if isinstance(item, dict)), default=None)
+                        latest_like_date = max((_pick_date(x) for x in likes_items), key=lambda s: parse_date(s) if s else datetime.min.replace(tzinfo=timezone.utc))
                     except Exception:
-                        pass
+                        latest_like_date = None
+                    logging.debug(f"    Latest like={latest_like_date} vs last={artist.get('last_like_date')}")
                     like_dt = parse_date(latest_like_date) if latest_like_date else None
                     if _is_new(like_dt, last_like_dt):
                         like_embed = create_like_embed(platform='soundcloud', artist_name=artist_name, items=likes_items)
@@ -951,11 +986,11 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
 
                 # Reposts
                 if isinstance(repost_items, list) and repost_items:
-                    latest_repost_date = None
                     try:
-                        latest_repost_date = max((item.get('reposted_date') or item.get('date') for item in repost_items if isinstance(item, dict)), default=None)
+                        latest_repost_date = max((_pick_date(x) for x in repost_items), key=lambda s: parse_date(s) if s else datetime.min.replace(tzinfo=timezone.utc))
                     except Exception:
-                        pass
+                        latest_repost_date = None
+                    logging.debug(f"    Latest repost={latest_repost_date} vs last={artist.get('last_repost_date')}")
                     repost_dt = parse_date(latest_repost_date) if latest_repost_date else None
                     if _is_new(repost_dt, last_repost_dt):
                         repost_embed = create_repost_embed(platform='soundcloud', artist_name=artist_name, items=repost_items)
@@ -974,7 +1009,6 @@ async def check_soundcloud_updates(bot, artists, shutdown_time=None, is_catchup:
                     update_last_release_check(artist.get('artist_id'), artist.get('owner_id'), artist.get('guild_id'), batch_check_time)
                 except Exception:
                     pass
-
     tasks = [asyncio.create_task(_check_one_soundcloud(a)) for a in artists if a.get('platform') == 'soundcloud']
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
